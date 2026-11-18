@@ -8,7 +8,15 @@ import { AlertsView } from './components/AlertsView';
 import { SetupView } from './components/SetupView';
 import { SettingsView } from './components/SettingsView';
 import { FlowInspectorDrawer } from './components/FlowInspectorDrawer';
-import { THEMES, applyThemeToDocument, type ThemeId } from './lib/themes';
+import {
+  THEMES,
+  applyThemeToDocument,
+  getSystemPrefersDark,
+  normalizeThemeSetting,
+  resolveThemeId,
+  type ThemeId,
+  type ThemeSetting,
+} from './lib/themes';
 import {
   ALL_TIME_WINDOWS,
   analyzeTimeWindow,
@@ -30,10 +38,26 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
 
-  const [themeId, setThemeId] = useState<ThemeId>(() => {
+  const [themeSetting, setThemeSetting] = useState<ThemeSetting>(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('orbiflow:theme') : null;
-    return saved && saved in THEMES ? (saved as ThemeId) : 'obsidian';
+    return normalizeThemeSetting(saved);
   });
+
+  const [autoDarkTheme, setAutoDarkTheme] = useState<ThemeId>(() => {
+    const saved =
+      typeof window !== 'undefined' ? localStorage.getItem('orbiflow:autoDarkTheme') : null;
+    const normalized = normalizeThemeSetting(saved);
+    return normalized !== 'auto' && THEMES[normalized]?.isDark ? normalized : 'obsidian';
+  });
+
+  const [autoLightTheme, setAutoLightTheme] = useState<ThemeId>(() => {
+    const saved =
+      typeof window !== 'undefined' ? localStorage.getItem('orbiflow:autoLightTheme') : null;
+    const normalized = normalizeThemeSetting(saved);
+    return normalized !== 'auto' && !THEMES[normalized]?.isDark ? normalized : 'daylight';
+  });
+
+  const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() => getSystemPrefersDark());
 
   const [unit, setUnit] = useState<BandwidthUnit>(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('orbiflow:unit') : null;
@@ -46,10 +70,37 @@ export default function App() {
   const [flowSearchSeed, setFlowSearchSeed] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  const effectiveThemeId = resolveThemeId(
+    themeSetting,
+    systemPrefersDark,
+    autoDarkTheme,
+    autoLightTheme
+  );
+
   useEffect(() => {
-    applyThemeToDocument(themeId);
-    localStorage.setItem('orbiflow:theme', themeId);
-  }, [themeId]);
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    setSystemPrefersDark(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setSystemPrefersDark(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  useEffect(() => {
+    applyThemeToDocument(effectiveThemeId);
+  }, [effectiveThemeId]);
+
+  useEffect(() => {
+    localStorage.setItem('orbiflow:theme', themeSetting);
+  }, [themeSetting]);
+
+  useEffect(() => {
+    localStorage.setItem('orbiflow:autoDarkTheme', autoDarkTheme);
+  }, [autoDarkTheme]);
+
+  useEffect(() => {
+    localStorage.setItem('orbiflow:autoLightTheme', autoLightTheme);
+  }, [autoLightTheme]);
 
   useEffect(() => {
     localStorage.setItem('orbiflow:unit', unit);
@@ -223,7 +274,7 @@ export default function App() {
     return Object.fromEntries(entries) as Record<TimeWindow, TimeWindowAnalysis>;
   }, [snapshot?.history, snapshot?.rollupHistory, nowTick]);
 
-  const activeTheme = THEMES[themeId] || THEMES.obsidian;
+  const activeTheme = THEMES[effectiveThemeId] || THEMES.obsidian;
 
   if (!snapshot) {
     return (
@@ -253,8 +304,10 @@ export default function App() {
         probe={snapshot.probe}
         wsConnected={wsConnected}
         unackAlerts={unackAlerts}
-        themeId={themeId}
-        onChangeTheme={setThemeId}
+        themeSetting={themeSetting}
+        effectiveThemeId={effectiveThemeId}
+        systemPrefersDark={systemPrefersDark}
+        onChangeThemeSetting={setThemeSetting}
         unit={unit}
         onChangeUnit={setUnit}
         onToggleSimulator={handleToggleSimulator}
@@ -330,6 +383,14 @@ export default function App() {
               serverStats={snapshot.serverStats}
               onSaveSettings={handleSaveSettings}
               onClearRdnsCache={handleClearRdnsCache}
+              themeSetting={themeSetting}
+              effectiveThemeId={effectiveThemeId}
+              systemPrefersDark={systemPrefersDark}
+              autoDarkTheme={autoDarkTheme}
+              autoLightTheme={autoLightTheme}
+              onChangeThemeSetting={setThemeSetting}
+              onChangeAutoDarkTheme={setAutoDarkTheme}
+              onChangeAutoLightTheme={setAutoLightTheme}
             />
           )}
         </main>

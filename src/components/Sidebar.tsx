@@ -11,7 +11,13 @@ import {
   X,
 } from 'lucide-react';
 import type { BandwidthUnit, ProbeStatus } from '../types/telemetry';
-import { THEMES, type ThemeId } from '../lib/themes';
+import {
+  DARK_THEMES,
+  LIGHT_THEMES,
+  THEMES,
+  type ThemeId,
+  type ThemeSetting,
+} from '../lib/themes';
 import { formatDuration } from '../lib/formatters';
 
 export type NavTab = 'overview' | 'flows' | 'hosts' | 'alerts' | 'setup' | 'settings';
@@ -22,8 +28,10 @@ interface SidebarProps {
   probe: ProbeStatus;
   wsConnected: boolean;
   unackAlerts: number;
-  themeId: ThemeId;
-  onChangeTheme: (id: ThemeId) => void;
+  themeSetting: ThemeSetting;
+  effectiveThemeId: ThemeId;
+  systemPrefersDark: boolean;
+  onChangeThemeSetting: (setting: ThemeSetting) => void;
   unit: BandwidthUnit;
   onChangeUnit: (u: BandwidthUnit) => void;
   onToggleSimulator: (enabled: boolean) => void;
@@ -46,8 +54,10 @@ export function Sidebar({
   probe,
   wsConnected,
   unackAlerts,
-  themeId,
-  onChangeTheme,
+  themeSetting,
+  effectiveThemeId,
+  systemPrefersDark,
+  onChangeThemeSetting,
   unit,
   onChangeUnit,
   onToggleSimulator,
@@ -134,24 +144,46 @@ export function Sidebar({
         {/* Display Preferences: Theme & Bandwidth Unit */}
         <div className="pt-4 mt-4 border-t app-border px-1 space-y-3">
           <div className="space-y-1.5">
-            <label
-              htmlFor="theme-select"
-              className="flex items-center gap-1.5 text-xs font-medium app-text-muted"
-            >
-              <Palette className="h-3.5 w-3.5" aria-hidden="true" />
-              Theme
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="theme-select"
+                className="flex items-center gap-1.5 text-xs font-medium app-text-muted"
+              >
+                <Palette className="h-3.5 w-3.5" aria-hidden="true" />
+                Theme
+              </label>
+              {themeSetting === 'auto' && (
+                <span
+                  data-testid="auto-theme-resolved"
+                  className="text-[11px] font-mono app-text-muted truncate"
+                >
+                  {THEMES[effectiveThemeId].label}
+                </span>
+              )}
+            </div>
             <select
               id="theme-select"
-              value={themeId}
-              onChange={(e) => onChangeTheme(e.target.value as ThemeId)}
+              value={themeSetting}
+              onChange={(e) => onChangeThemeSetting(e.target.value as ThemeSetting)}
               className="w-full app-input border rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
             >
-              {Object.values(THEMES).map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.label}
-                </option>
-              ))}
+              <option value="auto">
+                Auto (System · {systemPrefersDark ? 'Dark' : 'Light'})
+              </option>
+              <optgroup label="Dark Themes">
+                {DARK_THEMES.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Light Themes">
+                {LIGHT_THEMES.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </optgroup>
             </select>
           </div>
 

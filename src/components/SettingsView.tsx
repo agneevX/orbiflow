@@ -1,13 +1,28 @@
 import { useEffect, useState } from 'react';
-import { Check, Database, Globe, Trash2 } from 'lucide-react';
+import { Check, Database, Globe, Monitor, Trash2 } from 'lucide-react';
 import type { PersistenceMode, ServerConfig, ServerStats } from '../types/telemetry';
 import { formatBytes } from '../lib/formatters';
+import {
+  DARK_THEMES,
+  LIGHT_THEMES,
+  THEMES,
+  type ThemeId,
+  type ThemeSetting,
+} from '../lib/themes';
 
 interface SettingsViewProps {
   serverConfig: ServerConfig;
   serverStats: ServerStats;
   onSaveSettings: (cfg: Partial<ServerConfig>) => Promise<void>;
   onClearRdnsCache: () => Promise<void>;
+  themeSetting: ThemeSetting;
+  effectiveThemeId: ThemeId;
+  systemPrefersDark: boolean;
+  autoDarkTheme: ThemeId;
+  autoLightTheme: ThemeId;
+  onChangeThemeSetting: (setting: ThemeSetting) => void;
+  onChangeAutoDarkTheme: (id: ThemeId) => void;
+  onChangeAutoLightTheme: (id: ThemeId) => void;
 }
 
 export function SettingsView({
@@ -15,6 +30,14 @@ export function SettingsView({
   serverStats,
   onSaveSettings,
   onClearRdnsCache,
+  themeSetting,
+  effectiveThemeId,
+  systemPrefersDark,
+  autoDarkTheme,
+  autoLightTheme,
+  onChangeThemeSetting,
+  onChangeAutoDarkTheme,
+  onChangeAutoLightTheme,
 }: SettingsViewProps) {
   const [persistenceMode, setPersistenceMode] = useState<PersistenceMode>(
     serverConfig.persistenceMode
@@ -192,6 +215,96 @@ export function SettingsView({
           {saving ? 'Saving Settings...' : 'Save Server Settings'}
         </button>
       </div>
+
+      {/* Browser Appearance & Auto System Theme Pairing */}
+      <section className="app-surface border rounded-lg p-5 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+              <Monitor className="h-4 w-4 text-sky-500" aria-hidden="true" />
+              Appearance &amp; Auto System Theme
+            </h2>
+            <p className="text-xs app-text-muted mt-1">
+              Automatically follow your OS dark/light preference or lock to a specific palette. Currently active:{' '}
+              <span className="font-medium app-text-secondary">
+                {THEMES[effectiveThemeId].label}
+              </span>
+              {themeSetting === 'auto'
+                ? ` (System ${systemPrefersDark ? 'Dark' : 'Light'})`
+                : ' (Manual)'}
+              .
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="settings-theme-mode" className="block text-xs font-medium">
+              Theme Mode
+            </label>
+            <select
+              id="settings-theme-mode"
+              value={themeSetting}
+              onChange={(e) => onChangeThemeSetting(e.target.value as ThemeSetting)}
+              className="w-full app-input border rounded-md px-2.5 py-2 text-xs focus:outline-none focus:border-sky-500"
+            >
+              <option value="auto">
+                Auto (System · {systemPrefersDark ? 'Dark' : 'Light'})
+              </option>
+              <optgroup label="Dark Themes">
+                {DARK_THEMES.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Light Themes">
+                {LIGHT_THEMES.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="auto-dark-theme" className="block text-xs font-medium">
+              Auto Dark Palette
+            </label>
+            <select
+              id="auto-dark-theme"
+              value={autoDarkTheme}
+              onChange={(e) => onChangeAutoDarkTheme(e.target.value as ThemeId)}
+              className="w-full app-input border rounded-md px-2.5 py-2 text-xs focus:outline-none focus:border-sky-500"
+            >
+              {DARK_THEMES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="auto-light-theme" className="block text-xs font-medium">
+              Auto Light Palette
+            </label>
+            <select
+              id="auto-light-theme"
+              value={autoLightTheme}
+              onChange={(e) => onChangeAutoLightTheme(e.target.value as ThemeId)}
+              className="w-full app-input border rounded-md px-2.5 py-2 text-xs focus:outline-none focus:border-sky-500"
+            >
+              {LIGHT_THEMES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </section>
     </form>
   );
 }
