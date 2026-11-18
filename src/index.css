@@ -1,0 +1,156 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root,
+  html[data-theme="obsidian"] {
+    --font-display: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+    --font-sans: "Public Sans", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+    --bg-canvas: #0b0f17;
+    --bg-surface: #111827;
+    --bg-sidebar: #0f1520;
+    --bg-input: #0b0f17;
+    --bg-hover: rgba(30, 41, 59, 0.55);
+    --border-hairline: #1e293b;
+    --text-primary: #f8fafc;
+    --text-secondary: #cbd5e1;
+    --text-muted: #94a3b8;
+    --accent-rx: #38bdf8;
+    --accent-tx: #34d399;
+    --accent-primary: #38bdf8;
+    --accent-primary-ink: #082f49;
+    color-scheme: dark;
+  }
+
+  html[data-theme="amber"] {
+    --bg-canvas: #11100e;
+    --bg-surface: #1a1815;
+    --bg-sidebar: #161411;
+    --bg-input: #11100e;
+    --bg-hover: rgba(68, 64, 60, 0.45);
+    --border-hairline: #2e2923;
+    --text-primary: #fafaf9;
+    --text-secondary: #e7e5e4;
+    --text-muted: #a8a29e;
+    --accent-rx: #f59e0b;
+    --accent-tx: #2dd4bf;
+    --accent-primary: #f59e0b;
+    --accent-primary-ink: #1c1917;
+    color-scheme: dark;
+  }
+
+  html[data-theme="nordic"] {
+    --bg-canvas: #0d1526;
+    --bg-surface: #131f36;
+    --bg-sidebar: #101a2e;
+    --bg-input: #0b1220;
+    --bg-hover: rgba(51, 65, 85, 0.5);
+    --border-hairline: #233554;
+    --text-primary: #f1f5f9;
+    --text-secondary: #cbd5e1;
+    --text-muted: #94a3b8;
+    --accent-rx: #60a5fa;
+    --accent-tx: #4ade80;
+    --accent-primary: #60a5fa;
+    --accent-primary-ink: #082f49;
+    color-scheme: dark;
+  }
+
+  html[data-theme="daylight"] {
+    --bg-canvas: #f4f6f9;
+    --bg-surface: #ffffff;
+    --bg-sidebar: #eef2f6;
+    --bg-input: #f8fafc;
+    --bg-hover: rgba(226, 232, 240, 0.7);
+    --border-hairline: #dbe2ea;
+    --text-primary: #0f172a;
+    --text-secondary: #334155;
+    --text-muted: #64748b;
+    --accent-rx: #0284c7;
+    --accent-tx: #059669;
+    --accent-primary: #0284c7;
+    --accent-primary-ink: #ffffff;
+    color-scheme: light;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+  }
+
+  body {
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+  }
+
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.app-canvas {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.app-surface {
+  background-color: var(--bg-surface);
+  border-color: var(--border-hairline);
+}
+
+.app-sidebar {
+  background-color: var(--bg-sidebar);
+  border-color: var(--border-hairline);
+}
+
+.app-input {
+  background-color: var(--bg-input);
+  border-color: var(--border-hairline);
+  color: var(--text-primary);
+}
+
+.app-border {
+  border-color: var(--border-hairline);
+}
+
+.app-text-muted {
+  color: var(--text-muted);
+}
+
+.app-text-secondary {
+  color: var(--text-secondary);
+}
+
+.app-row-hover:hover {
+  background-color: var(--bg-hover);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.28);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.44);
+}

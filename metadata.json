@@ -1,0 +1,8 @@
+{
+  "name": "OrbiFlow — RBK50 Real-Time WAN Monitor",
+  "description": "Lightweight ntop-style network telemetry and bandwidth analysis dashboard for Netgear Orbi RBK50 (Voxel Firmware) with WebSocket streaming and Docker deployment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,22 @@
+services:
+  orbiflow:
+    build: .
+    container_name: orbiflow-monitor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - ORBIFLOW_PROBE_TOKEN=orbi-rbk50-voxel-secret
+      - ORBIFLOW_ENABLE_SIMULATOR=false
+      - ORBIFLOW_STORAGE_MODE=disk
+      - ORBIFLOW_RDNS_ENABLED=false
+      - ORBIFLOW_RDNS_TTL=3600
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
