@@ -21,7 +21,6 @@ import os
 import socket
 import struct
 import time
-from urllib.parse import urlparse
 
 WS_URL = "${cfg.wsUrl}"
 AUTH_TOKEN = "${cfg.token}"
@@ -198,13 +197,42 @@ def read_system_metrics(flow_count):
     }
 
 
+def parse_ws_url(url):
+    scheme = "ws"
+    rest = url.strip()
+    if "://" in rest:
+        scheme, rest = rest.split("://", 1)
+    scheme = scheme.lower()
+    if "/" in rest:
+        netloc, path_part = rest.split("/", 1)
+        path = "/" + path_part
+    else:
+        netloc = rest
+        path = "/"
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[1]
+    default_port = 443 if scheme == "wss" else 80
+    if netloc.startswith("[") and "]" in netloc:
+        end_bracket = netloc.find("]")
+        host = netloc[1:end_bracket]
+        port_part = netloc[end_bracket + 1:]
+        port = int(port_part[1:]) if port_part.startswith(":") and port_part[1:] else default_port
+    elif ":" in netloc:
+        host, port_str = netloc.rsplit(":", 1)
+        port = int(port_str) if port_str else default_port
+    else:
+        host = netloc
+        port = default_port
+    return scheme, host, port, path
+
+
 class MiniWebSocket:
     def __init__(self, url, token):
-        parsed = urlparse(url)
-        self.host = parsed.hostname
-        self.port = parsed.port or (443 if parsed.scheme == "wss" else 80)
-        self.path = parsed.path or "/"
-        self.use_tls = parsed.scheme == "wss"
+        scheme, host, port, path = parse_ws_url(url)
+        self.host = host
+        self.port = port
+        self.path = path
+        self.use_tls = scheme == "wss"
         self.token = token
         self.sock = None
 
@@ -215,9 +243,10 @@ class MiniWebSocket:
             ctx = ssl.create_default_context()
             raw = ctx.wrap_socket(raw, server_hostname=self.host)
         key = base64.b64encode(os.urandom(16)).decode()
+        host_header = f"[{self.host}]:{self.port}" if ":" in self.host else f"{self.host}:{self.port}"
         req = (
             f"GET {self.path} HTTP/1.1\\r\\n"
-            f"Host: {self.host}:{self.port}\\r\\n"
+            f"Host: {host_header}\\r\\n"
             "Upgrade: websocket\\r\\n"
             "Connection: Upgrade\\r\\n"
             f"Sec-WebSocket-Key: {key}\\r\\n"
@@ -228,7 +257,8 @@ class MiniWebSocket:
         resp = raw.recv(4096).decode(errors="ignore")
         if "101 Switching Protocols" not in resp:
             raw.close()
-            raise ConnectionError(f"WebSocket handshake failed: {resp.splitlines()[0]}")
+            first_line = resp.splitlines()[0] if resp.splitlines() else "empty response"
+            raise ConnectionError(f"WebSocket handshake failed: {first_line}")
         self.sock = raw
 
     def send_json(self, obj):

@@ -191,7 +191,7 @@ test('PersistenceStore saves user config in configDir and supports changing cach
   }
 });
 
-import { generateDockerCompose } from './probeTemplates';
+import { generateDockerCompose, generatePythonProbe } from './probeTemplates';
 
 test('generateDockerCompose only includes PUID, PGID, and TZ environment variables', () => {
   const yaml = generateDockerCompose();
@@ -201,5 +201,18 @@ test('generateDockerCompose only includes PUID, PGID, and TZ environment variabl
   assert.ok(!yaml.includes('ORBIFLOW_'));
   assert.ok(!yaml.includes('NODE_ENV'));
   assert.ok(!yaml.includes('PORT='));
+});
+
+test('generatePythonProbe avoids urllib so it runs on Entware python3-light', () => {
+  const py = generatePythonProbe({
+    wsUrl: 'ws://192.168.1.10:3000/ws/ingest',
+    httpUrl: 'http://192.168.1.10:3000/api/ingest',
+    token: 'test-token',
+    iface: 'eth0',
+    intervalSec: 5,
+    probeId: 'orbi-rbk50-eth0',
+  });
+  assert.ok(!py.includes('urllib'));
+  assert.ok(py.includes('def parse_ws_url('));
 });
 

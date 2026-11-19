@@ -2,7 +2,7 @@
 """
 OrbiFlow Lightweight Telemetry Probe for Netgear Orbi RBK50 (Voxel Firmware)
 Target: Linux orbi-gateway 3.14.77 armv7l IPQ4019 GNU/Linux
-Requires only Python 3 stdlib (python3-light on Entware) — zero pip packages.
+Requires only Python 3 core stdlib (python3-light on Entware) — zero urllib or pip packages.
 """
 import base64
 import json
@@ -10,7 +10,6 @@ import os
 import socket
 import struct
 import time
-from urllib.parse import urlparse
 
 WS_URL = os.environ.get("ORBIFLOW_WS_URL", "ws://192.168.1.10:3000/ws/ingest")
 AUTH_TOKEN = os.environ.get("ORBIFLOW_PROBE_TOKEN", "orbi-rbk50-voxel-secret")
@@ -56,9 +55,73 @@ def read_iface_counters(iface):
     }
 
 
+def discover_dnsmasq_files():
+    lease_paths = [
+        "/tmp/dhcp.leases",
+        "/tmp/udhcpd.leases",
+        "/var/run/dnsmasq.leases",
+        "/opt/var/lib/misc/dnsmasq.leases",
+    ]
+    hosts_paths = ["/etc/hosts"]
+    static_hosts = {}
+    conf_files = [
+        "/etc/dnsmasq.conf",
+        "/opt/etc/dnsmasq.conf",
+        "/tmp/etc/dnsmasq.conf",
+    ]
+    for conf_dir in ("/etc/dnsmasq.d", "/opt/etc/dnsmasq.d"):
+        try:
+            for name in sorted(os.listdir(conf_dir)):
+                if name.endswith(".conf"):
+                    conf_files.append(os.path.join(conf_dir, name))
+        except OSError:
+            pass
+
+    for cpath in conf_files:
+        for raw in read_text(cpath).splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("dhcp-leasefile="):
+                lp = line.split("=", 1)[1].strip()
+                if lp and lp not in lease_paths:
+                    lease_paths.insert(0, lp)
+            elif line.startswith("addn-hosts="):
+                hp = line.split("=", 1)[1].strip()
+                if hp and hp not in hosts_paths:
+                    hosts_paths.append(hp)
+            elif line.startswith("dhcp-host="):
+                tokens = [t.strip() for t in line.split("=", 1)[1].split(",") if t.strip()]
+                ip_val = None
+                host_val = None
+                for tok in tokens:
+                    if tok.count(".") == 3 and all(p.isdigit() for p in tok.split(".")):
+                        ip_val = tok
+                    elif (
+                        ":" not in tok
+                        and not tok.startswith("set:")
+                        and not tok.startswith("tag:")
+                        and not tok.startswith("id:")
+                        and tok not in ("infinite", "ignore")
+                        and not tok[0].isdigit()
+                    ):
+                        host_val = tok
+                if ip_val and host_val:
+                    static_hosts[ip_val] = host_val
+    return lease_paths, hosts_paths, static_hosts
+
+
 def read_dhcp_leases():
     leases = {}
-    for path in ("/tmp/dhcp.leases", "/tmp/udhcpd.leases", "/var/run/dnsmasq.leases"):
+    lease_paths, hosts_paths, static_hosts = discover_dnsmasq_files()
+    for hpath in hosts_paths:
+        for line in read_text(hpath).splitlines():
+            clean = line.split("#", 1)[0].strip()
+            parts = clean.split()
+            if len(parts) >= 2 and parts[0].count(".") == 3 and not parts[0].startswith("127."):
+                leases[parts[0]] = parts[1]
+    leases.update(static_hosts)
+    for path in lease_paths:
         content = read_text(path)
         if not content:
             continue
@@ -67,26 +130,26 @@ def read_dhcp_leases():
             if len(parts) >= 4:
                 ip = parts[2]
                 host = parts[3]
-                if host != "*":
+                if host != "*" and host != ip:
                     leases[ip] = host
     return leases
 
 
 def read_arp_table(leases):
-    entries = []
+    entries_by_ip = {}
     content = read_text("/proc/net/arp")
     for line in content.splitlines()[1:]:
         parts = line.split()
         if len(parts) >= 6:
             ip, _, flags, mac, _, dev = parts[:6]
             if flags != "0x0" and mac != "00:00:00:00:00:00":
-                entries.append({
+                entries_by_ip[ip] = {
                     "ip": ip,
-                    "mac": mac,
+                    "mac": mac.lower(),
                     "device": dev,
-                    "hostname": leases.get(ip, ip),
-                })
-    return entries
+                    "hostname": leases.get(ip, ""),
+                }
+    return list(entries_by_ip.values())
 
 
 def read_conntrack_lines(limit=350):
@@ -128,13 +191,42 @@ def read_system_metrics(flow_count):
     }
 
 
+def parse_ws_url(url):
+    scheme = "ws"
+    rest = url.strip()
+    if "://" in rest:
+        scheme, rest = rest.split("://", 1)
+    scheme = scheme.lower()
+    if "/" in rest:
+        netloc, path_part = rest.split("/", 1)
+        path = "/" + path_part
+    else:
+        netloc = rest
+        path = "/"
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[1]
+    default_port = 443 if scheme == "wss" else 80
+    if netloc.startswith("[") and "]" in netloc:
+        end_bracket = netloc.find("]")
+        host = netloc[1:end_bracket]
+        port_part = netloc[end_bracket + 1:]
+        port = int(port_part[1:]) if port_part.startswith(":") and port_part[1:] else default_port
+    elif ":" in netloc:
+        host, port_str = netloc.rsplit(":", 1)
+        port = int(port_str) if port_str else default_port
+    else:
+        host = netloc
+        port = default_port
+    return scheme, host, port, path
+
+
 class MiniWebSocket:
     def __init__(self, url, token):
-        parsed = urlparse(url)
-        self.host = parsed.hostname
-        self.port = parsed.port or (443 if parsed.scheme == "wss" else 80)
-        self.path = parsed.path or "/"
-        self.use_tls = parsed.scheme == "wss"
+        scheme, host, port, path = parse_ws_url(url)
+        self.host = host
+        self.port = port
+        self.path = path
+        self.use_tls = scheme == "wss"
         self.token = token
         self.sock = None
 
@@ -145,9 +237,10 @@ class MiniWebSocket:
             ctx = ssl.create_default_context()
             raw = ctx.wrap_socket(raw, server_hostname=self.host)
         key = base64.b64encode(os.urandom(16)).decode()
+        host_header = f"[{self.host}]:{self.port}" if ":" in self.host else f"{self.host}:{self.port}"
         req = (
             f"GET {self.path} HTTP/1.1\r\n"
-            f"Host: {self.host}:{self.port}\r\n"
+            f"Host: {host_header}\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\n"
@@ -158,7 +251,8 @@ class MiniWebSocket:
         resp = raw.recv(4096).decode(errors="ignore")
         if "101 Switching Protocols" not in resp:
             raw.close()
-            raise ConnectionError(f"WebSocket handshake failed: {resp.splitlines()[0]}")
+            first_line = resp.splitlines()[0] if resp.splitlines() else "empty response"
+            raise ConnectionError(f"WebSocket handshake failed: {first_line}")
         self.sock = raw
 
     def send_json(self, obj):
