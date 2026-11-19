@@ -17,20 +17,27 @@ RUN npm run build && \
 FROM node:22-alpine AS runner
 WORKDIR /app
 
-ENV NODE_ENV=production
-ENV PORT=3000
-ENV ORBIFLOW_CONFIG_DIR=/config
-ENV ORBIFLOW_CACHE_DIR=/config/cache
-ENV ORBIFLOW_GEOIP_DIR=/config/geoip
+ENV PUID=1000
+ENV PGID=1000
+ENV TZ=UTC
+
+RUN apk add --no-cache su-exec tzdata && \
+  deluser --remove-home node 2>/dev/null || true && \
+  delgroup node 2>/dev/null || true && \
+  addgroup -g 1000 -S orbiflow && \
+  adduser -u 1000 -S -D -H -h /app -s /sbin/nologin -G orbiflow orbiflow
 
 COPY package.json ./
-RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws', 'dotenv', 'maxmind'].map((k) => k + '@' + d[k]).join(' '));" \
+RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws', 'maxmind'].map((k) => k + '@' + d[k]).join(' '));" \
   | xargs npm install --no-save --no-audit --no-fund && \
   rm -f package.json package-lock.json && \
-  mkdir -p /config/cache /config/geoip
+  mkdir -p /config/cache /config/geoip && \
+  chown -R orbiflow:orbiflow /config
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.mjs ./server.mjs
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 3000
 VOLUME ["/config"]
@@ -38,4 +45,5 @@ VOLUME ["/config"]
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "server.mjs"]
