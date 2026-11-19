@@ -6,6 +6,7 @@ import {
   FolderOpen,
   Globe,
   MapPin,
+  Network,
   RefreshCw,
   Trash2,
   Upload,
@@ -19,6 +20,7 @@ interface SettingsViewProps {
   serverStats: ServerStats;
   onSaveSettings: (cfg: Partial<ServerConfig>) => Promise<void>;
   onClearRdnsCache: () => Promise<void>;
+  onClearLanDnsCache: () => Promise<void>;
   onReloadGeoip: () => Promise<void>;
   onUploadGeoip: (file: File) => Promise<{ ok: boolean; message: string }>;
 }
@@ -28,6 +30,7 @@ export function SettingsView({
   serverStats,
   onSaveSettings,
   onClearRdnsCache,
+  onClearLanDnsCache,
   onReloadGeoip,
   onUploadGeoip,
 }: SettingsViewProps) {
@@ -40,6 +43,10 @@ export function SettingsView({
   const [rdnsEnabled, setRdnsEnabled] = useState(serverConfig.rdnsEnabled);
   const [rdnsTtlSec, setRdnsTtlSec] = useState(serverConfig.rdnsTtlSec);
   const [rdnsSkipPrivate, setRdnsSkipPrivate] = useState(serverConfig.rdnsSkipPrivate);
+  const [lanDnsEnabled, setLanDnsEnabled] = useState(serverConfig.lanDnsEnabled ?? true);
+  const [lanDnsServer, setLanDnsServer] = useState(serverConfig.lanDnsServer ?? '');
+  const [lanDnsTtlSec, setLanDnsTtlSec] = useState(serverConfig.lanDnsTtlSec ?? 300);
+  const [stripLanDomain, setStripLanDomain] = useState(serverConfig.stripLanDomain ?? true);
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
   const [geoipNotice, setGeoipNotice] = useState<{ ok: boolean; text: string } | null>(null);
@@ -55,6 +62,10 @@ export function SettingsView({
     setRdnsEnabled(serverConfig.rdnsEnabled);
     setRdnsTtlSec(serverConfig.rdnsTtlSec);
     setRdnsSkipPrivate(serverConfig.rdnsSkipPrivate);
+    setLanDnsEnabled(serverConfig.lanDnsEnabled ?? true);
+    setLanDnsServer(serverConfig.lanDnsServer ?? '');
+    setLanDnsTtlSec(serverConfig.lanDnsTtlSec ?? 300);
+    setStripLanDomain(serverConfig.stripLanDomain ?? true);
   }, [serverConfig]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -69,6 +80,10 @@ export function SettingsView({
         rdnsEnabled,
         rdnsTtlSec: Math.max(60, Number(rdnsTtlSec) || 3600),
         rdnsSkipPrivate,
+        lanDnsEnabled,
+        lanDnsServer: lanDnsServer.trim(),
+        lanDnsTtlSec: Math.max(30, Number(lanDnsTtlSec) || 300),
+        stripLanDomain,
       });
       setSavedNotice('Settings saved to configuration file');
       setTimeout(() => setSavedNotice(''), 2500);
@@ -344,6 +359,113 @@ export function SettingsView({
           </div>
         </section>
       </div>
+
+      {/* Local Device Name Resolution (LAN DNS / Custom dnsmasq) */}
+      <section
+        data-testid="lan-dns-settings-card"
+        className="app-surface border rounded-2xl p-5 space-y-4"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+              <Network className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+              <span>
+                Local Device Resolution (
+                <TechTerm
+                  label="LAN PTR / dnsmasq"
+                  tip="Performs reverse PTR lookups exclusively for local private IPs (RFC1918) against your separate LAN DNS server (e.g. Pi-hole / AdGuard) or router dnsmasq, completely independent of external internet rDNS."
+                />
+                )
+              </span>
+            </h2>
+            <p className="text-xs app-text-muted mt-1">
+              Resolves local device names using reverse lookups against your separate LAN DNS
+              server or custom router <span className="font-mono app-text-secondary">dnsmasq</span>.
+              Leave the server IP blank to use the container&apos;s default DNS, or enter your LAN
+              DNS / router IP directly (e.g.{' '}
+              <span className="font-mono app-text-secondary">192.168.1.2</span> or{' '}
+              <span className="font-mono app-text-secondary">192.168.1.1</span>).
+            </p>
+          </div>
+          <label className="inline-flex items-center gap-2 text-xs font-medium cursor-pointer shrink-0 pt-0.5">
+            <span>Enabled</span>
+            <input
+              type="checkbox"
+              data-testid="lan-dns-enabled-toggle"
+              checked={lanDnsEnabled}
+              onChange={(e) => setLanDnsEnabled(e.target.checked)}
+              className="h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
+            />
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="lan-dns-server-input" className="block text-xs font-medium">
+              Local DNS / dnsmasq Server IP
+            </label>
+            <input
+              id="lan-dns-server-input"
+              data-testid="lan-dns-server-input"
+              type="text"
+              value={lanDnsServer}
+              onChange={(e) => setLanDnsServer(e.target.value)}
+              placeholder="e.g. 192.168.1.2 or 192.168.1.1 (blank = system DNS)"
+              className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+            />
+            <p className="text-[11px] app-text-muted">
+              Supports optional port or comma-separated fallback (e.g.{' '}
+              <span className="font-mono">192.168.1.2, 192.168.1.1</span>).
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <label className="flex items-center justify-between gap-3 cursor-pointer">
+              <span className="text-xs font-medium">
+                Strip local domain suffix (e.g. <span className="font-mono">.lan</span> /{' '}
+                <span className="font-mono">.home.arpa</span>)
+              </span>
+              <input
+                type="checkbox"
+                checked={stripLanDomain}
+                onChange={(e) => setStripLanDomain(e.target.checked)}
+                className="h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
+              />
+            </label>
+
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="lan-dns-ttl" className="text-xs font-medium">
+                LAN PTR Cache TTL (seconds)
+              </label>
+              <input
+                id="lan-dns-ttl"
+                type="number"
+                min={30}
+                max={86400}
+                value={lanDnsTtlSec}
+                onChange={(e) => setLanDnsTtlSec(Number(e.target.value) || 300)}
+                className="w-28 app-input border rounded-xl px-3 py-1.5 text-xs font-mono tabular-nums focus:outline-none focus:border-sky-500"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="pt-2 border-t app-border flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span className="font-mono app-text-muted tabular-nums">
+            Resolved: {serverStats.lanDnsResolved} · Cached: {serverStats.lanDnsCacheSize} ·
+            Private MACs: {serverStats.randomizedMacCount}
+          </span>
+          <button
+            type="button"
+            data-testid="flush-lan-dns-btn"
+            onClick={onClearLanDnsCache}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border app-border app-row-hover text-xs font-medium transition-colors"
+          >
+            <Trash2 className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
+            Flush LAN Cache
+          </button>
+        </div>
+      </section>
 
       {/* MaxMind GeoIP2 / GeoLite2 Database Card */}
       <section

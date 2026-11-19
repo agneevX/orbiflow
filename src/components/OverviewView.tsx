@@ -131,7 +131,7 @@ export function OverviewView({
       <section className="app-surface border rounded-2xl p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <div>
-            <h2 className="font-display text-sm font-semibold">Internet Bandwidth History</h2>
+            <h2 className="font-display text-sm font-semibold">Live Bandwidth</h2>
             <p className="text-xs app-text-muted mt-0.5">
               {activeAnalysis.status === 'full' ? (
                 <>
@@ -151,7 +151,7 @@ export function OverviewView({
             <div
               role="group"
               aria-label="Mobile chart time window"
-              className="flex md:hidden items-center app-input border rounded-xl p-1"
+              className="flex md:hidden items-center h-10 app-input border rounded-xl p-1"
             >
               {ALL_TIME_WINDOWS.map((w) => {
                 const info = windowAvailability[w];
@@ -163,7 +163,7 @@ export function OverviewView({
                     type="button"
                     aria-label={isEmpty ? `${w} (no data)` : isPartial ? `${w} (partial data)` : w}
                     onClick={() => onChangeTimeWindow(w)}
-                    className={`inline-flex items-center gap-1 px-2 py-1 text-xs font-mono rounded-lg transition-colors ${
+                    className={`inline-flex items-center gap-1 h-full px-2.5 text-xs font-mono rounded-lg transition-colors ${
                       timeWindow === w
                         ? 'bg-sky-500/15 text-sky-500 font-semibold'
                         : isEmpty
@@ -203,9 +203,7 @@ export function OverviewView({
       <section className="app-surface border rounded-2xl p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <div>
-            <h2 className="font-display text-sm font-semibold">
-              Device to Destination Traffic Map
-            </h2>
+            <h2 className="font-display text-sm font-semibold">Live Traffic</h2>
             <p className="text-xs app-text-muted mt-0.5">
               Live bandwidth paths between local devices and internet services
             </p>
@@ -231,7 +229,7 @@ export function OverviewView({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
         <section className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="font-display text-sm font-semibold">Top Local Devices</h2>
+            <h2 className="font-display text-sm font-semibold">Top Devices</h2>
             <span className="text-xs app-text-muted">Click device to filter</span>
           </div>
 

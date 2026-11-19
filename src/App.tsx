@@ -294,6 +294,40 @@ export default function App() {
     }
   };
 
+  const handleClearLanDnsCache = async () => {
+    const res = await fetch('/api/lan-dns/clear', { method: 'POST' });
+    const data = await res.json();
+    if (snapshot && data.serverStats) {
+      setSnapshot({ ...snapshot, serverStats: data.serverStats });
+    }
+  };
+
+  const handleSaveDeviceAlias = async (alias: {
+    key: string;
+    matchBy: 'mac' | 'ip';
+    name: string;
+  }) => {
+    const res = await fetch('/api/devices/alias', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(alias),
+    });
+    const data = await res.json();
+    if (data.snapshot) {
+      setSnapshot(data.snapshot);
+    }
+  };
+
+  const handleDeleteDeviceAlias = async (key: string) => {
+    const res = await fetch(`/api/devices/alias/${encodeURIComponent(key)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (data.snapshot) {
+      setSnapshot(data.snapshot);
+    }
+  };
+
   const handleFilterConnections = (query: string) => {
     setFlowSearchSeed(query);
     setActiveTab('flows');
@@ -414,6 +448,8 @@ export default function App() {
               unit={unit}
               theme={activeTheme}
               onInspectHostFlows={handleSelectHost}
+              onSaveAlias={handleSaveDeviceAlias}
+              onDeleteAlias={handleDeleteDeviceAlias}
             />
           )}
 
@@ -435,6 +471,7 @@ export default function App() {
               serverStats={snapshot.serverStats}
               onSaveSettings={handleSaveSettings}
               onClearRdnsCache={handleClearRdnsCache}
+              onClearLanDnsCache={handleClearLanDnsCache}
               onReloadGeoip={handleReloadGeoip}
               onUploadGeoip={handleUploadGeoip}
             />

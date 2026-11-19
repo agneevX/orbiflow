@@ -7,7 +7,7 @@ Lightweight, real-time internet traffic monitor and connection inspector built f
 ## Features
 
 - **Real-Time Bandwidth & Interactive Chart Inspection**: Live download and upload throughput graphs across `1m`, `5m`, `15m`, `1h`, `6h`, and `24h` windows. Time spans without recorded telemetry are explicitly marked as *No data*. Drag horizontally across any graph to inspect Average, Peak, and Estimated Transfer breakdowns for Download and Upload or zoom directly into the range.
-- **Connection & Local Device Visibility**: Inspect active TCP/UDP/ICMP connections, map local LAN devices via router ARP/DHCP tables, and visualize live traffic paths between devices and internet services.
+- **Connection & Local Device Visibility**: Inspect active TCP/UDP/ICMP connections, resolve local LAN devices via dedicated LAN reverse DNS (targeting your separate LAN DNS server or custom router `dnsmasq`) + ARP/DHCP tables, detect IEEE 802.3 randomized (Private) MAC addresses with passive traffic hints, assign persistent custom device aliases, and visualize live traffic paths between devices and internet services.
 - **Offline MaxMind GeoIP2 / GeoLite2 Integration**: Drop `GeoLite2-City.mmdb` (or `GeoLite2-Country.mmdb`) and `GeoLite2-ASN.mmdb` into `/config/geoip` or upload `.mmdb` files directly from Server Settings for offline city, country, and ASN/organization enrichment with zero external API calls.
 - **Zero-Noise Reverse DNS**: Built-in offline service matching for popular cloud, streaming, and CDN networks. Live DNS PTR lookups are disabled by default and configurable with an in-memory TTL cache when enabled.
 - **Persistent `/config` Volume**: Stores user settings and alert rules in `/config/config.json`, optional disk history cache in `/config/cache` (configurable), and MaxMind databases in `/config/geoip`.
@@ -159,6 +159,9 @@ echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct
 | `ORBIFLOW_GEOIP_DIR` | `/config/geoip` | Folder scanned for `.mmdb` files |
 | `ORBIFLOW_GEOIP_CITY_DB` | *(auto-detected)* | Explicit path override for City/Country `.mmdb` |
 | `ORBIFLOW_GEOIP_ASN_DB` | *(auto-detected)* | Explicit path override for ASN `.mmdb` |
+| `ORBIFLOW_LAN_DNS_ENABLED` | `true` | Enable reverse PTR lookups exclusively for local private LAN IPs |
+| `ORBIFLOW_LAN_DNS_SERVER` | *(system DNS)* | Optional local DNS / `dnsmasq` IP (e.g. `192.168.1.2` or `192.168.1.1`) |
+| `ORBIFLOW_LAN_DNS_TTL` | `300` | In-memory LAN PTR cache TTL in seconds |
 | `ORBIFLOW_RDNS_ENABLED` | `false` | Enable live DNS PTR lookups for unknown external IPs |
 | `ORBIFLOW_RDNS_SKIP_PRIVATE` | `true` | Skip PTR lookups for RFC1918 private addresses |
 | `ORBIFLOW_RDNS_TTL_SEC` | `3600` | In-memory reverse DNS cache TTL in seconds |

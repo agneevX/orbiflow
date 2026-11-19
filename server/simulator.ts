@@ -65,6 +65,11 @@ const LAN_DEVICES: ArpEntry[] = [
     hostname: 'gaming-rig',
     vendor: 'Realtek LAN',
   },
+  {
+    ip: '192.168.1.91',
+    mac: 'da:a1:19:4c:82:10',
+    device: 'br0',
+  },
 ];
 
 const FLOW_TEMPLATES: Array<{
@@ -115,6 +120,26 @@ const FLOW_TEMPLATES: Array<{
     dport: 443,
     rxWeight: 420_000,
     txWeight: 185_000,
+  },
+  {
+    proto: 'tcp',
+    state: 'ESTABLISHED',
+    src: '192.168.1.91',
+    dst: '17.57.144.84',
+    sport: 53410,
+    dport: 5223,
+    rxWeight: 18_000,
+    txWeight: 9_000,
+  },
+  {
+    proto: 'tcp',
+    state: 'ESTABLISHED',
+    src: '192.168.1.91',
+    dst: '17.253.144.10',
+    sport: 53418,
+    dport: 443,
+    rxWeight: 340_000,
+    txWeight: 48_000,
   },
   {
     proto: 'tcp',

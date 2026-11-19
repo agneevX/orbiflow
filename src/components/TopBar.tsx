@@ -52,7 +52,8 @@ export function TopBar({
           <div
             role="group"
             aria-label="Chart time window"
-            className="hidden md:flex items-center app-surface border app-border rounded-xl p-1"
+            data-testid="time-window-bar"
+            className="hidden md:flex items-center h-10 app-surface border app-border rounded-xl p-1"
           >
             {ALL_TIME_WINDOWS.map((w) => {
               const info = windowAvailability?.[w];
@@ -72,7 +73,7 @@ export function TopBar({
                   title={statusLabel}
                   aria-label={isEmpty ? `${w} (no data)` : isPartial ? `${w} (partial data)` : w}
                   onClick={() => onChangeTimeWindow(w)}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono rounded-lg transition-colors whitespace-nowrap ${
+                  className={`inline-flex items-center gap-1.5 h-full px-3 text-xs font-mono rounded-lg transition-colors whitespace-nowrap ${
                     selected
                       ? 'bg-sky-500/15 text-sky-500 font-semibold'
                       : isEmpty
@@ -105,7 +106,7 @@ export function TopBar({
           onClick={onTogglePause}
           aria-label={paused ? 'Resume live updates' : 'Pause live updates'}
           title={paused ? 'Resume live updates' : 'Pause live updates'}
-          className={`inline-flex items-center justify-center h-9 w-9 rounded-xl transition-colors shrink-0 ${
+          className={`inline-flex items-center justify-center h-10 w-10 rounded-xl transition-colors shrink-0 ${
             paused ? 'app-btn-warning' : 'app-btn-primary'
           }`}
         >

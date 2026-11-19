@@ -1,6 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AlertEvent, AlertRule, PersistenceMode, ServerConfig, TrafficPoint } from '../src/types/telemetry';
+import type {
+  AlertEvent,
+  AlertRule,
+  DeviceAlias,
+  PersistenceMode,
+  ServerConfig,
+  TrafficPoint,
+} from '../src/types/telemetry';
 
 export const DEFAULT_CONFIG_DIR = '/config';
 export const DEFAULT_CACHE_DIR = '/config/cache';
@@ -11,8 +18,13 @@ export interface PersistedUserConfig {
   rdnsEnabled: boolean;
   rdnsTtlSec: number;
   rdnsSkipPrivate: boolean;
+  lanDnsEnabled?: boolean;
+  lanDnsServer?: string;
+  lanDnsTtlSec?: number;
+  stripLanDomain?: boolean;
   geoipEnabled?: boolean;
   geoipDir?: string;
+  deviceAliases?: Record<string, DeviceAlias>;
   rules?: AlertRule[];
 }
 

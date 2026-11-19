@@ -4,6 +4,7 @@ import type {
   ArpEntry,
   ClientDestinationLink,
   DashboardSnapshot,
+  DeviceAlias,
   EnrichedFlow,
   GeoIpInfo,
   HostSummary,
@@ -24,6 +25,12 @@ import {
   normalizeProtocol,
   normalizeState,
 } from './formatters';
+import {
+  fingerprintDeviceHint,
+  isMeaningfulHostname,
+  normalizeMac,
+  resolveHostIdentity,
+} from './deviceIdentity';
 
 interface FlowTrackRecord {
   firstSeen: number;
@@ -159,6 +166,7 @@ export class TrafficMonitorEngine {
   private rules: AlertRule[] = DEFAULT_RULES.map((r) => ({ ...r }));
   private alerts: AlertEvent[] = [];
   private lastAlertFiredAt = new Map<string, number>();
+  private deviceAliases: Record<string, DeviceAlias> = {};
 
   private serverConfig: ServerConfig = {
     persistenceMode: 'memory',
@@ -166,6 +174,10 @@ export class TrafficMonitorEngine {
     rdnsEnabled: false,
     rdnsTtlSec: 3600,
     rdnsSkipPrivate: true,
+    lanDnsEnabled: true,
+    lanDnsServer: '',
+    lanDnsTtlSec: 300,
+    stripLanDomain: true,
     geoipEnabled: true,
     geoipDir: '/config/geoip',
   };
@@ -178,6 +190,11 @@ export class TrafficMonitorEngine {
     rdnsCacheSize: 0,
     rdnsHits: 0,
     rdnsMisses: 0,
+    lanDnsCacheSize: 0,
+    lanDnsHits: 0,
+    lanDnsMisses: 0,
+    lanDnsResolved: 0,
+    randomizedMacCount: 0,
     geoipActiveDir: '/config/geoip',
     geoipCityLoaded: false,
     geoipAsnLoaded: false,
@@ -232,6 +249,7 @@ export class TrafficMonitorEngine {
       clientLinks: [],
       rules: this.rules.map((r) => ({ ...r })),
       alerts: [],
+      deviceAliases: { ...this.deviceAliases },
       serverConfig: { ...this.serverConfig },
       serverStats: { ...this.serverStats },
     };
@@ -358,6 +376,90 @@ export class TrafficMonitorEngine {
     };
   }
 
+  public getDeviceAliases(): Record<string, DeviceAlias> {
+    return { ...this.deviceAliases };
+  }
+
+  public setDeviceAliases(aliases: Record<string, DeviceAlias>): void {
+    const clean: Record<string, DeviceAlias> = {};
+    for (const [k, v] of Object.entries(aliases || {})) {
+      if (v && typeof v.name === 'string' && v.name.trim()) {
+        clean[k] = {
+          key: k,
+          matchBy: v.matchBy === 'ip' ? 'ip' : 'mac',
+          name: v.name.trim().slice(0, 64),
+        };
+      }
+    }
+    this.deviceAliases = clean;
+    this.reapplyAliasesToLatestSnapshot();
+  }
+
+  public setDeviceAlias(alias: DeviceAlias): Record<string, DeviceAlias> {
+    const cleanName = alias.name.trim().slice(0, 64);
+    if (!cleanName) {
+      delete this.deviceAliases[alias.key];
+    } else {
+      this.deviceAliases[alias.key] = {
+        key: alias.key,
+        matchBy: alias.matchBy === 'ip' ? 'ip' : 'mac',
+        name: cleanName,
+      };
+    }
+    this.reapplyAliasesToLatestSnapshot();
+    return this.getDeviceAliases();
+  }
+
+  public deleteDeviceAlias(key: string): Record<string, DeviceAlias> {
+    delete this.deviceAliases[key];
+    this.reapplyAliasesToLatestSnapshot();
+    return this.getDeviceAliases();
+  }
+
+  private reapplyAliasesToLatestSnapshot(): void {
+    const hostNameByIp = new Map<string, string>();
+    const updatedHosts = this.latestSnapshot.hosts.map((h) => {
+      const identity = resolveHostIdentity({
+        ip: h.ip,
+        mac: h.mac,
+        dhcpHostname: h.nameSource === 'dhcp' ? h.hostname : undefined,
+        ptrHostname: h.ptrHostname,
+        providedVendor: h.vendor.includes('Private MAC') ? undefined : h.vendor,
+        deviceHint: h.deviceHint,
+        aliases: this.deviceAliases,
+        stripDomain: this.serverConfig.stripLanDomain,
+      });
+      hostNameByIp.set(h.ip, identity.hostname);
+      return {
+        ...h,
+        hostname: identity.hostname,
+        vendor: identity.vendor,
+        nameSource: identity.nameSource,
+        isRandomizedMac: identity.isRandomizedMac,
+        aliasKey: identity.aliasKey,
+        aliasMatchBy: identity.aliasMatchBy,
+      };
+    });
+
+    const updatedFlows = this.latestSnapshot.flows.map((f) => {
+      const resolvedSrc = hostNameByIp.get(f.srcIp);
+      return resolvedSrc ? { ...f, srcHost: resolvedSrc } : f;
+    });
+
+    const updatedLinks = this.latestSnapshot.clientLinks.map((l) => {
+      const resolved = hostNameByIp.get(l.clientIp);
+      return resolved ? { ...l, clientName: resolved } : l;
+    });
+
+    this.latestSnapshot = {
+      ...this.latestSnapshot,
+      hosts: updatedHosts,
+      flows: updatedFlows,
+      clientLinks: updatedLinks,
+      deviceAliases: { ...this.deviceAliases },
+    };
+  }
+
   private recordHistoryPoint(point: TrafficPoint): void {
     this.history.push(point);
     if (this.history.length > this.maxHistoryPoints) {
@@ -395,7 +497,8 @@ export class TrafficMonitorEngine {
   public ingest(
     snapshot: ProbeSnapshot,
     rdnsLookup?: RdnsLookupFn,
-    geoipLookup?: GeoIpLookupFn
+    geoipLookup?: GeoIpLookupFn,
+    lanRdnsLookup?: RdnsLookupFn
   ): {
     dashboard: DashboardSnapshot;
     newAlerts: AlertEvent[];
@@ -472,17 +575,48 @@ export class TrafficMonitorEngine {
       const flowRxBps = prev ? Math.round(rxDelta) : 0;
 
       const arp = arpByIp.get(raw.src) || arpByIp.get(raw.dst);
-      const srcCachedRdns = rdnsLookup && !arp?.hostname ? rdnsLookup(raw.src) : null;
-      const dstCachedRdns = rdnsLookup ? rdnsLookup(raw.dst) : null;
-      const dstGeo = !isPrivateIp(raw.dst) && geoipLookup ? geoipLookup(raw.dst) || undefined : undefined;
+      const srcIsPrivate = isPrivateIp(raw.src);
+      const dstIsPrivate = isPrivateIp(raw.dst);
 
-      const srcHost =
-        arp?.hostname ||
-        srcCachedRdns ||
-        (isPrivateIp(raw.src) ? raw.src : describeRemoteIp(raw.src).label);
+      const srcPtr = srcIsPrivate
+        ? (lanRdnsLookup ? lanRdnsLookup(raw.src) : null)
+        : (rdnsLookup ? rdnsLookup(raw.src) : null);
+      const dstCachedRdns = dstIsPrivate
+        ? (lanRdnsLookup ? lanRdnsLookup(raw.dst) : null)
+        : (rdnsLookup ? rdnsLookup(raw.dst) : null);
+      const dstGeo = !dstIsPrivate && geoipLookup ? geoipLookup(raw.dst) || undefined : undefined;
 
-      const baseRemoteInfo = isPrivateIp(raw.dst)
-        ? { label: arpByIp.get(raw.dst)?.hostname || raw.dst, service: 'Local Network' }
+      const meaningfulArpHost =
+        arp && isMeaningfulHostname(arp.hostname, raw.src) ? arp.hostname : undefined;
+
+      const srcHost = srcIsPrivate
+        ? resolveHostIdentity({
+            ip: raw.src,
+            mac: arp?.mac,
+            dhcpHostname: meaningfulArpHost,
+            ptrHostname: srcPtr,
+            providedVendor: arp?.vendor,
+            aliases: this.deviceAliases,
+            stripDomain: this.serverConfig.stripLanDomain,
+          }).hostname
+        : describeRemoteIp(raw.src, srcPtr).label;
+
+      const dstArp = arpByIp.get(raw.dst);
+      const meaningfulDstArp =
+        dstArp && isMeaningfulHostname(dstArp.hostname, raw.dst) ? dstArp.hostname : undefined;
+      const baseRemoteInfo = dstIsPrivate
+        ? {
+            label: resolveHostIdentity({
+              ip: raw.dst,
+              mac: dstArp?.mac,
+              dhcpHostname: meaningfulDstArp,
+              ptrHostname: dstCachedRdns,
+              providedVendor: dstArp?.vendor,
+              aliases: this.deviceAliases,
+              stripDomain: this.serverConfig.stripLanDomain,
+            }).hostname,
+            service: 'Local Network',
+          }
         : describeRemoteIp(raw.dst, dstCachedRdns);
 
       const remoteInfo = {
@@ -501,7 +635,7 @@ export class TrafficMonitorEngine {
         ttl: raw.ttl ?? 120,
         srcIp: raw.src,
         srcHost,
-        srcMac: arp?.mac,
+        srcMac: arp?.mac ? normalizeMac(arp.mac) : undefined,
         sport: raw.sport,
         dstIp: raw.dst,
         dstHost: remoteInfo.label,
@@ -552,14 +686,28 @@ export class TrafficMonitorEngine {
     };
     this.recordHistoryPoint(point);
 
-    // Aggregate LAN hosts
-    const hostMap = new Map<string, HostSummary & { appCounts: Map<string, number> }>();
+    // Aggregate LAN hosts with LAN DNS PTR, randomized MAC detection, behavioral hints, and aliases
+    const hostMap = new Map<
+      string,
+      HostSummary & {
+        appCounts: Map<string, number>;
+        dhcpHostname?: string;
+        providedVendor?: string;
+        observedFlows: Array<{ dstService: string; dstHost?: string; app: string; dport: number }>;
+      }
+    >();
+
     for (const entry of snapshot.arp || []) {
+      const normMac = normalizeMac(entry.mac);
       hostMap.set(entry.ip, {
         ip: entry.ip,
-        mac: entry.mac,
-        hostname: entry.hostname || entry.ip,
+        mac: normMac,
+        hostname: entry.ip,
         vendor: entry.vendor || 'LAN Device',
+        nameSource: 'ip',
+        isRandomizedMac: false,
+        dhcpHostname: isMeaningfulHostname(entry.hostname, entry.ip) ? entry.hostname : undefined,
+        providedVendor: entry.vendor,
         activeFlows: 0,
         rxBytes: 0,
         txBytes: 0,
@@ -569,6 +717,7 @@ export class TrafficMonitorEngine {
         topApps: [],
         lastSeen: now,
         appCounts: new Map(),
+        observedFlows: [],
       });
     }
 
@@ -582,16 +731,17 @@ export class TrafficMonitorEngine {
       totalFlowBytes += f.totalBytes;
 
       const lanIp = isPrivateIp(f.srcIp) ? f.srcIp : isPrivateIp(f.dstIp) ? f.dstIp : null;
-      let clientName = lanIp || f.srcHost;
 
       if (lanIp) {
         let host = hostMap.get(lanIp);
         if (!host) {
           host = {
             ip: lanIp,
-            mac: f.srcMac || '00:00:00:00:00:00',
-            hostname: f.srcHost || lanIp,
+            mac: normalizeMac(f.srcMac),
+            hostname: lanIp,
             vendor: 'LAN Device',
+            nameSource: 'ip',
+            isRandomizedMac: false,
             activeFlows: 0,
             rxBytes: 0,
             txBytes: 0,
@@ -601,10 +751,10 @@ export class TrafficMonitorEngine {
             topApps: [],
             lastSeen: now,
             appCounts: new Map(),
+            observedFlows: [],
           };
           hostMap.set(lanIp, host);
         }
-        clientName = host.hostname;
         host.activeFlows += 1;
         host.rxBytes += f.rxBytes;
         host.txBytes += f.txBytes;
@@ -612,28 +762,12 @@ export class TrafficMonitorEngine {
         host.rxBps += f.rxBps;
         host.txBps += f.txBps;
         host.appCounts.set(f.app, (host.appCounts.get(f.app) || 0) + f.totalBytes);
-      }
-
-      // Client -> Destination Service flow link aggregation
-      if (lanIp) {
-        const serviceName = f.dstService;
-        const linkKey = `${lanIp}=>${serviceName}`;
-        const existingLink = clientLinkMap.get(linkKey) || {
-          clientIp: lanIp,
-          clientName,
-          service: serviceName,
-          rxBps: 0,
-          txBps: 0,
-          totalBps: 0,
-          totalBytes: 0,
-          flowCount: 0,
-        };
-        existingLink.rxBps += f.rxBps;
-        existingLink.txBps += f.txBps;
-        existingLink.totalBps += f.totalBps;
-        existingLink.totalBytes += f.totalBytes;
-        existingLink.flowCount += 1;
-        clientLinkMap.set(linkKey, existingLink);
+        host.observedFlows.push({
+          dstService: f.dstService,
+          dstHost: f.dstHost,
+          app: f.app,
+          dport: f.dport,
+        });
       }
 
       const pKey = f.app;
@@ -677,15 +811,80 @@ export class TrafficMonitorEngine {
       }
     }
 
+    // Resolve final identity for every discovered local device (Alias > LAN DNS PTR > DHCP > Fingerprint > IP)
+    const resolvedNameByIp = new Map<string, string>();
+    let randomizedMacCount = 0;
+
     const hosts: HostSummary[] = Array.from(hostMap.values())
-      .map(({ appCounts, ...rest }) => {
+      .map(({ appCounts, dhcpHostname, providedVendor, observedFlows, ...rest }) => {
+        const ptrHostname = lanRdnsLookup ? lanRdnsLookup(rest.ip) : null;
+        const deviceHint = fingerprintDeviceHint(observedFlows);
+        const identity = resolveHostIdentity({
+          ip: rest.ip,
+          mac: rest.mac,
+          dhcpHostname,
+          ptrHostname,
+          providedVendor,
+          deviceHint,
+          aliases: this.deviceAliases,
+          stripDomain: this.serverConfig.stripLanDomain,
+        });
+
+        if (identity.isRandomizedMac) {
+          randomizedMacCount += 1;
+        }
+        resolvedNameByIp.set(rest.ip, identity.hostname);
+
         const sortedApps = Array.from(appCounts.entries())
           .sort((a, b) => b[1] - a[1])
           .slice(0, 3)
           .map(([app]) => app);
-        return { ...rest, topApps: sortedApps };
+
+        return {
+          ...rest,
+          hostname: identity.hostname,
+          vendor: identity.vendor,
+          nameSource: identity.nameSource,
+          isRandomizedMac: identity.isRandomizedMac,
+          ptrHostname: identity.ptrHostname,
+          deviceHint: identity.deviceHint,
+          aliasKey: identity.aliasKey,
+          aliasMatchBy: identity.aliasMatchBy,
+          topApps: sortedApps,
+        };
       })
       .sort((a, b) => b.rxBps + b.txBps - (a.rxBps + a.txBps) || b.totalBytes - a.totalBytes);
+
+    // Back-populate resolved hostnames into flows & client-destination links so all views match
+    for (const f of enrichedFlows) {
+      const lanIp = isPrivateIp(f.srcIp) ? f.srcIp : isPrivateIp(f.dstIp) ? f.dstIp : null;
+      if (isPrivateIp(f.srcIp) && resolvedNameByIp.has(f.srcIp)) {
+        f.srcHost = resolvedNameByIp.get(f.srcIp)!;
+      }
+      if (lanIp) {
+        const clientName = resolvedNameByIp.get(lanIp) || f.srcHost;
+        const serviceName = f.dstService;
+        const linkKey = `${lanIp}=>${serviceName}`;
+        const existingLink = clientLinkMap.get(linkKey) || {
+          clientIp: lanIp,
+          clientName,
+          service: serviceName,
+          rxBps: 0,
+          txBps: 0,
+          totalBps: 0,
+          totalBytes: 0,
+          flowCount: 0,
+        };
+        existingLink.rxBps += f.rxBps;
+        existingLink.txBps += f.txBps;
+        existingLink.totalBps += f.totalBps;
+        existingLink.totalBytes += f.totalBytes;
+        existingLink.flowCount += 1;
+        clientLinkMap.set(linkKey, existingLink);
+      }
+    }
+
+    this.serverStats.randomizedMacCount = randomizedMacCount;
 
     const protocols: ProtocolSummary[] = Array.from(protoMap.values())
       .map((p) => ({
@@ -731,6 +930,7 @@ export class TrafficMonitorEngine {
       clientLinks,
       rules: this.rules.map((r) => ({ ...r })),
       alerts: this.alerts.map((a) => ({ ...a })),
+      deviceAliases: { ...this.deviceAliases },
       serverConfig: { ...this.serverConfig },
       serverStats: { ...this.serverStats },
     };

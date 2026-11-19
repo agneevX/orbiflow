@@ -67,9 +67,67 @@ def read_iface_counters(iface):
     }
 
 
+def discover_dnsmasq_files():
+    lease_paths = [
+        "/tmp/dhcp.leases",
+        "/tmp/udhcpd.leases",
+        "/var/run/dnsmasq.leases",
+        "/opt/var/lib/misc/dnsmasq.leases",
+    ]
+    hosts_paths = ["/etc/hosts"]
+    static_hosts = {}
+    conf_files = [
+        "/etc/dnsmasq.conf",
+        "/opt/etc/dnsmasq.conf",
+        "/tmp/etc/dnsmasq.conf",
+    ]
+    for conf_dir in ("/etc/dnsmasq.d", "/opt/etc/dnsmasq.d"):
+        try:
+            for name in sorted(os.listdir(conf_dir)):
+                if name.endswith(".conf"):
+                    conf_files.append(os.path.join(conf_dir, name))
+        except OSError:
+            pass
+
+    for cpath in conf_files:
+        for raw in read_text(cpath).splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("dhcp-leasefile="):
+                lp = line.split("=", 1)[1].strip()
+                if lp and lp not in lease_paths:
+                    lease_paths.insert(0, lp)
+            elif line.startswith("addn-hosts="):
+                hp = line.split("=", 1)[1].strip()
+                if hp and hp not in hosts_paths:
+                    hosts_paths.append(hp)
+            elif line.startswith("dhcp-host="):
+                # Parse dhcp-host=<mac>,<ip>,<name> or <mac>,<name>,<ip>
+                tokens = [t.strip() for t in line.split("=", 1)[1].split(",") if t.strip()]
+                ip_val = None
+                host_val = None
+                for tok in tokens:
+                    if tok.count(".") == 3 and all(p.isdigit() for p in tok.split(".")):
+                        ip_val = tok
+                    elif ":" not in tok and not tok.startswith("set:") and not tok.startswith("tag:") and not tok.startswith("id:") and tok not in ("infinite", "ignore") and not tok[0].isdigit():
+                        host_val = tok
+                if ip_val and host_val:
+                    static_hosts[ip_val] = host_val
+    return lease_paths, hosts_paths, static_hosts
+
+
 def read_dhcp_leases():
     leases = {}
-    for path in ("/tmp/dhcp.leases", "/tmp/udhcpd.leases", "/var/run/dnsmasq.leases"):
+    lease_paths, hosts_paths, static_hosts = discover_dnsmasq_files()
+    for hpath in hosts_paths:
+        for line in read_text(hpath).splitlines():
+            clean = line.split("#", 1)[0].strip()
+            parts = clean.split()
+            if len(parts) >= 2 and parts[0].count(".") == 3 and not parts[0].startswith("127."):
+                leases[parts[0]] = parts[1]
+    leases.update(static_hosts)
+    for path in lease_paths:
         content = read_text(path)
         if not content:
             continue
@@ -78,26 +136,27 @@ def read_dhcp_leases():
             if len(parts) >= 4:
                 ip = parts[2]
                 host = parts[3]
-                if host != "*":
+                if host != "*" and host != ip:
                     leases[ip] = host
     return leases
 
 
 def read_arp_table(leases):
-    entries = []
+    entries_by_ip = {}
     content = read_text("/proc/net/arp")
     for line in content.splitlines()[1:]:
         parts = line.split()
         if len(parts) >= 6:
             ip, _, flags, mac, _, dev = parts[:6]
             if flags != "0x0" and mac != "00:00:00:00:00:00":
-                entries.append({
+                entries_by_ip[ip] = {
                     "ip": ip,
-                    "mac": mac,
+                    "mac": mac.lower(),
                     "device": dev,
-                    "hostname": leases.get(ip, ip),
-                })
-    return entries
+                    "hostname": leases.get(ip, ""),
+                }
+    # Merge live DHCP leases even if ARP entry is temporarily stale
+    return list(entries_by_ip.values())
 
 
 def read_conntrack_lines(limit=350):
@@ -466,6 +525,9 @@ export function generateDockerCompose(cfg: ProbeConfigOptions): string {
       - ORBIFLOW_PROBE_TOKEN=${cfg.token}
       - ORBIFLOW_ENABLE_SIMULATOR=false
       - ORBIFLOW_STORAGE_MODE=disk
+      - ORBIFLOW_LAN_DNS_ENABLED=true
+      - ORBIFLOW_LAN_DNS_SERVER=
+      - ORBIFLOW_LAN_DNS_TTL=300
       - ORBIFLOW_RDNS_ENABLED=false
       - ORBIFLOW_RDNS_TTL=3600
     healthcheck:

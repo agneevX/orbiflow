@@ -115,11 +115,25 @@ export interface TrafficPoint {
   activeFlows: number;
 }
 
+export type DeviceNameSource = 'alias' | 'lan-dns' | 'dhcp' | 'fingerprint' | 'ip';
+
+export interface DeviceAlias {
+  key: string;
+  matchBy: 'mac' | 'ip';
+  name: string;
+}
+
 export interface HostSummary {
   ip: string;
   mac: string;
   hostname: string;
   vendor: string;
+  nameSource: DeviceNameSource;
+  isRandomizedMac: boolean;
+  ptrHostname?: string;
+  deviceHint?: string;
+  aliasKey?: string;
+  aliasMatchBy?: 'mac' | 'ip';
   activeFlows: number;
   rxBytes: number;
   txBytes: number;
@@ -204,6 +218,10 @@ export interface ServerConfig {
   rdnsEnabled: boolean;
   rdnsTtlSec: number;
   rdnsSkipPrivate: boolean;
+  lanDnsEnabled: boolean;
+  lanDnsServer: string;
+  lanDnsTtlSec: number;
+  stripLanDomain: boolean;
   geoipEnabled: boolean;
   geoipDir: string;
 }
@@ -216,6 +234,11 @@ export interface ServerStats {
   rdnsCacheSize: number;
   rdnsHits: number;
   rdnsMisses: number;
+  lanDnsCacheSize: number;
+  lanDnsHits: number;
+  lanDnsMisses: number;
+  lanDnsResolved: number;
+  randomizedMacCount: number;
   geoipActiveDir: string;
   geoipCityLoaded: boolean;
   geoipAsnLoaded: boolean;
@@ -246,6 +269,7 @@ export interface DashboardSnapshot {
   clientLinks: ClientDestinationLink[];
   rules: AlertRule[];
   alerts: AlertEvent[];
+  deviceAliases: Record<string, DeviceAlias>;
   serverConfig: ServerConfig;
   serverStats: ServerStats;
 }

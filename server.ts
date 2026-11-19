@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { TrafficMonitorEngine, exportFlowsToCsv } from './src/lib/telemetryEngine';
 import { OrbiProbeSimulator } from './server/simulator';
 import { RdnsCache } from './server/rdnsCache';
+import { LanResolver } from './server/lanResolver';
 import { DEFAULT_CACHE_DIR, DEFAULT_CONFIG_DIR, PersistenceStore } from './server/storage';
 import { DEFAULT_GEOIP_DIR, MaxMindService } from './server/geoip';
 import type { AlertRule, PersistenceMode, ProbeSnapshot } from './src/types/telemetry';
@@ -26,6 +27,10 @@ const CACHE_DIR = process.env.ORBIFLOW_CACHE_DIR || DEFAULT_CACHE_DIR;
 const GEOIP_DIR = process.env.ORBIFLOW_GEOIP_DIR || DEFAULT_GEOIP_DIR;
 const GEOIP_ENABLED_DEFAULT = process.env.ORBIFLOW_GEOIP_ENABLED !== 'false';
 const RDNS_ENABLED_DEFAULT = process.env.ORBIFLOW_RDNS_ENABLED === 'true';
+const LAN_DNS_ENABLED_DEFAULT = process.env.ORBIFLOW_LAN_DNS_ENABLED !== 'false';
+const LAN_DNS_SERVER_DEFAULT = process.env.ORBIFLOW_LAN_DNS_SERVER || '';
+const LAN_DNS_TTL_DEFAULT = Number(process.env.ORBIFLOW_LAN_DNS_TTL || 300);
+const STRIP_LAN_DOMAIN_DEFAULT = process.env.ORBIFLOW_STRIP_LAN_DOMAIN !== 'false';
 
 async function startServer() {
   const app = express();
@@ -41,6 +46,12 @@ async function startServer() {
     enabled: RDNS_ENABLED_DEFAULT,
     ttlSec: Number(process.env.ORBIFLOW_RDNS_TTL || 3600),
     skipPrivate: true,
+  });
+  const lanResolver = new LanResolver({
+    enabled: LAN_DNS_ENABLED_DEFAULT,
+    server: LAN_DNS_SERVER_DEFAULT,
+    ttlSec: LAN_DNS_TTL_DEFAULT,
+    stripDomain: STRIP_LAN_DOMAIN_DEFAULT,
   });
 
   const engine = new TrafficMonitorEngine();
@@ -75,6 +86,27 @@ async function startServer() {
           ? savedUserConfig.rdnsSkipPrivate
           : undefined,
     });
+    lanResolver.updateConfig({
+      enabled:
+        typeof savedUserConfig.lanDnsEnabled === 'boolean'
+          ? savedUserConfig.lanDnsEnabled
+          : undefined,
+      server:
+        typeof savedUserConfig.lanDnsServer === 'string'
+          ? savedUserConfig.lanDnsServer
+          : undefined,
+      ttlSec:
+        typeof savedUserConfig.lanDnsTtlSec === 'number'
+          ? savedUserConfig.lanDnsTtlSec
+          : undefined,
+      stripDomain:
+        typeof savedUserConfig.stripLanDomain === 'boolean'
+          ? savedUserConfig.stripLanDomain
+          : undefined,
+    });
+    if (savedUserConfig.deviceAliases && typeof savedUserConfig.deviceAliases === 'object') {
+      engine.setDeviceAliases(savedUserConfig.deviceAliases);
+    }
     if (Array.isArray(savedUserConfig.rules) && savedUserConfig.rules.length > 0) {
       engine.updateRules(savedUserConfig.rules);
     }
@@ -88,6 +120,10 @@ async function startServer() {
     rdnsEnabled: rdnsCache.getConfig().enabled,
     rdnsTtlSec: rdnsCache.getConfig().ttlSec,
     rdnsSkipPrivate: rdnsCache.getConfig().skipPrivate,
+    lanDnsEnabled: lanResolver.getConfig().enabled,
+    lanDnsServer: lanResolver.getConfig().server,
+    lanDnsTtlSec: lanResolver.getConfig().ttlSec,
+    stripLanDomain: lanResolver.getConfig().stripDomain,
     geoipEnabled: geoip.isEnabled(),
     geoipDir: geoip.getConfiguredDir(),
   });
@@ -111,8 +147,13 @@ async function startServer() {
       rdnsEnabled: snap.serverConfig.rdnsEnabled,
       rdnsTtlSec: snap.serverConfig.rdnsTtlSec,
       rdnsSkipPrivate: snap.serverConfig.rdnsSkipPrivate,
+      lanDnsEnabled: snap.serverConfig.lanDnsEnabled,
+      lanDnsServer: snap.serverConfig.lanDnsServer,
+      lanDnsTtlSec: snap.serverConfig.lanDnsTtlSec,
+      stripLanDomain: snap.serverConfig.stripLanDomain,
       geoipEnabled: snap.serverConfig.geoipEnabled,
       geoipDir: snap.serverConfig.geoipDir,
+      deviceAliases: engine.getDeviceAliases(),
       rules: snap.rules,
     });
   };
@@ -154,6 +195,7 @@ async function startServer() {
 
   const syncStatsAndPersist = () => {
     const rStats = rdnsCache.getStats();
+    const lStats = lanResolver.getStats();
     const sStats = storage.getStats();
     const gStats = geoip.getStats();
     engine.setServerStats({
@@ -164,6 +206,10 @@ async function startServer() {
       rdnsCacheSize: rStats.size,
       rdnsHits: rStats.hits,
       rdnsMisses: rStats.misses,
+      lanDnsCacheSize: lStats.size,
+      lanDnsHits: lStats.hits,
+      lanDnsMisses: lStats.misses,
+      lanDnsResolved: lStats.resolved,
       geoipActiveDir: gStats.activeDir,
       geoipCityLoaded: gStats.cityLoaded,
       geoipAsnLoaded: gStats.asnLoaded,
@@ -177,7 +223,8 @@ async function startServer() {
     const { dashboard, newAlerts } = engine.ingest(
       snapshot,
       (ip) => rdnsCache.lookup(ip),
-      (ip) => geoip.lookup(ip)
+      (ip) => geoip.lookup(ip),
+      (ip) => lanResolver.lookup(ip)
     );
     storage.appendSnapshotLog({
       timestamp: snapshot.timestamp,
@@ -288,6 +335,8 @@ async function startServer() {
       geoipCityLoaded: gStats.cityLoaded,
       geoipAsnLoaded: gStats.asnLoaded,
       rdnsEnabled: rdnsCache.getConfig().enabled,
+      lanDnsEnabled: lanResolver.getConfig().enabled,
+      lanDnsServer: lanResolver.getConfig().server,
     });
   });
 
@@ -343,12 +392,22 @@ async function startServer() {
       ttlSec: typeof body.rdnsTtlSec === 'number' ? body.rdnsTtlSec : undefined,
       skipPrivate: typeof body.rdnsSkipPrivate === 'boolean' ? body.rdnsSkipPrivate : undefined,
     });
+    const updatedLanDns = lanResolver.updateConfig({
+      enabled: typeof body.lanDnsEnabled === 'boolean' ? body.lanDnsEnabled : undefined,
+      server: typeof body.lanDnsServer === 'string' ? body.lanDnsServer : undefined,
+      ttlSec: typeof body.lanDnsTtlSec === 'number' ? body.lanDnsTtlSec : undefined,
+      stripDomain: typeof body.stripLanDomain === 'boolean' ? body.stripLanDomain : undefined,
+    });
     engine.updateServerConfig({
       persistenceMode: storage.getMode(),
       cacheDir: storage.getConfiguredCacheDir(),
       rdnsEnabled: updatedRdns.enabled,
       rdnsTtlSec: updatedRdns.ttlSec,
       rdnsSkipPrivate: updatedRdns.skipPrivate,
+      lanDnsEnabled: updatedLanDns.enabled,
+      lanDnsServer: updatedLanDns.server,
+      lanDnsTtlSec: updatedLanDns.ttlSec,
+      stripLanDomain: updatedLanDns.stripDomain,
       geoipEnabled: geoip.isEnabled(),
       geoipDir: geoip.getConfiguredDir(),
     });
@@ -396,6 +455,38 @@ async function startServer() {
     const snap = engine.getSnapshot();
     broadcastDashboard({ type: 'traffic:tick', data: snap });
     res.json({ ok: true, serverStats: snap.serverStats });
+  });
+
+  app.post('/api/lan-dns/clear', (_req, res) => {
+    lanResolver.clear();
+    syncStatsAndPersist();
+    const snap = engine.getSnapshot();
+    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    res.json({ ok: true, serverStats: snap.serverStats });
+  });
+
+  app.post('/api/devices/alias', (req, res) => {
+    const key = typeof req.body?.key === 'string' ? req.body.key.trim() : '';
+    const matchBy = req.body?.matchBy === 'ip' ? 'ip' : 'mac';
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    if (!key) {
+      res.status(400).json({ error: 'Missing device alias key' });
+      return;
+    }
+    const aliases = engine.setDeviceAlias({ key, matchBy, name });
+    persistUserConfig();
+    const snap = engine.getSnapshot();
+    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    res.json({ ok: true, deviceAliases: aliases, snapshot: snap });
+  });
+
+  app.delete('/api/devices/alias/:key', (req, res) => {
+    const key = decodeURIComponent(req.params.key || '');
+    const aliases = engine.deleteDeviceAlias(key);
+    persistUserConfig();
+    const snap = engine.getSnapshot();
+    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    res.json({ ok: true, deviceAliases: aliases, snapshot: snap });
   });
 
   app.post('/api/rules', (req, res) => {
