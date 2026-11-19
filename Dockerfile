@@ -19,18 +19,21 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV ORBIFLOW_CONFIG_DIR=/config
+ENV ORBIFLOW_CACHE_DIR=/config/cache
+ENV ORBIFLOW_GEOIP_DIR=/config/geoip
 
 COPY package.json ./
-RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws', 'dotenv'].map((k) => k + '@' + d[k]).join(' '));" \
+RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws', 'dotenv', 'maxmind'].map((k) => k + '@' + d[k]).join(' '));" \
   | xargs npm install --no-save --no-audit --no-fund && \
   rm -f package.json package-lock.json && \
-  mkdir -p /app/data
+  mkdir -p /config/cache /config/geoip
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.mjs ./server.mjs
 
 EXPOSE 3000
-VOLUME ["/app/data"]
+VOLUME ["/config"]
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1

@@ -20,7 +20,16 @@
     --accent-rx: #38bdf8;
     --accent-tx: #34d399;
     --accent-primary: #38bdf8;
-    --accent-primary-ink: #082f49;
+    --accent-primary-ink: #ffffff;
+    --btn-primary-bg: #0369a1;
+    --btn-primary-hover: #0284c7;
+    --btn-primary-ink: #ffffff;
+    --btn-warning-bg: #b45309;
+    --btn-warning-hover: #d97706;
+    --btn-warning-ink: #ffffff;
+    --tooltip-bg: #1e293b;
+    --tooltip-border: #334155;
+    --tooltip-ink: #f8fafc;
     color-scheme: dark;
   }
 
@@ -37,7 +46,16 @@
     --accent-rx: #89b4fa;
     --accent-tx: #a6e3a1;
     --accent-primary: #89b4fa;
-    --accent-primary-ink: #11111b;
+    --accent-primary-ink: #ffffff;
+    --btn-primary-bg: #1e66f5;
+    --btn-primary-hover: #3b82f6;
+    --btn-primary-ink: #ffffff;
+    --btn-warning-bg: #b45309;
+    --btn-warning-hover: #d97706;
+    --btn-warning-ink: #ffffff;
+    --tooltip-bg: #313244;
+    --tooltip-border: #45475a;
+    --tooltip-ink: #cdd6f4;
     color-scheme: dark;
   }
 
@@ -54,7 +72,16 @@
     --accent-rx: #80ffea;
     --accent-tx: #8aff80;
     --accent-primary: #9580ff;
-    --accent-primary-ink: #1b1a23;
+    --accent-primary-ink: #ffffff;
+    --btn-primary-bg: #6d28d9;
+    --btn-primary-hover: #7c3aed;
+    --btn-primary-ink: #ffffff;
+    --btn-warning-bg: #b45309;
+    --btn-warning-hover: #d97706;
+    --btn-warning-ink: #ffffff;
+    --tooltip-bg: #2e2c3e;
+    --tooltip-border: #454158;
+    --tooltip-ink: #f8f8f2;
     color-scheme: dark;
   }
 
@@ -71,7 +98,16 @@
     --accent-rx: #88c0d0;
     --accent-tx: #a3be8c;
     --accent-primary: #88c0d0;
-    --accent-primary-ink: #242933;
+    --accent-primary-ink: #ffffff;
+    --btn-primary-bg: #2e6f95;
+    --btn-primary-hover: #3b82a6;
+    --btn-primary-ink: #ffffff;
+    --btn-warning-bg: #b45309;
+    --btn-warning-hover: #d97706;
+    --btn-warning-ink: #ffffff;
+    --tooltip-bg: #3b4252;
+    --tooltip-border: #4c566a;
+    --tooltip-ink: #eceff4;
     color-scheme: dark;
   }
 
@@ -88,7 +124,16 @@
     --accent-rx: #7aa2f7;
     --accent-tx: #9ece6a;
     --accent-primary: #7aa2f7;
-    --accent-primary-ink: #16161e;
+    --accent-primary-ink: #ffffff;
+    --btn-primary-bg: #3b5bdb;
+    --btn-primary-hover: #4c6ef5;
+    --btn-primary-ink: #ffffff;
+    --btn-warning-bg: #b45309;
+    --btn-warning-hover: #d97706;
+    --btn-warning-ink: #ffffff;
+    --tooltip-bg: #24283b;
+    --tooltip-border: #3b4261;
+    --tooltip-ink: #c0caf5;
     color-scheme: dark;
   }
 
@@ -105,7 +150,16 @@
     --accent-rx: #f59e0b;
     --accent-tx: #2dd4bf;
     --accent-primary: #f59e0b;
-    --accent-primary-ink: #1c1917;
+    --accent-primary-ink: #ffffff;
+    --btn-primary-bg: #b45309;
+    --btn-primary-hover: #d97706;
+    --btn-primary-ink: #ffffff;
+    --btn-warning-bg: #9a3412;
+    --btn-warning-hover: #c2410c;
+    --btn-warning-ink: #ffffff;
+    --tooltip-bg: #292524;
+    --tooltip-border: #44403c;
+    --tooltip-ink: #fafaf9;
     color-scheme: dark;
   }
 
@@ -123,6 +177,15 @@
     --accent-tx: #059669;
     --accent-primary: #0284c7;
     --accent-primary-ink: #ffffff;
+    --btn-primary-bg: #0369a1;
+    --btn-primary-hover: #0284c7;
+    --btn-primary-ink: #ffffff;
+    --btn-warning-bg: #b45309;
+    --btn-warning-hover: #d97706;
+    --btn-warning-ink: #ffffff;
+    --tooltip-bg: #0f172a;
+    --tooltip-border: #334155;
+    --tooltip-ink: #f8fafc;
     color-scheme: light;
   }
 
@@ -140,6 +203,15 @@
     --accent-tx: #40a02b;
     --accent-primary: #1e66f5;
     --accent-primary-ink: #ffffff;
+    --btn-primary-bg: #1e66f5;
+    --btn-primary-hover: #1d4ed8;
+    --btn-primary-ink: #ffffff;
+    --btn-warning-bg: #b45309;
+    --btn-warning-hover: #d97706;
+    --btn-warning-ink: #ffffff;
+    --tooltip-bg: #313244;
+    --tooltip-border: #45475a;
+    --tooltip-ink: #eff1f5;
     color-scheme: light;
   }
 
@@ -203,6 +275,30 @@
 
 .app-row-hover:hover {
   background-color: var(--bg-hover);
+}
+
+.app-btn-primary {
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-ink);
+}
+
+.app-btn-primary:hover:not(:disabled) {
+  background-color: var(--btn-primary-hover);
+}
+
+.app-btn-warning {
+  background-color: var(--btn-warning-bg);
+  color: var(--btn-warning-ink);
+}
+
+.app-btn-warning:hover:not(:disabled) {
+  background-color: var(--btn-warning-hover);
+}
+
+.app-tooltip {
+  background-color: var(--tooltip-bg);
+  border-color: var(--tooltip-border);
+  color: var(--tooltip-ink);
 }
 
 ::-webkit-scrollbar {

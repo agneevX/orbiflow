@@ -73,6 +73,15 @@ export interface ProbeSnapshot {
   rawConntrackLines?: string[];
 }
 
+export interface GeoIpInfo {
+  countryCode?: string;
+  countryName?: string;
+  city?: string;
+  asn?: number;
+  org?: string;
+  source: 'maxmind';
+}
+
 export interface EnrichedFlow {
   id: string;
   proto: TransportProtocol;
@@ -86,6 +95,7 @@ export interface EnrichedFlow {
   dstIp: string;
   dstHost?: string;
   dstService: string;
+  dstGeo?: GeoIpInfo;
   dport: number;
   txBytes: number;
   rxBytes: number;
@@ -133,6 +143,7 @@ export interface RemoteEndpointSummary {
   ip: string;
   label: string;
   service: string;
+  geo?: GeoIpInfo;
   ports: number[];
   bytes: number;
   bps: number;
@@ -189,17 +200,28 @@ export interface ProbeStatus {
 
 export interface ServerConfig {
   persistenceMode: PersistenceMode;
+  cacheDir: string;
   rdnsEnabled: boolean;
   rdnsTtlSec: number;
   rdnsSkipPrivate: boolean;
+  geoipEnabled: boolean;
+  geoipDir: string;
 }
 
 export interface ServerStats {
+  configPath: string;
+  activeCacheDir: string;
   persistedSnapshots: number;
   diskLogSizeBytes: number;
   rdnsCacheSize: number;
   rdnsHits: number;
   rdnsMisses: number;
+  geoipActiveDir: string;
+  geoipCityLoaded: boolean;
+  geoipAsnLoaded: boolean;
+  geoipCityFile: string | null;
+  geoipAsnFile: string | null;
+  geoipLookups: number;
 }
 
 export interface DashboardSnapshot {

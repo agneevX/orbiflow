@@ -1,3 +1,5 @@
+export type ThemeMode = 'auto' | 'dark' | 'light';
+
 export type ThemeId =
   | 'obsidian'
   | 'catppuccin-mocha'
@@ -7,8 +9,6 @@ export type ThemeId =
   | 'amber'
   | 'daylight'
   | 'catppuccin-latte';
-
-export type ThemeSetting = 'auto' | ThemeId;
 
 export interface ThemePalette {
   id: ThemeId;
@@ -161,23 +161,40 @@ export const THEMES: Record<ThemeId, ThemePalette> = {
 export const DARK_THEMES = Object.values(THEMES).filter((t) => t.isDark);
 export const LIGHT_THEMES = Object.values(THEMES).filter((t) => !t.isDark);
 
-export function normalizeThemeSetting(raw: string | null | undefined): ThemeSetting {
-  if (!raw || raw === 'auto') return 'auto';
-  if (raw === 'nordic') return 'nord';
-  if (raw in THEMES) return raw as ThemeId;
+export function normalizeThemeMode(raw: string | null | undefined): ThemeMode {
+  if (raw === 'dark' || raw === 'light' || raw === 'auto') return raw;
   return 'auto';
 }
 
-export function resolveThemeId(
-  setting: ThemeSetting,
-  systemPrefersDark: boolean,
-  autoDarkTheme: ThemeId = 'obsidian',
-  autoLightTheme: ThemeId = 'daylight'
-): ThemeId {
-  if (setting === 'auto') {
-    return systemPrefersDark ? autoDarkTheme : autoLightTheme;
+export function normalizeDarkTheme(raw: string | null | undefined): ThemeId {
+  if (raw === 'nordic') return 'nord';
+  if (raw && raw in THEMES && THEMES[raw as ThemeId].isDark) {
+    return raw as ThemeId;
   }
-  return setting in THEMES ? setting : systemPrefersDark ? autoDarkTheme : autoLightTheme;
+  return 'obsidian';
+}
+
+export function normalizeLightTheme(raw: string | null | undefined): ThemeId {
+  if (raw && raw in THEMES && !THEMES[raw as ThemeId].isDark) {
+    return raw as ThemeId;
+  }
+  return 'daylight';
+}
+
+export function resolveEffectiveIsDark(mode: ThemeMode, systemPrefersDark: boolean): boolean {
+  if (mode === 'dark') return true;
+  if (mode === 'light') return false;
+  return systemPrefersDark;
+}
+
+export function resolveThemeId(
+  mode: ThemeMode,
+  systemPrefersDark: boolean,
+  darkTheme: ThemeId = 'obsidian',
+  lightTheme: ThemeId = 'daylight'
+): ThemeId {
+  const isDark = resolveEffectiveIsDark(mode, systemPrefersDark);
+  return isDark ? normalizeDarkTheme(darkTheme) : normalizeLightTheme(lightTheme);
 }
 
 export function getSystemPrefersDark(): boolean {

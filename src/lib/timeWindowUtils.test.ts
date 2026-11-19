@@ -80,3 +80,27 @@ test('analyzeTimeWindow returns full status when samples continuously cover the 
   assert.equal(res.noDataRanges.length, 0);
   assert.equal(res.segments.length, 1);
 });
+
+test('summarizeSelectionRange calculates average, peak, and estimated volume for selected points', async () => {
+  const { summarizeSelectionRange } = await import('./timeWindowUtils');
+  const now = 1_700_000_000_000;
+  const points: TrafficPoint[] = [
+    { timestamp: now - 30_000, rxBps: 1_000_000, txBps: 200_000, activeFlows: 5 },
+    { timestamp: now - 20_000, rxBps: 3_000_000, txBps: 400_000, activeFlows: 6 },
+    { timestamp: now - 10_000, rxBps: 2_000_000, txBps: 600_000, activeFlows: 7 },
+  ];
+
+  const summary = summarizeSelectionRange(points, now - 30_000, now - 10_000);
+  assert.equal(summary.hasData, true);
+  assert.equal(summary.sampleCount, 3);
+  assert.equal(summary.avgRxBps, 2_000_000);
+  assert.equal(summary.peakRxBps, 3_000_000);
+  assert.equal(summary.avgTxBps, 400_000);
+  assert.equal(summary.peakTxBps, 600_000);
+  assert.equal(summary.estimatedRxBytes, 40_000_000);
+
+  const empty = summarizeSelectionRange(points, now - 60_000, now - 40_000);
+  assert.equal(empty.hasData, false);
+  assert.equal(empty.sampleCount, 0);
+});
+

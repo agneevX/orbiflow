@@ -455,10 +455,14 @@ export function generateDockerCompose(cfg: ProbeConfigOptions): string {
     ports:
       - "3000:3000"
     volumes:
-      - ./data:/app/data
+      - ./config:/config
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - ORBIFLOW_CONFIG_DIR=/config
+      - ORBIFLOW_CACHE_DIR=/config/cache
+      - ORBIFLOW_GEOIP_DIR=/config/geoip
+      - ORBIFLOW_GEOIP_ENABLED=true
       - ORBIFLOW_PROBE_TOKEN=${cfg.token}
       - ORBIFLOW_ENABLE_SIMULATOR=false
       - ORBIFLOW_STORAGE_MODE=disk

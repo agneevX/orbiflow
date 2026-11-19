@@ -129,6 +129,11 @@ test('TrafficMonitorEngine builds client-destination flow links, 1m rollups, and
   assert.ok(!csv.includes('Packets'));
 });
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { PersistenceStore } from '../../server/storage';
+
 test('RdnsCache caches entries, skips private IPs, and respects disabled config', () => {
   const cache = new RdnsCache({ enabled: false, ttlSec: 60, skipPrivate: true });
   assert.equal(cache.lookup('192.168.1.5'), null);
@@ -138,4 +143,46 @@ test('RdnsCache caches entries, skips private IPs, and respects disabled config'
   cache.setEntry('8.8.8.8', 'dns.google');
   assert.equal(cache.lookup('8.8.8.8'), 'dns.google');
   assert.equal(cache.getStats().hits, 1);
+});
+
+test('PersistenceStore saves user config in configDir and supports changing cacheDir', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orbiflow-storage-'));
+  const cfgDir = path.join(tmpRoot, 'config');
+  const cacheDir1 = path.join(cfgDir, 'cache');
+  const cacheDir2 = path.join(tmpRoot, 'custom-cache');
+
+  try {
+    const store = new PersistenceStore('memory', cfgDir, cacheDir1);
+    assert.equal(store.getConfigPath(), path.join(cfgDir, 'config.json'));
+    assert.equal(store.getActiveCacheDir(), cacheDir1);
+
+    store.saveUserConfig({
+      persistenceMode: 'disk',
+      cacheDir: cacheDir2,
+      rdnsEnabled: true,
+      rdnsTtlSec: 1800,
+      rdnsSkipPrivate: true,
+    });
+
+    const reloaded = store.loadUserConfig();
+    assert.ok(reloaded);
+    assert.equal(reloaded?.persistenceMode, 'disk');
+    assert.equal(reloaded?.cacheDir, cacheDir2);
+    assert.equal(reloaded?.rdnsEnabled, true);
+
+    store.setCacheDir(cacheDir2);
+    store.setMode('disk');
+    store.appendSnapshotLog({
+      timestamp: Date.now(),
+      rxBps: 1000,
+      txBps: 500,
+      activeFlows: 3,
+      source: 'live',
+    });
+
+    assert.ok(fs.existsSync(path.join(cacheDir2, 'traffic-snapshots.jsonl')));
+    assert.ok(store.getStats().diskLogSizeBytes > 0);
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
 });

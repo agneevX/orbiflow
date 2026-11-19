@@ -5,6 +5,7 @@ import type {
   ClientDestinationLink,
   DashboardSnapshot,
   EnrichedFlow,
+  GeoIpInfo,
   HostSummary,
   InterfaceCounters,
   ProbeSnapshot,
@@ -35,32 +36,33 @@ interface FlowTrackRecord {
 }
 
 export type RdnsLookupFn = (ip: string) => string | null;
+export type GeoIpLookupFn = (ip: string) => GeoIpInfo | null;
 
 const DEFAULT_RULES: AlertRule[] = [
   {
     id: 'rule-wan-rx',
-    name: 'WAN Download Saturation',
+    name: 'High Download Usage',
     metric: 'wan_rx_mbps',
     threshold: 250,
     enabled: true,
   },
   {
     id: 'rule-wan-tx',
-    name: 'High Upstream Egress Spike',
+    name: 'High Upload Usage',
     metric: 'wan_tx_mbps',
     threshold: 65,
     enabled: true,
   },
   {
     id: 'rule-host-flows',
-    name: 'Host Connection Flood',
+    name: 'Device Connection Flood',
     metric: 'host_flows',
     threshold: 60,
     enabled: true,
   },
   {
     id: 'rule-total-flows',
-    name: 'Conntrack Table Pressure',
+    name: 'High Connection Count',
     metric: 'total_flows',
     threshold: 1000,
     enabled: false,
@@ -160,17 +162,28 @@ export class TrafficMonitorEngine {
 
   private serverConfig: ServerConfig = {
     persistenceMode: 'memory',
+    cacheDir: '/config/cache',
     rdnsEnabled: false,
     rdnsTtlSec: 3600,
     rdnsSkipPrivate: true,
+    geoipEnabled: true,
+    geoipDir: '/config/geoip',
   };
 
   private serverStats: ServerStats = {
+    configPath: '/config/config.json',
+    activeCacheDir: '/config/cache',
     persistedSnapshots: 0,
     diskLogSizeBytes: 0,
     rdnsCacheSize: 0,
     rdnsHits: 0,
     rdnsMisses: 0,
+    geoipActiveDir: '/config/geoip',
+    geoipCityLoaded: false,
+    geoipAsnLoaded: false,
+    geoipCityFile: null,
+    geoipAsnFile: null,
+    geoipLookups: 0,
   };
 
   private probeStatus: ProbeStatus = {
@@ -381,7 +394,8 @@ export class TrafficMonitorEngine {
 
   public ingest(
     snapshot: ProbeSnapshot,
-    rdnsLookup?: RdnsLookupFn
+    rdnsLookup?: RdnsLookupFn,
+    geoipLookup?: GeoIpLookupFn
   ): {
     dashboard: DashboardSnapshot;
     newAlerts: AlertEvent[];
@@ -460,15 +474,24 @@ export class TrafficMonitorEngine {
       const arp = arpByIp.get(raw.src) || arpByIp.get(raw.dst);
       const srcCachedRdns = rdnsLookup && !arp?.hostname ? rdnsLookup(raw.src) : null;
       const dstCachedRdns = rdnsLookup ? rdnsLookup(raw.dst) : null;
+      const dstGeo = !isPrivateIp(raw.dst) && geoipLookup ? geoipLookup(raw.dst) || undefined : undefined;
 
       const srcHost =
         arp?.hostname ||
         srcCachedRdns ||
         (isPrivateIp(raw.src) ? raw.src : describeRemoteIp(raw.src).label);
 
-      const remoteInfo = isPrivateIp(raw.dst)
-        ? { label: arpByIp.get(raw.dst)?.hostname || raw.dst, service: 'Local LAN' }
+      const baseRemoteInfo = isPrivateIp(raw.dst)
+        ? { label: arpByIp.get(raw.dst)?.hostname || raw.dst, service: 'Local Network' }
         : describeRemoteIp(raw.dst, dstCachedRdns);
+
+      const remoteInfo = {
+        label: baseRemoteInfo.label,
+        service:
+          baseRemoteInfo.service === 'External IP' && dstGeo?.org
+            ? dstGeo.org
+            : baseRemoteInfo.service,
+      };
 
       const flow: EnrichedFlow = {
         id,
@@ -483,6 +506,7 @@ export class TrafficMonitorEngine {
         dstIp: raw.dst,
         dstHost: remoteInfo.label,
         dstService: remoteInfo.service,
+        dstGeo,
         dport: raw.dport,
         txBytes: raw.txBytes,
         rxBytes: raw.rxBytes,
@@ -629,13 +653,15 @@ export class TrafficMonitorEngine {
       const remoteIp = !isPrivateIp(f.dstIp) ? f.dstIp : !isPrivateIp(f.srcIp) ? f.srcIp : null;
       if (remoteIp) {
         const cached = rdnsLookup ? rdnsLookup(remoteIp) : null;
+        const geo = geoipLookup ? geoipLookup(remoteIp) || undefined : undefined;
         const desc = describeRemoteIp(remoteIp, cached);
         let rem = remoteMap.get(remoteIp);
         if (!rem) {
           rem = {
             ip: remoteIp,
             label: desc.label,
-            service: desc.service,
+            service: desc.service === 'External IP' && geo?.org ? geo.org : desc.service,
+            geo,
             ports: [],
             portSet: new Set<number>(),
             bytes: 0,
@@ -740,16 +766,16 @@ export class TrafficMonitorEngine {
 
       if (rule.metric === 'wan_rx_mbps') {
         value = rxMbps;
-        message = `eth0 download reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+        message = `Internet download reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
       } else if (rule.metric === 'wan_tx_mbps') {
         value = txMbps;
-        message = `eth0 upload reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+        message = `Internet upload reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
       } else if (rule.metric === 'host_flows' && maxHost) {
         value = maxHost.activeFlows;
-        message = `${maxHost.hostname} (${maxHost.ip}) opened ${value} concurrent flows (threshold ${rule.threshold})`;
+        message = `${maxHost.hostname} (${maxHost.ip}) opened ${value} active connections (threshold ${rule.threshold})`;
       } else if (rule.metric === 'total_flows') {
         value = totalFlows;
-        message = `Active conntrack entries reached ${value} (threshold ${rule.threshold})`;
+        message = `Active router connections reached ${value} (threshold ${rule.threshold})`;
       }
 
       if (value > rule.threshold) {
@@ -793,10 +819,10 @@ export function exportFlowsToCsv(flows: EnrichedFlow[]): string {
     'Destination Host',
     'Service',
     'Destination Port',
-    'Rx Bytes',
-    'Tx Bytes',
-    'Rx Rate (B/s)',
-    'Tx Rate (B/s)',
+    'Download Bytes',
+    'Upload Bytes',
+    'Download Rate (B/s)',
+    'Upload Rate (B/s)',
   ];
 
   const escapeCell = (val: string | number) => {

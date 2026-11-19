@@ -4,32 +4,39 @@ import {
   DARK_THEMES,
   LIGHT_THEMES,
   THEMES,
-  normalizeThemeSetting,
+  normalizeDarkTheme,
+  normalizeLightTheme,
+  normalizeThemeMode,
+  resolveEffectiveIsDark,
   resolveThemeId,
 } from './themes';
 
-test('normalizeThemeSetting defaults to auto, migrates legacy nordic, and validates known themes', () => {
-  assert.equal(normalizeThemeSetting(null), 'auto');
-  assert.equal(normalizeThemeSetting(undefined), 'auto');
-  assert.equal(normalizeThemeSetting('unknown-theme'), 'auto');
-  assert.equal(normalizeThemeSetting('auto'), 'auto');
-  assert.equal(normalizeThemeSetting('nordic'), 'nord');
-  assert.equal(normalizeThemeSetting('catppuccin-mocha'), 'catppuccin-mocha');
-  assert.equal(normalizeThemeSetting('dracula-pro'), 'dracula-pro');
-  assert.equal(normalizeThemeSetting('tokyo-night'), 'tokyo-night');
+test('normalizeThemeMode validates auto, dark, and light modes', () => {
+  assert.equal(normalizeThemeMode(null), 'auto');
+  assert.equal(normalizeThemeMode('unknown'), 'auto');
+  assert.equal(normalizeThemeMode('auto'), 'auto');
+  assert.equal(normalizeThemeMode('dark'), 'dark');
+  assert.equal(normalizeThemeMode('light'), 'light');
 });
 
-test('resolveThemeId switches between dark and light themes in auto mode', () => {
-  assert.equal(resolveThemeId('auto', true), 'obsidian');
-  assert.equal(resolveThemeId('auto', false), 'daylight');
+test('normalizeDarkTheme and normalizeLightTheme enforce dark/light palette separation', () => {
+  assert.equal(normalizeDarkTheme('nordic'), 'nord');
+  assert.equal(normalizeDarkTheme('dracula-pro'), 'dracula-pro');
+  assert.equal(normalizeDarkTheme('daylight'), 'obsidian');
+  assert.equal(normalizeLightTheme('catppuccin-latte'), 'catppuccin-latte');
+  assert.equal(normalizeLightTheme('tokyo-night'), 'daylight');
+});
+
+test('resolveThemeId follows mode (auto/dark/light) and picks the matching palette', () => {
+  assert.equal(resolveEffectiveIsDark('auto', true), true);
+  assert.equal(resolveEffectiveIsDark('auto', false), false);
+  assert.equal(resolveEffectiveIsDark('dark', false), true);
+  assert.equal(resolveEffectiveIsDark('light', true), false);
+
   assert.equal(resolveThemeId('auto', true, 'tokyo-night', 'catppuccin-latte'), 'tokyo-night');
   assert.equal(resolveThemeId('auto', false, 'tokyo-night', 'catppuccin-latte'), 'catppuccin-latte');
-});
-
-test('resolveThemeId preserves explicit theme selection regardless of system color scheme', () => {
-  assert.equal(resolveThemeId('dracula-pro', false), 'dracula-pro');
-  assert.equal(resolveThemeId('catppuccin-latte', true), 'catppuccin-latte');
-  assert.equal(resolveThemeId('nord', false), 'nord');
+  assert.equal(resolveThemeId('dark', false, 'dracula-pro', 'daylight'), 'dracula-pro');
+  assert.equal(resolveThemeId('light', true, 'dracula-pro', 'catppuccin-latte'), 'catppuccin-latte');
 });
 
 test('DARK_THEMES and LIGHT_THEMES cover every theme in THEMES', () => {

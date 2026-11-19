@@ -7,7 +7,8 @@ import dotenv from 'dotenv';
 import { TrafficMonitorEngine, exportFlowsToCsv } from './src/lib/telemetryEngine';
 import { OrbiProbeSimulator } from './server/simulator';
 import { RdnsCache } from './server/rdnsCache';
-import { PersistenceStore } from './server/storage';
+import { DEFAULT_CACHE_DIR, DEFAULT_CONFIG_DIR, PersistenceStore } from './server/storage';
+import { DEFAULT_GEOIP_DIR, MaxMindService } from './server/geoip';
 import type { AlertRule, PersistenceMode, ProbeSnapshot } from './src/types/telemetry';
 
 dotenv.config();
@@ -20,13 +21,22 @@ const PROBE_TOKEN = process.env.ORBIFLOW_PROBE_TOKEN || 'orbi-rbk50-voxel-secret
 const SIMULATOR_DEFAULT = process.env.ORBIFLOW_ENABLE_SIMULATOR !== 'false';
 const STORAGE_MODE: PersistenceMode =
   process.env.ORBIFLOW_STORAGE_MODE === 'disk' ? 'disk' : 'memory';
+const CONFIG_DIR = process.env.ORBIFLOW_CONFIG_DIR || DEFAULT_CONFIG_DIR;
+const CACHE_DIR = process.env.ORBIFLOW_CACHE_DIR || DEFAULT_CACHE_DIR;
+const GEOIP_DIR = process.env.ORBIFLOW_GEOIP_DIR || DEFAULT_GEOIP_DIR;
+const GEOIP_ENABLED_DEFAULT = process.env.ORBIFLOW_GEOIP_ENABLED !== 'false';
 const RDNS_ENABLED_DEFAULT = process.env.ORBIFLOW_RDNS_ENABLED === 'true';
 
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
-  const storage = new PersistenceStore(STORAGE_MODE);
+  const storage = new PersistenceStore(STORAGE_MODE, CONFIG_DIR, CACHE_DIR);
+  const geoip = new MaxMindService({
+    enabled: GEOIP_ENABLED_DEFAULT,
+    geoipDir: GEOIP_DIR,
+    fallbackBaseDir: path.dirname(storage.getConfigPath()),
+  });
   const rdnsCache = new RdnsCache({
     enabled: RDNS_ENABLED_DEFAULT,
     ttlSec: Number(process.env.ORBIFLOW_RDNS_TTL || 3600),
@@ -35,23 +45,81 @@ async function startServer() {
 
   const engine = new TrafficMonitorEngine();
   engine.setSimulatorEnabled(SIMULATOR_DEFAULT);
+
+  // Load persistent user config from /config/config.json before loading cached traffic history
+  const savedUserConfig = storage.loadUserConfig();
+  if (savedUserConfig) {
+    if (savedUserConfig.persistenceMode === 'memory' || savedUserConfig.persistenceMode === 'disk') {
+      storage.setMode(savedUserConfig.persistenceMode);
+    }
+    if (typeof savedUserConfig.cacheDir === 'string' && savedUserConfig.cacheDir.trim()) {
+      storage.setCacheDir(savedUserConfig.cacheDir);
+    }
+    await geoip.updateConfig({
+      enabled:
+        typeof savedUserConfig.geoipEnabled === 'boolean'
+          ? savedUserConfig.geoipEnabled
+          : undefined,
+      geoipDir:
+        typeof savedUserConfig.geoipDir === 'string' && savedUserConfig.geoipDir.trim()
+          ? savedUserConfig.geoipDir
+          : undefined,
+    });
+    rdnsCache.updateConfig({
+      enabled:
+        typeof savedUserConfig.rdnsEnabled === 'boolean' ? savedUserConfig.rdnsEnabled : undefined,
+      ttlSec:
+        typeof savedUserConfig.rdnsTtlSec === 'number' ? savedUserConfig.rdnsTtlSec : undefined,
+      skipPrivate:
+        typeof savedUserConfig.rdnsSkipPrivate === 'boolean'
+          ? savedUserConfig.rdnsSkipPrivate
+          : undefined,
+    });
+    if (Array.isArray(savedUserConfig.rules) && savedUserConfig.rules.length > 0) {
+      engine.updateRules(savedUserConfig.rules);
+    }
+  } else {
+    await geoip.reload();
+  }
+
   engine.updateServerConfig({
     persistenceMode: storage.getMode(),
-    ...rdnsCache.getConfig(),
+    cacheDir: storage.getConfiguredCacheDir(),
     rdnsEnabled: rdnsCache.getConfig().enabled,
+    rdnsTtlSec: rdnsCache.getConfig().ttlSec,
+    rdnsSkipPrivate: rdnsCache.getConfig().skipPrivate,
+    geoipEnabled: geoip.isEnabled(),
+    geoipDir: geoip.getConfiguredDir(),
   });
 
-  // Restore saved state if disk persistence is active
+  // Restore cached traffic history if disk persistence is active
   const savedState = storage.loadState();
   if (savedState) {
-    engine.hydrateFromStorage(savedState);
-    if (savedState.serverConfig) {
-      rdnsCache.updateConfig({
-        enabled: savedState.serverConfig.rdnsEnabled,
-        ttlSec: savedState.serverConfig.rdnsTtlSec,
-        skipPrivate: savedState.serverConfig.rdnsSkipPrivate,
-      });
-    }
+    engine.hydrateFromStorage({
+      ...savedState,
+      // Keep user config & rules from /config/config.json authoritative over cache snapshots
+      rules: savedUserConfig?.rules?.length ? savedUserConfig.rules : savedState.rules,
+      serverConfig: engine.getSnapshot().serverConfig,
+    });
+  }
+
+  const persistUserConfig = () => {
+    const snap = engine.getSnapshot();
+    storage.saveUserConfig({
+      persistenceMode: snap.serverConfig.persistenceMode,
+      cacheDir: snap.serverConfig.cacheDir,
+      rdnsEnabled: snap.serverConfig.rdnsEnabled,
+      rdnsTtlSec: snap.serverConfig.rdnsTtlSec,
+      rdnsSkipPrivate: snap.serverConfig.rdnsSkipPrivate,
+      geoipEnabled: snap.serverConfig.geoipEnabled,
+      geoipDir: snap.serverConfig.geoipDir,
+      rules: snap.rules,
+    });
+  };
+
+  // Ensure /config/config.json exists on first boot so users can inspect or back it up
+  if (!savedUserConfig) {
+    persistUserConfig();
   }
 
   const simulator = new OrbiProbeSimulator();
@@ -87,17 +155,30 @@ async function startServer() {
   const syncStatsAndPersist = () => {
     const rStats = rdnsCache.getStats();
     const sStats = storage.getStats();
+    const gStats = geoip.getStats();
     engine.setServerStats({
+      configPath: sStats.configPath,
+      activeCacheDir: sStats.activeCacheDir,
       persistedSnapshots: sStats.persistedSnapshots,
       diskLogSizeBytes: sStats.diskLogSizeBytes,
       rdnsCacheSize: rStats.size,
       rdnsHits: rStats.hits,
       rdnsMisses: rStats.misses,
+      geoipActiveDir: gStats.activeDir,
+      geoipCityLoaded: gStats.cityLoaded,
+      geoipAsnLoaded: gStats.asnLoaded,
+      geoipCityFile: gStats.cityFile,
+      geoipAsnFile: gStats.asnFile,
+      geoipLookups: gStats.lookups,
     });
   };
 
   const handleIngestSnapshot = (snapshot: ProbeSnapshot) => {
-    const { dashboard, newAlerts } = engine.ingest(snapshot, (ip) => rdnsCache.lookup(ip));
+    const { dashboard, newAlerts } = engine.ingest(
+      snapshot,
+      (ip) => rdnsCache.lookup(ip),
+      (ip) => geoip.lookup(ip)
+    );
     storage.appendSnapshotLog({
       timestamp: snapshot.timestamp,
       rxBps: dashboard.kpis.rxBps,
@@ -195,11 +276,17 @@ async function startServer() {
 
   app.get('/api/health', (_req, res) => {
     const snap = engine.getSnapshot();
+    const gStats = geoip.getStats();
     res.json({
       ok: true,
       probeMode: snap.probe.mode,
       activeFlows: snap.kpis.activeFlows,
       storageMode: storage.getMode(),
+      configPath: storage.getConfigPath(),
+      cacheDir: storage.getActiveCacheDir(),
+      geoipDir: gStats.activeDir,
+      geoipCityLoaded: gStats.cityLoaded,
+      geoipAsnLoaded: gStats.asnLoaded,
       rdnsEnabled: rdnsCache.getConfig().enabled,
     });
   });
@@ -239,11 +326,18 @@ async function startServer() {
     res.json({ enabled: engine.isSimulatorEnabled(), snapshot: engine.getSnapshot() });
   });
 
-  app.post('/api/settings', (req, res) => {
+  app.post('/api/settings', async (req, res) => {
     const body = req.body || {};
+    if (typeof body.cacheDir === 'string' && body.cacheDir.trim()) {
+      storage.setCacheDir(body.cacheDir);
+    }
     if (body.persistenceMode === 'memory' || body.persistenceMode === 'disk') {
       storage.setMode(body.persistenceMode);
     }
+    await geoip.updateConfig({
+      enabled: typeof body.geoipEnabled === 'boolean' ? body.geoipEnabled : undefined,
+      geoipDir: typeof body.geoipDir === 'string' ? body.geoipDir : undefined,
+    });
     const updatedRdns = rdnsCache.updateConfig({
       enabled: typeof body.rdnsEnabled === 'boolean' ? body.rdnsEnabled : undefined,
       ttlSec: typeof body.rdnsTtlSec === 'number' ? body.rdnsTtlSec : undefined,
@@ -251,16 +345,50 @@ async function startServer() {
     });
     engine.updateServerConfig({
       persistenceMode: storage.getMode(),
+      cacheDir: storage.getConfiguredCacheDir(),
       rdnsEnabled: updatedRdns.enabled,
       rdnsTtlSec: updatedRdns.ttlSec,
       rdnsSkipPrivate: updatedRdns.skipPrivate,
+      geoipEnabled: geoip.isEnabled(),
+      geoipDir: geoip.getConfiguredDir(),
     });
     syncStatsAndPersist();
+    persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
     const snap = engine.getSnapshot();
     broadcastDashboard({ type: 'traffic:tick', data: snap });
     res.json({ serverConfig: snap.serverConfig, serverStats: snap.serverStats });
   });
+
+  app.post('/api/geoip/reload', async (_req, res) => {
+    await geoip.reload();
+    syncStatsAndPersist();
+    const snap = engine.getSnapshot();
+    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    res.json({ ok: true, serverStats: snap.serverStats });
+  });
+
+  app.post(
+    '/api/geoip/upload',
+    express.raw({ type: 'application/octet-stream', limit: '120mb' }),
+    async (req, res) => {
+      const filename = typeof req.query.filename === 'string' ? req.query.filename : '';
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const result = await geoip.saveUploadedDb(filename, buf);
+      if (!result.ok) {
+        res.status(400).json({ ok: false, error: result.error });
+        return;
+      }
+      syncStatsAndPersist();
+      const snap = engine.getSnapshot();
+      broadcastDashboard({ type: 'traffic:tick', data: snap });
+      res.json({
+        ok: true,
+        savedFile: result.savedFile,
+        serverStats: snap.serverStats,
+      });
+    }
+  );
 
   app.post('/api/rdns/clear', (_req, res) => {
     rdnsCache.clear();
@@ -277,6 +405,7 @@ async function startServer() {
       return;
     }
     const updated = engine.updateRules(rules);
+    persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
     broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
     res.json({ rules: updated });
@@ -331,6 +460,7 @@ async function startServer() {
 
   process.on('SIGTERM', () => {
     clearInterval(simTimer);
+    persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
     server.close();
   });

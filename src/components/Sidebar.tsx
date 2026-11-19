@@ -2,23 +2,30 @@ import {
   Activity,
   Bell,
   Cpu,
+  Database,
+  Globe,
   HardDrive,
   Layers,
+  Monitor,
+  Moon,
   Network,
   Palette,
+  Radio,
   Sliders,
+  Sun,
   Terminal,
+  Wifi,
   X,
 } from 'lucide-react';
 import type { BandwidthUnit, ProbeStatus } from '../types/telemetry';
 import {
   DARK_THEMES,
   LIGHT_THEMES,
-  THEMES,
   type ThemeId,
-  type ThemeSetting,
+  type ThemeMode,
 } from '../lib/themes';
 import { formatDuration } from '../lib/formatters';
+import { TechTerm } from './TechTerm';
 
 export type NavTab = 'overview' | 'flows' | 'hosts' | 'alerts' | 'setup' | 'settings';
 
@@ -28,10 +35,11 @@ interface SidebarProps {
   probe: ProbeStatus;
   wsConnected: boolean;
   unackAlerts: number;
-  themeSetting: ThemeSetting;
-  effectiveThemeId: ThemeId;
-  systemPrefersDark: boolean;
-  onChangeThemeSetting: (setting: ThemeSetting) => void;
+  themeMode: ThemeMode;
+  effectiveIsDark: boolean;
+  activeThemeId: ThemeId;
+  onChangeThemeMode: (mode: ThemeMode) => void;
+  onChangeActiveTheme: (themeId: ThemeId) => void;
   unit: BandwidthUnit;
   onChangeUnit: (u: BandwidthUnit) => void;
   onToggleSimulator: (enabled: boolean) => void;
@@ -42,10 +50,16 @@ interface SidebarProps {
 const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: 'Network Summary', icon: Activity },
   { id: 'flows', label: 'Connections', icon: Layers },
-  { id: 'hosts', label: 'LAN Clients', icon: Network },
+  { id: 'hosts', label: 'Local Devices', icon: Network },
   { id: 'alerts', label: 'Alerts & Rules', icon: Bell },
   { id: 'setup', label: 'Router Agent', icon: Terminal },
   { id: 'settings', label: 'Server Settings', icon: Sliders },
+];
+
+const THEME_MODES: Array<{ id: ThemeMode; label: string; icon: typeof Monitor }> = [
+  { id: 'auto', label: 'Auto', icon: Monitor },
+  { id: 'dark', label: 'Dark', icon: Moon },
+  { id: 'light', label: 'Light', icon: Sun },
 ];
 
 export function Sidebar({
@@ -54,10 +68,11 @@ export function Sidebar({
   probe,
   wsConnected,
   unackAlerts,
-  themeSetting,
-  effectiveThemeId,
-  systemPrefersDark,
-  onChangeThemeSetting,
+  themeMode,
+  effectiveIsDark,
+  activeThemeId,
+  onChangeThemeMode,
+  onChangeActiveTheme,
   unit,
   onChangeUnit,
   onToggleSimulator,
@@ -83,12 +98,14 @@ export function Sidebar({
         ? 'text-sky-500'
         : 'text-amber-500';
 
+  const availableThemes = effectiveIsDark ? DARK_THEMES : LIGHT_THEMES;
+
   const navContent = (
     <div className="flex h-full flex-col app-sidebar border-r">
       {/* Brand header */}
       <div className="flex items-center justify-between px-5 h-16 border-b app-border">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-sky-500/15 border border-sky-500/30 text-sky-500">
+          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-500">
             <Network className="h-4 w-4" aria-hidden="true" />
           </div>
           <span className="font-display text-base font-semibold tracking-tight whitespace-nowrap">
@@ -99,7 +116,7 @@ export function Sidebar({
           type="button"
           onClick={onCloseMobile}
           aria-label="Close navigation menu"
-          className="lg:hidden p-1.5 app-text-muted rounded-md"
+          className="lg:hidden p-1.5 app-text-muted rounded-xl"
         >
           <X className="h-5 w-5" />
         </button>
@@ -119,7 +136,7 @@ export function Sidebar({
                 onCloseMobile();
               }}
               aria-current={isActive ? 'page' : undefined}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-sm font-medium transition-colors whitespace-nowrap border ${
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-colors whitespace-nowrap border ${
                 isActive
                   ? 'app-surface app-border font-semibold'
                   : 'app-text-muted border-transparent app-row-hover'
@@ -141,68 +158,95 @@ export function Sidebar({
           );
         })}
 
-        {/* Display Preferences: Theme & Bandwidth Unit */}
+        {/* Display Preferences: Split Appearance Mode + Theme Palette + Speed Unit */}
         <div className="pt-4 mt-4 border-t app-border px-1 space-y-3">
+          {/* Part 1: Auto / Dark / Light mode */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-2">
-              <label
-                htmlFor="theme-select"
-                className="flex items-center gap-1.5 text-xs font-medium app-text-muted"
-              >
-                <Palette className="h-3.5 w-3.5" aria-hidden="true" />
-                Theme
-              </label>
-              {themeSetting === 'auto' && (
+              <span className="flex items-center gap-1.5 text-xs font-medium app-text-muted">
+                <Monitor className="h-3.5 w-3.5" aria-hidden="true" />
+                Appearance
+              </span>
+              {themeMode === 'auto' && (
                 <span
-                  data-testid="auto-theme-resolved"
-                  className="text-[11px] font-mono app-text-muted truncate"
+                  data-testid="auto-mode-resolved"
+                  className="text-[11px] font-mono app-text-muted"
                 >
-                  {THEMES[effectiveThemeId].label}
+                  {effectiveIsDark ? 'Dark' : 'Light'}
                 </span>
               )}
             </div>
-            <select
-              id="theme-select"
-              value={themeSetting}
-              onChange={(e) => onChangeThemeSetting(e.target.value as ThemeSetting)}
-              className="w-full app-input border rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+            <div
+              role="group"
+              aria-label="Appearance mode"
+              className="grid grid-cols-3 app-input border rounded-xl p-1"
             >
-              <option value="auto">
-                Auto (System · {systemPrefersDark ? 'Dark' : 'Light'})
-              </option>
-              <optgroup label="Dark Themes">
-                {DARK_THEMES.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.label}
-                  </option>
-                ))}
-              </optgroup>
-              <optgroup label="Light Themes">
-                {LIGHT_THEMES.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.label}
-                  </option>
-                ))}
-              </optgroup>
+              {THEME_MODES.map((m) => {
+                const ModeIcon = m.icon;
+                const active = themeMode === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    data-testid={`theme-mode-${m.id}`}
+                    aria-pressed={active}
+                    onClick={() => onChangeThemeMode(m.id)}
+                    className={`inline-flex items-center justify-center gap-1 py-1 text-[11px] font-medium rounded-lg transition-colors ${
+                      active ? 'app-surface font-semibold' : 'app-text-muted'
+                    }`}
+                  >
+                    <ModeIcon className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span>{m.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Part 2: Theme Palette following active Dark/Light mode */}
+          <div className="space-y-1.5">
+            <label
+              htmlFor="theme-palette-select"
+              className="flex items-center justify-between gap-1.5 text-xs font-medium app-text-muted"
+            >
+              <span className="flex items-center gap-1.5">
+                <Palette className="h-3.5 w-3.5" aria-hidden="true" />
+                Theme
+              </span>
+              <span className="text-[11px] font-normal opacity-80">
+                {effectiveIsDark ? 'Dark' : 'Light'}
+              </span>
+            </label>
+            <select
+              id="theme-palette-select"
+              data-testid="theme-palette-select"
+              value={activeThemeId}
+              onChange={(e) => onChangeActiveTheme(e.target.value as ThemeId)}
+              className="w-full app-input border rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+            >
+              {availableThemes.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
             </select>
           </div>
 
+          {/* Speed Unit */}
           <div className="space-y-1.5">
-            <span className="block text-xs font-medium app-text-muted">Rate Unit</span>
+            <span className="block text-xs font-medium app-text-muted">Speed Unit</span>
             <div
               role="group"
-              aria-label="Bandwidth rate unit"
-              className="grid grid-cols-2 app-input border rounded-md p-0.5"
+              aria-label="Bandwidth speed unit"
+              className="grid grid-cols-2 app-input border rounded-xl p-1"
             >
               {(['Mb/s', 'MB/s'] as BandwidthUnit[]).map((u) => (
                 <button
                   key={u}
                   type="button"
                   onClick={() => onChangeUnit(u)}
-                  className={`py-1 text-xs font-mono rounded-sm transition-colors ${
-                    unit === u
-                      ? 'app-surface font-semibold'
-                      : 'app-text-muted'
+                  className={`py-1 text-xs font-mono rounded-lg transition-colors ${
+                    unit === u ? 'app-surface font-semibold' : 'app-text-muted'
                   }`}
                 >
                   {u}
@@ -213,38 +257,64 @@ export function Sidebar({
         </div>
       </nav>
 
-      {/* Router node summary */}
+      {/* Router Agent Info Footer (every item has a glyph + tooltips on technical terms) */}
       <div className="p-4 border-t app-border space-y-2.5 text-xs">
-        <div className="flex items-center justify-between">
-          <span className="app-text-muted font-medium">Agent Feed</span>
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-1.5 app-text-muted font-medium">
+            <Radio className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>Agent Feed</span>
+          </span>
           <span className={`font-medium ${statusColor}`}>{statusText}</span>
         </div>
 
         <div className="space-y-1.5 app-text-muted">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="flex items-center gap-1.5">
-              <HardDrive className="h-3.5 w-3.5" aria-hidden="true" />
-              Router
+              <HardDrive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>Router</span>
             </span>
             <span className="font-mono app-text-secondary truncate max-w-[125px]">
               {probe.hostname}
             </span>
           </div>
-          <div className="flex items-center justify-between">
-            <span>WAN</span>
-            <span className="font-mono app-text-secondary">{probe.iface}</span>
-          </div>
-          <div className="flex items-center justify-between">
+
+          <div className="flex items-center justify-between gap-2">
             <span className="flex items-center gap-1.5">
-              <Cpu className="h-3.5 w-3.5" aria-hidden="true" />
-              Load / Up
+              <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <TechTerm
+                label="Internet Port"
+                tip="The router network interface connected to your ISP modem (usually eth0 on Netgear Orbi RBK50)."
+              />
+            </span>
+            <span className="font-mono app-text-secondary">
+              <TechTerm
+                label={probe.iface}
+                tip={`Linux kernel network interface "${probe.iface}" carrying all inbound and outbound internet traffic.`}
+              />
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5">
+              <Cpu className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <TechTerm
+                label="CPU / Up"
+                tip="1-minute average router processor load followed by total time since the last router reboot."
+              />
             </span>
             <span className="font-mono app-text-secondary tabular-nums">
               {probe.load1m.toFixed(2)} · {formatDuration(probe.uptimeSec)}
             </span>
           </div>
-          <div className="flex items-center justify-between">
-            <span>Socket</span>
+
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5">
+              <Wifi className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <TechTerm
+                label="Live Link"
+                tip="Real-time WebSocket connection between this browser tab and the OrbiFlow server."
+              />
+            </span>
             <span className="font-mono app-text-secondary">
               {wsConnected ? 'Connected' : 'Reconnecting'}
             </span>
@@ -252,15 +322,21 @@ export function Sidebar({
         </div>
 
         <div className="pt-1 space-y-1">
-          <div className="flex items-center justify-between text-[11px] app-text-muted">
-            <span>nf_conntrack</span>
+          <div className="flex items-center justify-between gap-2 text-[11px] app-text-muted">
+            <span className="flex items-center gap-1.5">
+              <Database className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <TechTerm
+                label="nf_conntrack"
+                tip="Linux Netfilter connection tracking table on your Orbi router. Shows active tracked internet connections versus the kernel table limit."
+              />
+            </span>
             <span className="font-mono tabular-nums app-text-secondary">
               {probe.conntrackCount} / {probe.conntrackMax}
             </span>
           </div>
-          <div className="h-1.5 w-full bg-slate-700/30 rounded-sm overflow-hidden">
+          <div className="h-1.5 w-full bg-slate-700/30 rounded-full overflow-hidden">
             <div
-              className="h-full bg-sky-500 transition-all duration-300"
+              className="h-full bg-sky-500 rounded-full transition-all duration-300"
               style={{ width: `${Math.max(2, conntrackPct)}%` }}
             />
           </div>
@@ -270,7 +346,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={() => onToggleSimulator(!probe.simulatorEnabled)}
-            className="w-full py-1.5 px-3 rounded-md border app-border app-surface app-row-hover text-xs font-medium transition-colors whitespace-nowrap"
+            className="w-full py-2 px-3 rounded-xl border app-border app-surface app-row-hover text-xs font-medium transition-colors whitespace-nowrap"
           >
             {probe.simulatorEnabled ? 'Stop Test Stream' : 'Start Test Stream'}
           </button>

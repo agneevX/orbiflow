@@ -191,3 +191,138 @@ export function analyzeTimeWindow(
     summaryText,
   };
 }
+
+export interface SelectionRangeSummary {
+  start: number;
+  end: number;
+  durationSec: number;
+  sampleCount: number;
+  avgRxBps: number;
+  peakRxBps: number;
+  avgTxBps: number;
+  peakTxBps: number;
+  estimatedRxBytes: number;
+  estimatedTxBytes: number;
+  hasData: boolean;
+}
+
+/**
+ * Computes average, peak, and estimated transferred bytes across a user-selected time range.
+ */
+export function summarizeSelectionRange(
+  points: TrafficPoint[],
+  rawStart: number,
+  rawEnd: number
+): SelectionRangeSummary {
+  const start = Math.min(rawStart, rawEnd);
+  const end = Math.max(rawStart, rawEnd);
+  const durationSec = Math.max(1, (end - start) / 1000);
+
+  const selected = points.filter((p) => p.timestamp >= start && p.timestamp <= end);
+  if (selected.length === 0) {
+    return {
+      start,
+      end,
+      durationSec,
+      sampleCount: 0,
+      avgRxBps: 0,
+      peakRxBps: 0,
+      avgTxBps: 0,
+      peakTxBps: 0,
+      estimatedRxBytes: 0,
+      estimatedTxBytes: 0,
+      hasData: false,
+    };
+  }
+
+  let sumRx = 0;
+  let sumTx = 0;
+  let peakRx = 0;
+  let peakTx = 0;
+  for (const p of selected) {
+    sumRx += p.rxBps;
+    sumTx += p.txBps;
+    if (p.rxBps > peakRx) peakRx = p.rxBps;
+    if (p.txBps > peakTx) peakTx = p.txBps;
+  }
+
+  const avgRxBps = Math.round(sumRx / selected.length);
+  const avgTxBps = Math.round(sumTx / selected.length);
+
+  return {
+    start,
+    end,
+    durationSec,
+    sampleCount: selected.length,
+    avgRxBps,
+    peakRxBps: peakRx,
+    avgTxBps,
+    peakTxBps: peakTx,
+    estimatedRxBytes: Math.round(avgRxBps * durationSec),
+    estimatedTxBytes: Math.round(avgTxBps * durationSec),
+    hasData: true,
+  };
+}
+
+/**
+ * Slices an existing TimeWindowAnalysis down to a zoomed sub-range [rangeStart, rangeEnd].
+ */
+export function sliceAnalysisToRange(
+  base: TimeWindowAnalysis,
+  rawStart: number,
+  rawEnd: number
+): TimeWindowAnalysis {
+  const windowStart = Math.max(base.windowStart, Math.min(rawStart, rawEnd));
+  const windowEnd = Math.min(base.windowEnd, Math.max(rawStart, rawEnd));
+  const windowMs = Math.max(1000, windowEnd - windowStart);
+
+  const points = base.points.filter((p) => p.timestamp >= windowStart && p.timestamp <= windowEnd);
+  const segments = base.segments
+    .map((seg) => seg.filter((p) => p.timestamp >= windowStart && p.timestamp <= windowEnd))
+    .filter((seg) => seg.length > 0);
+
+  const noDataRanges: TimeRange[] = [];
+  for (const r of base.noDataRanges) {
+    const s = Math.max(windowStart, r.start);
+    const e = Math.min(windowEnd, r.end);
+    if (e > s) noDataRanges.push({ start: s, end: e });
+  }
+
+  if (points.length === 0) {
+    return {
+      ...base,
+      windowStart,
+      windowEnd,
+      status: 'empty',
+      points: [],
+      segments: [],
+      noDataRanges: [{ start: windowStart, end: windowEnd }],
+      coveragePct: 0,
+      coveredMs: 0,
+      missingMs: windowMs,
+      summaryText: 'No data recorded in selected range',
+    };
+  }
+
+  const missingMs = noDataRanges.reduce((acc, r) => acc + Math.max(0, r.end - r.start), 0);
+  const coveredMs = Math.max(0, windowMs - missingMs);
+  const coveragePct = Math.max(0, Math.min(100, Math.round((coveredMs / windowMs) * 100)));
+
+  return {
+    ...base,
+    windowStart,
+    windowEnd,
+    status: noDataRanges.length === 0 ? 'full' : 'partial',
+    points,
+    segments,
+    noDataRanges,
+    coveragePct,
+    coveredMs,
+    missingMs,
+    summaryText:
+      noDataRanges.length === 0
+        ? `Zoomed range (${formatDuration(windowMs / 1000)})`
+        : `Zoomed range · ${coveragePct}% data coverage`,
+  };
+}
+

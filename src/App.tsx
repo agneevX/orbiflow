@@ -12,10 +12,13 @@ import {
   THEMES,
   applyThemeToDocument,
   getSystemPrefersDark,
-  normalizeThemeSetting,
+  normalizeDarkTheme,
+  normalizeLightTheme,
+  normalizeThemeMode,
+  resolveEffectiveIsDark,
   resolveThemeId,
   type ThemeId,
-  type ThemeSetting,
+  type ThemeMode,
 } from './lib/themes';
 import {
   ALL_TIME_WINDOWS,
@@ -32,31 +35,59 @@ import type {
   TimeWindow,
 } from './types/telemetry';
 
+function loadInitialThemeState(): {
+  mode: ThemeMode;
+  darkTheme: ThemeId;
+  lightTheme: ThemeId;
+} {
+  if (typeof window === 'undefined') {
+    return { mode: 'auto', darkTheme: 'obsidian', lightTheme: 'daylight' };
+  }
+
+  const savedMode = localStorage.getItem('orbiflow:themeMode');
+  const savedDark =
+    localStorage.getItem('orbiflow:darkTheme') || localStorage.getItem('orbiflow:autoDarkTheme');
+  const savedLight =
+    localStorage.getItem('orbiflow:lightTheme') || localStorage.getItem('orbiflow:autoLightTheme');
+
+  if (savedMode) {
+    return {
+      mode: normalizeThemeMode(savedMode),
+      darkTheme: normalizeDarkTheme(savedDark),
+      lightTheme: normalizeLightTheme(savedLight),
+    };
+  }
+
+  const legacy = localStorage.getItem('orbiflow:theme');
+  if (legacy && legacy !== 'auto') {
+    const mapped = legacy === 'nordic' ? 'nord' : legacy;
+    if (mapped in THEMES) {
+      const t = THEMES[mapped as ThemeId];
+      return {
+        mode: t.isDark ? 'dark' : 'light',
+        darkTheme: t.isDark ? t.id : normalizeDarkTheme(savedDark),
+        lightTheme: !t.isDark ? t.id : normalizeLightTheme(savedLight),
+      };
+    }
+  }
+
+  return {
+    mode: 'auto',
+    darkTheme: normalizeDarkTheme(savedDark),
+    lightTheme: normalizeLightTheme(savedLight),
+  };
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('overview');
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('1m');
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
 
-  const [themeSetting, setThemeSetting] = useState<ThemeSetting>(() => {
-    const saved = typeof window !== 'undefined' ? localStorage.getItem('orbiflow:theme') : null;
-    return normalizeThemeSetting(saved);
-  });
-
-  const [autoDarkTheme, setAutoDarkTheme] = useState<ThemeId>(() => {
-    const saved =
-      typeof window !== 'undefined' ? localStorage.getItem('orbiflow:autoDarkTheme') : null;
-    const normalized = normalizeThemeSetting(saved);
-    return normalized !== 'auto' && THEMES[normalized]?.isDark ? normalized : 'obsidian';
-  });
-
-  const [autoLightTheme, setAutoLightTheme] = useState<ThemeId>(() => {
-    const saved =
-      typeof window !== 'undefined' ? localStorage.getItem('orbiflow:autoLightTheme') : null;
-    const normalized = normalizeThemeSetting(saved);
-    return normalized !== 'auto' && !THEMES[normalized]?.isDark ? normalized : 'daylight';
-  });
-
+  const initialTheme = useMemo(() => loadInitialThemeState(), []);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(initialTheme.mode);
+  const [darkThemeId, setDarkThemeId] = useState<ThemeId>(initialTheme.darkTheme);
+  const [lightThemeId, setLightThemeId] = useState<ThemeId>(initialTheme.lightTheme);
   const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() => getSystemPrefersDark());
 
   const [unit, setUnit] = useState<BandwidthUnit>(() => {
@@ -67,15 +98,25 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [selectedFlow, setSelectedFlow] = useState<EnrichedFlow | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo(0, 0);
+    }
+  }, [activeTab]);
   const [flowSearchSeed, setFlowSearchSeed] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  const effectiveThemeId = resolveThemeId(
-    themeSetting,
-    systemPrefersDark,
-    autoDarkTheme,
-    autoLightTheme
-  );
+  const effectiveIsDark = resolveEffectiveIsDark(themeMode, systemPrefersDark);
+  const effectiveThemeId = resolveThemeId(themeMode, systemPrefersDark, darkThemeId, lightThemeId);
+
+  const handleChangeActiveTheme = (themeId: ThemeId) => {
+    if (effectiveIsDark) {
+      setDarkThemeId(normalizeDarkTheme(themeId));
+    } else {
+      setLightThemeId(normalizeLightTheme(themeId));
+    }
+  };
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
@@ -91,16 +132,16 @@ export default function App() {
   }, [effectiveThemeId]);
 
   useEffect(() => {
-    localStorage.setItem('orbiflow:theme', themeSetting);
-  }, [themeSetting]);
+    localStorage.setItem('orbiflow:themeMode', themeMode);
+  }, [themeMode]);
 
   useEffect(() => {
-    localStorage.setItem('orbiflow:autoDarkTheme', autoDarkTheme);
-  }, [autoDarkTheme]);
+    localStorage.setItem('orbiflow:darkTheme', darkThemeId);
+  }, [darkThemeId]);
 
   useEffect(() => {
-    localStorage.setItem('orbiflow:autoLightTheme', autoLightTheme);
-  }, [autoLightTheme]);
+    localStorage.setItem('orbiflow:lightTheme', lightThemeId);
+  }, [lightThemeId]);
 
   useEffect(() => {
     localStorage.setItem('orbiflow:unit', unit);
@@ -214,6 +255,28 @@ export default function App() {
     }
   };
 
+  const handleReloadGeoip = async () => {
+    const res = await fetch('/api/geoip/reload', { method: 'POST' });
+    if (res.ok && snapshot) {
+      const data = await res.json();
+      setSnapshot({ ...snapshot, serverStats: data.serverStats });
+    }
+  };
+
+  const handleUploadGeoip = async (file: File): Promise<{ ok: boolean; message: string }> => {
+    const res = await fetch(`/api/geoip/upload?filename=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({ ok: false, error: 'Upload failed' }));
+    if (res.ok && data.ok && snapshot) {
+      setSnapshot({ ...snapshot, serverStats: data.serverStats });
+      return { ok: true, message: `Loaded ${data.savedFile}` };
+    }
+    return { ok: false, message: data.error || 'Failed to upload MaxMind database' };
+  };
+
   const handleAcknowledgeAlert = async (id: string) => {
     await fetch(`/api/alerts/${encodeURIComponent(id)}/ack`, { method: 'POST' });
     if (snapshot) {
@@ -229,15 +292,6 @@ export default function App() {
     if (snapshot) {
       setSnapshot({ ...snapshot, alerts: [] });
     }
-  };
-
-  const handleExportCsv = () => {
-    const link = document.createElement('a');
-    link.href = '/api/export/flows.csv';
-    link.download = 'orbiflow-connections.csv';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
   };
 
   const handleFilterConnections = (query: string) => {
@@ -281,11 +335,9 @@ export default function App() {
       <div className="min-h-screen app-canvas flex items-center justify-center p-6">
         <div className="text-center space-y-2">
           <p className="font-display text-base font-semibold">
-            Connecting to OrbiFlow Traffic Collector
+            Connecting to OrbiFlow Network Monitor
           </p>
-          <p className="text-xs app-text-muted">
-            Opening live WebSocket stream on /ws/dashboard...
-          </p>
+          <p className="text-xs app-text-muted">Opening live update stream...</p>
         </div>
       </div>
     );
@@ -304,10 +356,11 @@ export default function App() {
         probe={snapshot.probe}
         wsConnected={wsConnected}
         unackAlerts={unackAlerts}
-        themeSetting={themeSetting}
-        effectiveThemeId={effectiveThemeId}
-        systemPrefersDark={systemPrefersDark}
-        onChangeThemeSetting={setThemeSetting}
+        themeMode={themeMode}
+        effectiveIsDark={effectiveIsDark}
+        activeThemeId={effectiveThemeId}
+        onChangeThemeMode={setThemeMode}
+        onChangeActiveTheme={handleChangeActiveTheme}
         unit={unit}
         onChangeUnit={setUnit}
         onToggleSimulator={handleToggleSimulator}
@@ -324,7 +377,6 @@ export default function App() {
           paused={paused}
           onTogglePause={() => setPaused((p) => !p)}
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
-          onExportCsv={handleExportCsv}
         />
 
         <main className="flex-1 p-4 sm:p-6 max-w-[1440px] w-full mx-auto">
@@ -383,14 +435,8 @@ export default function App() {
               serverStats={snapshot.serverStats}
               onSaveSettings={handleSaveSettings}
               onClearRdnsCache={handleClearRdnsCache}
-              themeSetting={themeSetting}
-              effectiveThemeId={effectiveThemeId}
-              systemPrefersDark={systemPrefersDark}
-              autoDarkTheme={autoDarkTheme}
-              autoLightTheme={autoLightTheme}
-              onChangeThemeSetting={setThemeSetting}
-              onChangeAutoDarkTheme={setAutoDarkTheme}
-              onChangeAutoLightTheme={setAutoLightTheme}
+              onReloadGeoip={handleReloadGeoip}
+              onUploadGeoip={handleUploadGeoip}
             />
           )}
         </main>

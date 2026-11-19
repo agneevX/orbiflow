@@ -14,7 +14,7 @@ interface AlertsViewProps {
 const METRIC_UNITS: Record<AlertRule['metric'], string> = {
   wan_rx_mbps: 'Mb/s',
   wan_tx_mbps: 'Mb/s',
-  host_flows: 'connections / client',
+  host_flows: 'connections / device',
   total_flows: 'total connections',
 };
 
@@ -62,7 +62,7 @@ export function AlertsView({
     <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
       <form
         onSubmit={handleSubmit}
-        className="xl:col-span-5 app-surface border rounded-lg p-5 space-y-4"
+        className="xl:col-span-5 app-surface border rounded-2xl p-5 space-y-4"
       >
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -114,7 +114,7 @@ export function AlertsView({
                   max={100000}
                   value={rule.threshold}
                   onChange={(e) => handleThresholdChange(rule.id, e.target.value)}
-                  className="w-24 app-input border rounded-md px-2.5 py-1 text-xs font-mono tabular-nums focus:outline-none focus:border-sky-500"
+                  className="w-24 app-input border rounded-xl px-2.5 py-1 text-xs font-mono tabular-nums focus:outline-none focus:border-sky-500"
                 />
                 <span className="text-xs font-mono app-text-muted">
                   {METRIC_UNITS[rule.metric]}
@@ -128,14 +128,14 @@ export function AlertsView({
           <button
             type="submit"
             disabled={saving}
-            className="w-full py-2 px-4 rounded-md bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-slate-950 text-xs font-semibold transition-colors"
+            className="w-full py-2.5 px-4 rounded-xl app-btn-primary disabled:opacity-60 text-xs font-semibold transition-colors"
           >
             {saving ? 'Saving Rules...' : 'Save Threshold Rules'}
           </button>
         </div>
       </form>
 
-      <section className="xl:col-span-7 app-surface border rounded-lg overflow-hidden">
+      <section className="xl:col-span-7 app-surface border rounded-2xl overflow-hidden">
         <div className="px-5 py-4 border-b app-border flex items-center justify-between gap-4">
           <div>
             <h2 className="font-display text-sm font-semibold">
@@ -149,7 +149,7 @@ export function AlertsView({
             <button
               type="button"
               onClick={onClearAlerts}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border app-border app-row-hover text-xs transition-colors"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border app-border app-row-hover text-xs transition-colors"
             >
               <Trash2 className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
               Clear All
@@ -162,7 +162,7 @@ export function AlertsView({
             <CheckCircle2 className="h-7 w-7 text-emerald-500 mx-auto" aria-hidden="true" />
             <p className="text-sm font-medium">No threshold violations</p>
             <p className="text-xs app-text-muted max-w-sm mx-auto">
-              Lower a threshold (for example, set WAN Download Saturation to 15 Mb/s) to verify live alerting.
+              Lower a threshold (for example, set High Download Usage to 15 Mb/s) to verify live alerting.
             </p>
           </div>
         ) : (
@@ -205,7 +205,7 @@ export function AlertsView({
                   <button
                     type="button"
                     onClick={() => onAcknowledgeAlert(alert.id)}
-                    className="px-2.5 py-1 rounded-md border app-border app-row-hover text-xs whitespace-nowrap shrink-0"
+                    className="px-2.5 py-1 rounded-xl border app-border app-row-hover text-xs whitespace-nowrap shrink-0"
                   >
                     Acknowledge
                   </button>

@@ -190,7 +190,7 @@ export function ClientFlowDiagram({
     <div className="space-y-3" data-testid="client-flow-diagram">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex items-center gap-4 app-text-muted">
-          <span>LAN Clients</span>
+          <span>Local Devices</span>
           <span aria-hidden="true">→</span>
           <span>Destinations &amp; Services</span>
         </div>
@@ -257,14 +257,21 @@ export function ClientFlowDiagram({
                   <rect
                     width={180}
                     height={n.height}
-                    rx={6}
+                    rx={12}
                     fill={theme.nodeFill}
                     stroke={active ? n.color : theme.nodeBorder}
                     strokeWidth={active ? 1.5 : 1}
                   />
-                  <rect width={4} height={n.height} rx={2} fill={n.color} />
+                  <rect
+                    x={6}
+                    y={Math.min(6, n.height * 0.2)}
+                    width={3.5}
+                    height={Math.max(10, n.height - Math.min(12, n.height * 0.4))}
+                    rx={2}
+                    fill={n.color}
+                  />
                   <text
-                    x={14}
+                    x={16}
                     y={n.height / 2 - (n.height >= 34 ? 4 : -4)}
                     fontSize={12}
                     fontWeight={600}
@@ -274,7 +281,7 @@ export function ClientFlowDiagram({
                   </text>
                   {n.height >= 34 && (
                     <text
-                      x={14}
+                      x={16}
                       y={n.height / 2 + 11}
                       fontSize={10}
                       fontFamily="JetBrains Mono, monospace"
@@ -304,13 +311,13 @@ export function ClientFlowDiagram({
                   <rect
                     width={180}
                     height={n.height}
-                    rx={6}
+                    rx={12}
                     fill={theme.nodeFill}
                     stroke={active ? theme.rxColor : theme.nodeBorder}
                     strokeWidth={active ? 1.5 : 1}
                   />
                   <text
-                    x={12}
+                    x={14}
                     y={n.height / 2 - (n.height >= 34 ? 4 : -4)}
                     fontSize={12}
                     fontWeight={600}
@@ -320,7 +327,7 @@ export function ClientFlowDiagram({
                   </text>
                   {n.height >= 34 && (
                     <text
-                      x={12}
+                      x={14}
                       y={n.height / 2 + 11}
                       fontSize={10}
                       fontFamily="JetBrains Mono, monospace"
