@@ -169,6 +169,7 @@ export class TrafficMonitorEngine {
   private deviceAliases: Record<string, DeviceAlias> = {};
 
   private serverConfig: ServerConfig = {
+    probeToken: 'orbi-rbk50-voxel-secret',
     persistenceMode: 'memory',
     cacheDir: '/config/cache',
     rdnsEnabled: false,

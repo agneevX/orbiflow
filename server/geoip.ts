@@ -112,13 +112,9 @@ export class MaxMindService {
   }
 
   private findDatabaseFile(
-    envOverride: string | undefined,
     preferredNames: string[],
     keywordPattern: RegExp
   ): string | null {
-    if (envOverride && fs.existsSync(envOverride)) {
-      return envOverride;
-    }
     if (!fs.existsSync(this.activeDir)) {
       return null;
     }
@@ -150,7 +146,6 @@ export class MaxMindService {
     this.cache.clear();
 
     const cityPath = this.findDatabaseFile(
-      process.env.ORBIFLOW_GEOIP_CITY_DB,
       [
         'GeoLite2-City.mmdb',
         'GeoIP2-City.mmdb',
@@ -161,7 +156,6 @@ export class MaxMindService {
     );
 
     const asnPath = this.findDatabaseFile(
-      process.env.ORBIFLOW_GEOIP_ASN_DB,
       ['GeoLite2-ASN.mmdb', 'GeoIP2-ASN.mmdb', 'GeoIP2-ISP.mmdb'],
       /(asn|isp)/i
     );

@@ -2,9 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Check,
   Database,
+  Eye,
+  EyeOff,
   FileCog,
   FolderOpen,
   Globe,
+  KeyRound,
   MapPin,
   Network,
   RefreshCw,
@@ -34,6 +37,10 @@ export function SettingsView({
   onReloadGeoip,
   onUploadGeoip,
 }: SettingsViewProps) {
+  const [probeToken, setProbeToken] = useState(
+    serverConfig.probeToken || 'orbi-rbk50-voxel-secret'
+  );
+  const [showToken, setShowToken] = useState(false);
   const [persistenceMode, setPersistenceMode] = useState<PersistenceMode>(
     serverConfig.persistenceMode
   );
@@ -55,6 +62,7 @@ export function SettingsView({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    setProbeToken(serverConfig.probeToken || 'orbi-rbk50-voxel-secret');
     setPersistenceMode(serverConfig.persistenceMode);
     setCacheDir(serverConfig.cacheDir || '/config/cache');
     setGeoipEnabled(serverConfig.geoipEnabled ?? true);
@@ -68,11 +76,26 @@ export function SettingsView({
     setStripLanDomain(serverConfig.stripLanDomain ?? true);
   }, [serverConfig]);
 
+  const handleGenerateToken = () => {
+    const bytes = new Uint8Array(16);
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      crypto.getRandomValues(bytes);
+    } else {
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = Math.floor(Math.random() * 256);
+      }
+    }
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    setProbeToken(`orbi-${hex}`);
+    setShowToken(true);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
     try {
       await onSaveSettings({
+        probeToken: probeToken.trim() || serverConfig.probeToken || 'orbi-rbk50-voxel-secret',
         persistenceMode,
         cacheDir: cacheDir.trim() || '/config/cache',
         geoipEnabled,
@@ -130,30 +153,78 @@ export function SettingsView({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6 max-w-4xl">
-      {/* Persistent Configuration File Info */}
-      <section className="app-surface border rounded-2xl p-5">
+      {/* Persistent Configuration File & Router Agent Token */}
+      <section className="app-surface border rounded-2xl p-5 space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="space-y-1">
+          <div className="space-y-1 min-w-0 flex-1">
             <h2 className="font-display text-sm font-semibold flex items-center gap-2">
               <FileCog className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
               <span>Persistent Configuration Volume</span>
             </h2>
             <p className="text-xs app-text-muted">
-              Server settings and alert rules are always saved in the{' '}
-              <span className="font-mono app-text-secondary">/config</span>{' '}
+              All server settings, router agent token, device aliases, and alert rules are saved in
+              the <span className="font-mono app-text-secondary">/config</span>{' '}
               <TechTerm
                 label="Docker volume"
-                tip="A persistent folder mounted from your host machine into /config inside the container so settings survive restarts and image upgrades."
+                tip="A persistent folder mounted from your host machine into /config inside the container so settings survive restarts and image upgrades without application environment variables."
               />
-              .
+              . The container only uses <span className="font-mono app-text-secondary">PUID</span>,{' '}
+              <span className="font-mono app-text-secondary">PGID</span>, and{' '}
+              <span className="font-mono app-text-secondary">TZ</span> and runs as non-root.
             </p>
           </div>
           <div
             data-testid="config-file-path"
-            className="font-mono text-xs app-input border rounded-xl px-3.5 py-1.5 app-text-secondary"
+            className="font-mono text-xs app-input border rounded-xl px-3.5 py-1.5 app-text-secondary shrink-0"
           >
             {serverStats.configPath}
           </div>
+        </div>
+
+        <div className="pt-3 border-t app-border space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label
+              htmlFor="probe-token-input"
+              className="flex items-center gap-1.5 text-xs font-medium"
+            >
+              <KeyRound className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+              <span>Shared Router Agent Token</span>
+            </label>
+            <button
+              type="button"
+              onClick={handleGenerateToken}
+              className="text-[11px] font-medium text-sky-500 hover:text-sky-400 transition-colors"
+            >
+              Generate random token
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              id="probe-token-input"
+              data-testid="probe-token-input"
+              type={showToken ? 'text' : 'password'}
+              value={probeToken}
+              onChange={(e) => setProbeToken(e.target.value)}
+              placeholder="orbi-rbk50-voxel-secret"
+              className="flex-1 min-w-0 app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+            />
+            <button
+              type="button"
+              onClick={() => setShowToken((prev) => !prev)}
+              aria-label={showToken ? 'Hide shared agent token' : 'Show shared agent token'}
+              className="inline-flex items-center justify-center h-9 w-9 rounded-xl border app-border app-surface app-row-hover transition-colors shrink-0"
+            >
+              {showToken ? (
+                <EyeOff className="h-4 w-4 app-text-muted" aria-hidden="true" />
+              ) : (
+                <Eye className="h-4 w-4 app-text-muted" aria-hidden="true" />
+              )}
+            </button>
+          </div>
+          <p className="text-[11px] app-text-muted">
+            Required by your Orbi router agent to authenticate snapshots. Takes effect immediately
+            after saving and automatically updates the scripts in Router Agent.
+          </p>
         </div>
       </section>
 

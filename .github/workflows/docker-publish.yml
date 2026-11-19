@@ -47,7 +47,7 @@ jobs:
         run: npm run lint
 
       - name: Run unit tests
-        run: npx tsx --test src/lib/formatters.test.ts src/lib/telemetryEngine.test.ts src/lib/timeWindowUtils.test.ts src/lib/themes.test.ts
+        run: npx tsx --test src/lib/*.test.ts
 
       - name: Build frontend assets
         run: npm run build

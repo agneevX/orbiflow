@@ -213,6 +213,7 @@ export interface ProbeStatus {
 }
 
 export interface ServerConfig {
+  probeToken: string;
   persistenceMode: PersistenceMode;
   cacheDir: string;
   rdnsEnabled: boolean;

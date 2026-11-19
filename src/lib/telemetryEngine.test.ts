@@ -157,6 +157,8 @@ test('PersistenceStore saves user config in configDir and supports changing cach
     assert.equal(store.getActiveCacheDir(), cacheDir1);
 
     store.saveUserConfig({
+      probeToken: 'custom-router-token',
+      simulatorEnabled: false,
       persistenceMode: 'disk',
       cacheDir: cacheDir2,
       rdnsEnabled: true,
@@ -166,6 +168,8 @@ test('PersistenceStore saves user config in configDir and supports changing cach
 
     const reloaded = store.loadUserConfig();
     assert.ok(reloaded);
+    assert.equal(reloaded?.probeToken, 'custom-router-token');
+    assert.equal(reloaded?.simulatorEnabled, false);
     assert.equal(reloaded?.persistenceMode, 'disk');
     assert.equal(reloaded?.cacheDir, cacheDir2);
     assert.equal(reloaded?.rdnsEnabled, true);
@@ -186,3 +190,16 @@ test('PersistenceStore saves user config in configDir and supports changing cach
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });
+
+import { generateDockerCompose } from './probeTemplates';
+
+test('generateDockerCompose only includes PUID, PGID, and TZ environment variables', () => {
+  const yaml = generateDockerCompose();
+  assert.ok(yaml.includes('- PUID=1000'));
+  assert.ok(yaml.includes('- PGID=1000'));
+  assert.ok(yaml.includes('- TZ=UTC'));
+  assert.ok(!yaml.includes('ORBIFLOW_'));
+  assert.ok(!yaml.includes('NODE_ENV'));
+  assert.ok(!yaml.includes('PORT='));
+});
+

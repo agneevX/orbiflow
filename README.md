@@ -51,7 +51,7 @@ Lightweight, real-time internet traffic monitor and connection inspector built f
 
 ## Quick Start (Docker Compose)
 
-Run the OrbiFlow server with a single persistent `/config` volume:
+Run the OrbiFlow server as a non-root container with a single persistent `/config` volume. The container only uses `PUID`, `PGID`, and `TZ` environment variables—all application settings (shared router token, storage mode, LAN DNS, MaxMind databases, device aliases, and alert rules) are configured in **Server Settings** and stored in `/config/config.json`:
 
 ```yaml
 services:
@@ -62,18 +62,9 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NODE_ENV=production
-      - PORT=3000
-      - ORBIFLOW_TOKEN=orbi-rbk50-voxel-secret
-      - ORBIFLOW_SIMULATOR=false
-      - ORBIFLOW_CONFIG_DIR=/config
-      - ORBIFLOW_PERSISTENCE=memory
-      - ORBIFLOW_CACHE_DIR=/config/cache
-      - ORBIFLOW_GEOIP_ENABLED=true
-      - ORBIFLOW_GEOIP_DIR=/config/geoip
-      - ORBIFLOW_RDNS_ENABLED=false
-      - ORBIFLOW_RDNS_SKIP_PRIVATE=true
-      - ORBIFLOW_RDNS_TTL_SEC=3600
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
     volumes:
       - ./config:/config
 ```
@@ -92,23 +83,27 @@ Then open `http://<server-ip>:3000` in your browser.
 docker build -t orbiflow-server .
 docker run -d --name orbiflow-server \
   -p 3000:3000 \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  -e TZ=UTC \
   -v $(pwd)/config:/config \
-  -e ORBIFLOW_TOKEN=orbi-rbk50-voxel-secret \
   orbiflow-server
 ```
+
+You can also start the container directly with `--user 1000:1000` (already non-root); the entrypoint detects non-root execution and launches the server directly without privilege escalation.
 
 ---
 
 ## Persistent `/config` Volume Layout
 
-All user state lives inside `/config` so container upgrades never lose settings, history, or GeoIP databases:
+All user state and server settings live inside `/config` so container upgrades never lose settings, history, or GeoIP databases:
 
 ```text
 /config/
-├── config.json          # Server settings, storage path, rDNS, MaxMind & alert rules
+├── config.json          # Shared agent token, storage mode/path, LAN DNS, rDNS, MaxMind, device aliases & alert rules
 ├── cache/               # Optional disk traffic cache (JSONL + state snapshot)
-│   ├── state-snapshot.json
-│   └── flows-YYYY-MM-DD.jsonl
+│   ├── traffic-state.json
+│   └── traffic-snapshots.jsonl
 └── geoip/               # Optional offline MaxMind MMDB databases
     ├── GeoLite2-City.mmdb
     └── GeoLite2-ASN.mmdb
@@ -147,24 +142,13 @@ echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct
 
 ## Environment Variables
 
+OrbiFlow intentionally uses only standard container user/timezone variables. The Node.js server always drops privileges to run as non-root (`PUID:PGID`, refusing UID `0`) and reads all application configuration from `/config/config.json` (editable in the **Server Settings** tab).
+
 | Variable | Default | Description |
 | --- | --- | --- |
-| `PORT` | `3000` | HTTP & WebSocket server port |
-| `ORBIFLOW_TOKEN` | `orbi-rbk50-voxel-secret` | Shared authentication token required for router ingest endpoints |
-| `ORBIFLOW_SIMULATOR` | `true` (dev) / `false` (Docker) | Built-in simulated RBK50 traffic generator when no live router agent is connected |
-| `ORBIFLOW_CONFIG_DIR` | `/config` | Directory storing persistent `config.json` |
-| `ORBIFLOW_PERSISTENCE` | `memory` | Traffic history storage mode (`memory` or `disk`) |
-| `ORBIFLOW_CACHE_DIR` | `/config/cache` | Directory for disk history snapshots and JSONL logs |
-| `ORBIFLOW_GEOIP_ENABLED` | `true` | Enable offline MaxMind MMDB lookups |
-| `ORBIFLOW_GEOIP_DIR` | `/config/geoip` | Folder scanned for `.mmdb` files |
-| `ORBIFLOW_GEOIP_CITY_DB` | *(auto-detected)* | Explicit path override for City/Country `.mmdb` |
-| `ORBIFLOW_GEOIP_ASN_DB` | *(auto-detected)* | Explicit path override for ASN `.mmdb` |
-| `ORBIFLOW_LAN_DNS_ENABLED` | `true` | Enable reverse PTR lookups exclusively for local private LAN IPs |
-| `ORBIFLOW_LAN_DNS_SERVER` | *(system DNS)* | Optional local DNS / `dnsmasq` IP (e.g. `192.168.1.2` or `192.168.1.1`) |
-| `ORBIFLOW_LAN_DNS_TTL` | `300` | In-memory LAN PTR cache TTL in seconds |
-| `ORBIFLOW_RDNS_ENABLED` | `false` | Enable live DNS PTR lookups for unknown external IPs |
-| `ORBIFLOW_RDNS_SKIP_PRIVATE` | `true` | Skip PTR lookups for RFC1918 private addresses |
-| `ORBIFLOW_RDNS_TTL_SEC` | `3600` | In-memory reverse DNS cache TTL in seconds |
+| `PUID` | `1000` | Non-root numeric user ID used to run the server and own `/config` files |
+| `PGID` | `1000` | Non-root numeric group ID used to run the server and own `/config` files |
+| `TZ` | `UTC` | Container timezone (e.g. `America/New_York`, `Europe/London`, `Asia/Tokyo`) |
 
 ---
 

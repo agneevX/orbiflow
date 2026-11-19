@@ -463,7 +463,9 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'setup' && <SetupView />}
+          {activeTab === 'setup' && (
+            <SetupView defaultToken={snapshot.serverConfig.probeToken} />
+          )}
 
           {activeTab === 'settings' && (
             <SettingsView

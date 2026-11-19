@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Check, Copy, Download, Terminal } from 'lucide-react';
 import {
   generateBusyBoxAshProbe,
@@ -54,7 +54,11 @@ const ARTIFACT_META: Array<{
   },
 ];
 
-export function SetupView() {
+interface SetupViewProps {
+  defaultToken?: string;
+}
+
+export function SetupView({ defaultToken = 'orbi-rbk50-voxel-secret' }: SetupViewProps) {
   const defaultHost =
     typeof window !== 'undefined' && window.location.hostname !== 'localhost'
       ? window.location.hostname
@@ -62,11 +66,15 @@ export function SetupView() {
 
   const [serverHost, setServerHost] = useState(defaultHost);
   const [serverPort, setServerPort] = useState('3000');
-  const [token, setToken] = useState('orbi-rbk50-voxel-secret');
+  const [token, setToken] = useState(defaultToken);
   const [iface, setIface] = useState('eth0');
   const [intervalSec, setIntervalSec] = useState('5');
   const [activeArtifact, setActiveArtifact] = useState<ArtifactTab>('python');
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setToken(defaultToken);
+  }, [defaultToken]);
 
   const probeCfg = useMemo(
     () => ({

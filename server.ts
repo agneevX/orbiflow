@@ -1,65 +1,78 @@
 import express from 'express';
+import fs from 'node:fs';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
-import dotenv from 'dotenv';
 import { TrafficMonitorEngine, exportFlowsToCsv } from './src/lib/telemetryEngine';
 import { OrbiProbeSimulator } from './server/simulator';
 import { RdnsCache } from './server/rdnsCache';
 import { LanResolver } from './server/lanResolver';
-import { DEFAULT_CACHE_DIR, DEFAULT_CONFIG_DIR, PersistenceStore } from './server/storage';
+import {
+  DEFAULT_CACHE_DIR,
+  DEFAULT_CONFIG_DIR,
+  DEFAULT_PROBE_TOKEN,
+  PersistenceStore,
+} from './server/storage';
 import { DEFAULT_GEOIP_DIR, MaxMindService } from './server/geoip';
 import type { AlertRule, PersistenceMode, ProbeSnapshot } from './src/types/telemetry';
-
-dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT || 3000);
-const PROBE_TOKEN = process.env.ORBIFLOW_PROBE_TOKEN || 'orbi-rbk50-voxel-secret';
-const SIMULATOR_DEFAULT = process.env.ORBIFLOW_ENABLE_SIMULATOR !== 'false';
-const STORAGE_MODE: PersistenceMode =
-  process.env.ORBIFLOW_STORAGE_MODE === 'disk' ? 'disk' : 'memory';
-const CONFIG_DIR = process.env.ORBIFLOW_CONFIG_DIR || DEFAULT_CONFIG_DIR;
-const CACHE_DIR = process.env.ORBIFLOW_CACHE_DIR || DEFAULT_CACHE_DIR;
-const GEOIP_DIR = process.env.ORBIFLOW_GEOIP_DIR || DEFAULT_GEOIP_DIR;
-const GEOIP_ENABLED_DEFAULT = process.env.ORBIFLOW_GEOIP_ENABLED !== 'false';
-const RDNS_ENABLED_DEFAULT = process.env.ORBIFLOW_RDNS_ENABLED === 'true';
-const LAN_DNS_ENABLED_DEFAULT = process.env.ORBIFLOW_LAN_DNS_ENABLED !== 'false';
-const LAN_DNS_SERVER_DEFAULT = process.env.ORBIFLOW_LAN_DNS_SERVER || '';
-const LAN_DNS_TTL_DEFAULT = Number(process.env.ORBIFLOW_LAN_DNS_TTL || 300);
-const STRIP_LAN_DOMAIN_DEFAULT = process.env.ORBIFLOW_STRIP_LAN_DOMAIN !== 'false';
+const SERVER_PORT = 3000;
+const DIST_PATH = path.resolve(__dirname, 'dist');
+const IS_DEV =
+  process.argv.includes('--dev') || !fs.existsSync(path.join(DIST_PATH, 'index.html'));
+
+const DEFAULT_STORAGE_MODE: PersistenceMode = 'memory';
+const DEFAULT_GEOIP_ENABLED = true;
+const DEFAULT_RDNS_ENABLED = false;
+const DEFAULT_RDNS_TTL_SEC = 3600;
+const DEFAULT_LAN_DNS_ENABLED = true;
+const DEFAULT_LAN_DNS_SERVER = '';
+const DEFAULT_LAN_DNS_TTL_SEC = 300;
+const DEFAULT_STRIP_LAN_DOMAIN = true;
 
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
-  const storage = new PersistenceStore(STORAGE_MODE, CONFIG_DIR, CACHE_DIR);
+  const storage = new PersistenceStore(
+    DEFAULT_STORAGE_MODE,
+    DEFAULT_CONFIG_DIR,
+    DEFAULT_CACHE_DIR
+  );
   const geoip = new MaxMindService({
-    enabled: GEOIP_ENABLED_DEFAULT,
-    geoipDir: GEOIP_DIR,
+    enabled: DEFAULT_GEOIP_ENABLED,
+    geoipDir: DEFAULT_GEOIP_DIR,
     fallbackBaseDir: path.dirname(storage.getConfigPath()),
   });
   const rdnsCache = new RdnsCache({
-    enabled: RDNS_ENABLED_DEFAULT,
-    ttlSec: Number(process.env.ORBIFLOW_RDNS_TTL || 3600),
+    enabled: DEFAULT_RDNS_ENABLED,
+    ttlSec: DEFAULT_RDNS_TTL_SEC,
     skipPrivate: true,
   });
   const lanResolver = new LanResolver({
-    enabled: LAN_DNS_ENABLED_DEFAULT,
-    server: LAN_DNS_SERVER_DEFAULT,
-    ttlSec: LAN_DNS_TTL_DEFAULT,
-    stripDomain: STRIP_LAN_DOMAIN_DEFAULT,
+    enabled: DEFAULT_LAN_DNS_ENABLED,
+    server: DEFAULT_LAN_DNS_SERVER,
+    ttlSec: DEFAULT_LAN_DNS_TTL_SEC,
+    stripDomain: DEFAULT_STRIP_LAN_DOMAIN,
   });
 
   const engine = new TrafficMonitorEngine();
-  engine.setSimulatorEnabled(SIMULATOR_DEFAULT);
+  let activeProbeToken = DEFAULT_PROBE_TOKEN;
+  let initialSimulatorEnabled = IS_DEV;
 
   // Load persistent user config from /config/config.json before loading cached traffic history
   const savedUserConfig = storage.loadUserConfig();
   if (savedUserConfig) {
+    if (typeof savedUserConfig.probeToken === 'string' && savedUserConfig.probeToken.trim()) {
+      activeProbeToken = savedUserConfig.probeToken.trim();
+    }
+    if (typeof savedUserConfig.simulatorEnabled === 'boolean') {
+      initialSimulatorEnabled = savedUserConfig.simulatorEnabled;
+    }
     if (savedUserConfig.persistenceMode === 'memory' || savedUserConfig.persistenceMode === 'disk') {
       storage.setMode(savedUserConfig.persistenceMode);
     }
@@ -114,7 +127,10 @@ async function startServer() {
     await geoip.reload();
   }
 
+  engine.setSimulatorEnabled(initialSimulatorEnabled);
+
   engine.updateServerConfig({
+    probeToken: activeProbeToken,
     persistenceMode: storage.getMode(),
     cacheDir: storage.getConfiguredCacheDir(),
     rdnsEnabled: rdnsCache.getConfig().enabled,
@@ -142,6 +158,8 @@ async function startServer() {
   const persistUserConfig = () => {
     const snap = engine.getSnapshot();
     storage.saveUserConfig({
+      probeToken: snap.serverConfig.probeToken,
+      simulatorEnabled: engine.isSimulatorEnabled(),
       persistenceMode: snap.serverConfig.persistenceMode,
       cacheDir: snap.serverConfig.cacheDir,
       rdnsEnabled: snap.serverConfig.rdnsEnabled,
@@ -159,14 +177,14 @@ async function startServer() {
   };
 
   // Ensure /config/config.json exists on first boot so users can inspect or back it up
-  if (!savedUserConfig) {
+  if (!savedUserConfig || typeof savedUserConfig.probeToken !== 'string') {
     persistUserConfig();
   }
 
   const simulator = new OrbiProbeSimulator();
 
   // Seed historical buckets + recent 150s samples if empty and simulator is enabled
-  if (SIMULATOR_DEFAULT && engine.getSnapshot().history.length === 0) {
+  if (engine.isSimulatorEnabled() && engine.getSnapshot().history.length === 0) {
     const now = Date.now();
     // Seed 3 hours of 1-minute samples so 1m/5m/15m/1h have full continuity while 6h/24h denote earlier unrecorded hours
     const threeHoursAgo = now - 180 * 60_000;
@@ -255,7 +273,8 @@ async function startServer() {
       const queryToken = url.searchParams.get('token');
       const providedToken = Array.isArray(tokenHeader) ? tokenHeader[0] : tokenHeader || queryToken;
 
-      if (PROBE_TOKEN && providedToken !== PROBE_TOKEN) {
+      const expectedToken = engine.getSnapshot().serverConfig.probeToken;
+      if (expectedToken && providedToken !== expectedToken) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
@@ -268,10 +287,7 @@ async function startServer() {
       dashboardWss.handleUpgrade(request, socket, head, (ws) => {
         dashboardWss.emit('connection', ws, request);
       });
-    } else if (
-      process.env.NODE_ENV !== 'production' &&
-      (protocols.includes('vite-hmr') || protocols.includes('vite-ping'))
-    ) {
+    } else if (IS_DEV && (protocols.includes('vite-hmr') || protocols.includes('vite-ping'))) {
       // Allow Vite dev middleware WebSocket handler to complete @vite/client handshakes cleanly
       return;
     } else {
@@ -347,7 +363,8 @@ async function startServer() {
 
   app.post('/api/ingest', (req, res) => {
     const token = req.headers['x-probe-token'] || req.query.token;
-    if (PROBE_TOKEN && token !== PROBE_TOKEN) {
+    const expectedToken = engine.getSnapshot().serverConfig.probeToken;
+    if (expectedToken && token !== expectedToken) {
       res.status(401).json({ error: 'Invalid probe token' });
       return;
     }
@@ -367,6 +384,7 @@ async function startServer() {
   app.post('/api/simulator', (req, res) => {
     const enabled = Boolean(req.body?.enabled);
     engine.setSimulatorEnabled(enabled);
+    persistUserConfig();
     if (enabled && !engine.hasActiveLiveProbe()) {
       handleIngestSnapshot(simulator.nextSnapshot(Date.now(), 2));
     } else {
@@ -377,6 +395,11 @@ async function startServer() {
 
   app.post('/api/settings', async (req, res) => {
     const body = req.body || {};
+    const nextProbeToken =
+      typeof body.probeToken === 'string' && body.probeToken.trim()
+        ? body.probeToken.trim()
+        : engine.getSnapshot().serverConfig.probeToken;
+
     if (typeof body.cacheDir === 'string' && body.cacheDir.trim()) {
       storage.setCacheDir(body.cacheDir);
     }
@@ -399,6 +422,7 @@ async function startServer() {
       stripDomain: typeof body.stripLanDomain === 'boolean' ? body.stripLanDomain : undefined,
     });
     engine.updateServerConfig({
+      probeToken: nextProbeToken,
       persistenceMode: storage.getMode(),
       cacheDir: storage.getConfiguredCacheDir(),
       rdnsEnabled: updatedRdns.enabled,
@@ -523,30 +547,25 @@ async function startServer() {
     res.send(csv);
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  if (IS_DEV) {
     const { createServer: createViteServer } = await import('vite');
-    const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: hmrDisabled ? false : { server },
-        ws: { server },
-        watch: hmrDisabled ? null : {},
         allowedHosts: true,
       },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
+    app.use(express.static(DIST_PATH));
     app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      res.sendFile(path.join(DIST_PATH, 'index.html'));
     });
   }
 
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`OrbiFlow Network Monitor listening on http://0.0.0.0:${PORT}`);
+  server.listen(SERVER_PORT, '0.0.0.0', () => {
+    console.log(`OrbiFlow Network Monitor listening on http://0.0.0.0:${SERVER_PORT}`);
   });
 
   process.on('SIGTERM', () => {

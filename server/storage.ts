@@ -11,8 +11,11 @@ import type {
 
 export const DEFAULT_CONFIG_DIR = '/config';
 export const DEFAULT_CACHE_DIR = '/config/cache';
+export const DEFAULT_PROBE_TOKEN = 'orbi-rbk50-voxel-secret';
 
 export interface PersistedUserConfig {
+  probeToken?: string;
+  simulatorEnabled?: boolean;
   persistenceMode: PersistenceMode;
   cacheDir: string;
   rdnsEnabled: boolean;
@@ -66,8 +69,8 @@ export class PersistenceStore {
 
   constructor(
     mode: PersistenceMode = 'memory',
-    configDir = process.env.ORBIFLOW_CONFIG_DIR || DEFAULT_CONFIG_DIR,
-    cacheDir = process.env.ORBIFLOW_CACHE_DIR || DEFAULT_CACHE_DIR
+    configDir = DEFAULT_CONFIG_DIR,
+    cacheDir = DEFAULT_CACHE_DIR
   ) {
     this.mode = mode;
     this.configuredConfigDir = configDir.trim() || DEFAULT_CONFIG_DIR;
