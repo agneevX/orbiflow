@@ -1,19 +1,38 @@
-FROM node:22-alpine AS builder
+# Multi-arch server-only build:
+# Build static SPA + server bundle natively on $BUILDPLATFORM for fast, reliable
+# cross-architecture images (linux/amd64, linux/arm64, linux/arm/v7).
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
+
+COPY package.json ./
+RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+
+COPY index.html tsconfig.json vite.config.ts server.ts ./
+COPY src ./src
+COPY server ./server
+
+RUN npm run build && \
+  npx esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=/app/server.mjs
 
 FROM node:22-alpine AS runner
 WORKDIR /app
+
 ENV NODE_ENV=production
 ENV PORT=3000
-COPY package*.json ./
-RUN npm ci --omit=dev && npm install tsx --no-save
+
+COPY package.json ./
+RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws', 'dotenv'].map((k) => k + '@' + d[k]).join(' '));" \
+  | xargs npm install --no-save --no-audit --no-fund && \
+  rm -f package.json package-lock.json && \
+  mkdir -p /app/data
+
 COPY --from=builder /app/dist ./dist
-COPY server.ts ./
-COPY server ./server
-COPY src ./src
+COPY --from=builder /app/server.mjs ./server.mjs
+
 EXPOSE 3000
-CMD ["npx", "tsx", "server.ts"]
+VOLUME ["/app/data"]
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
+
+CMD ["node", "server.mjs"]

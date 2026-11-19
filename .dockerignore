@@ -1,0 +1,14 @@
+node_modules
+dist
+data
+agent
+.git
+.github
+.playwright-cli
+.aistudio
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+src/lib/*.test.ts

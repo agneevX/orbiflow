@@ -3,7 +3,6 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { TrafficMonitorEngine, exportFlowsToCsv } from './src/lib/telemetryEngine';
 import { OrbiProbeSimulator } from './server/simulator';
@@ -305,6 +304,7 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
       server: {

@@ -1,5 +1,7 @@
 services:
   orbiflow:
+    # To pull the prebuilt multi-arch image from GitHub Container Registry instead of building locally:
+    # image: ghcr.io/<owner>/<repo>:latest
     build: .
     container_name: orbiflow-monitor
     restart: unless-stopped
