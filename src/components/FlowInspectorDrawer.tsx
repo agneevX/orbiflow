@@ -113,39 +113,6 @@ export function FlowInspectorDrawer({
               {flow.dstHost && flow.dstHost !== flow.dstIp ? ` (${flow.dstHost})` : ''}
             </dd>
           </div>
-          {flow.dstGeo && (flow.dstGeo.city || flow.dstGeo.countryName || flow.dstGeo.countryCode) && (
-            <div className="py-2.5 flex justify-between gap-4">
-              <dt className="app-text-muted">
-                <TechTerm
-                  label="IP Location"
-                  tip="Approximate geographic location resolved locally using your MaxMind GeoLite2 / GeoIP2 database."
-                />
-              </dt>
-              <dd className="text-right app-text-secondary">
-                {[flow.dstGeo.city, flow.dstGeo.countryName || flow.dstGeo.countryCode]
-                  .filter(Boolean)
-                  .join(', ')}
-                {flow.dstGeo.countryName && flow.dstGeo.countryCode
-                  ? ` (${flow.dstGeo.countryCode})`
-                  : ''}
-              </dd>
-            </div>
-          )}
-          {flow.dstGeo && (flow.dstGeo.org || flow.dstGeo.asn) && (
-            <div className="py-2.5 flex justify-between gap-4">
-              <dt className="app-text-muted">
-                <TechTerm
-                  label="Network / ASN"
-                  tip="Autonomous System Number and network operator owning this destination IP block, looked up from your local MaxMind ASN database."
-                />
-              </dt>
-              <dd className="text-right app-text-secondary">
-                {flow.dstGeo.asn ? <span className="font-mono">AS{flow.dstGeo.asn}</span> : null}
-                {flow.dstGeo.asn && flow.dstGeo.org ? ' · ' : ''}
-                {flow.dstGeo.org || ''}
-              </dd>
-            </div>
-          )}
           <div className="py-2.5 flex justify-between gap-4">
             <dt className="app-text-muted">
               <TechTerm

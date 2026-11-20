@@ -1,18 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Check,
+  Copy,
   Database,
   Eye,
   EyeOff,
   FileCog,
   FolderOpen,
-  Globe,
   KeyRound,
-  MapPin,
-  Network,
   RefreshCw,
-  Trash2,
-  Upload,
 } from 'lucide-react';
 import type { PersistenceMode, ServerConfig, ServerStats } from '../types/telemetry';
 import { formatBytes } from '../lib/formatters';
@@ -22,72 +18,56 @@ interface SettingsViewProps {
   serverConfig: ServerConfig;
   serverStats: ServerStats;
   onSaveSettings: (cfg: Partial<ServerConfig>) => Promise<void>;
-  onClearRdnsCache: () => Promise<void>;
-  onClearLanDnsCache: () => Promise<void>;
-  onReloadGeoip: () => Promise<void>;
-  onUploadGeoip: (file: File) => Promise<{ ok: boolean; message: string }>;
+}
+
+function generateClientRandomToken(): string {
+  const bytes = new Uint8Array(24);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `of_${hex}`;
 }
 
 export function SettingsView({
   serverConfig,
   serverStats,
   onSaveSettings,
-  onClearRdnsCache,
-  onClearLanDnsCache,
-  onReloadGeoip,
-  onUploadGeoip,
 }: SettingsViewProps) {
-  const [probeToken, setProbeToken] = useState(
-    serverConfig.probeToken || 'orbi-rbk50-voxel-secret'
-  );
+  const [probeToken, setProbeToken] = useState(serverConfig.probeToken || '');
   const [showToken, setShowToken] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
   const [persistenceMode, setPersistenceMode] = useState<PersistenceMode>(
     serverConfig.persistenceMode
   );
   const [cacheDir, setCacheDir] = useState(serverConfig.cacheDir || '/config/cache');
-  const [geoipEnabled, setGeoipEnabled] = useState(serverConfig.geoipEnabled ?? true);
-  const [geoipDir, setGeoipDir] = useState(serverConfig.geoipDir || '/config/geoip');
-  const [rdnsEnabled, setRdnsEnabled] = useState(serverConfig.rdnsEnabled);
-  const [rdnsTtlSec, setRdnsTtlSec] = useState(serverConfig.rdnsTtlSec);
-  const [rdnsSkipPrivate, setRdnsSkipPrivate] = useState(serverConfig.rdnsSkipPrivate);
-  const [lanDnsEnabled, setLanDnsEnabled] = useState(serverConfig.lanDnsEnabled ?? true);
-  const [lanDnsServer, setLanDnsServer] = useState(serverConfig.lanDnsServer ?? '');
-  const [lanDnsTtlSec, setLanDnsTtlSec] = useState(serverConfig.lanDnsTtlSec ?? 300);
-  const [stripLanDomain, setStripLanDomain] = useState(serverConfig.stripLanDomain ?? true);
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
-  const [geoipNotice, setGeoipNotice] = useState<{ ok: boolean; text: string } | null>(null);
-  const [reloadingGeoip, setReloadingGeoip] = useState(false);
-  const [uploadingGeoip, setUploadingGeoip] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    setProbeToken(serverConfig.probeToken || 'orbi-rbk50-voxel-secret');
+    setProbeToken(serverConfig.probeToken || '');
     setPersistenceMode(serverConfig.persistenceMode);
     setCacheDir(serverConfig.cacheDir || '/config/cache');
-    setGeoipEnabled(serverConfig.geoipEnabled ?? true);
-    setGeoipDir(serverConfig.geoipDir || '/config/geoip');
-    setRdnsEnabled(serverConfig.rdnsEnabled);
-    setRdnsTtlSec(serverConfig.rdnsTtlSec);
-    setRdnsSkipPrivate(serverConfig.rdnsSkipPrivate);
-    setLanDnsEnabled(serverConfig.lanDnsEnabled ?? true);
-    setLanDnsServer(serverConfig.lanDnsServer ?? '');
-    setLanDnsTtlSec(serverConfig.lanDnsTtlSec ?? 300);
-    setStripLanDomain(serverConfig.stripLanDomain ?? true);
   }, [serverConfig]);
 
   const handleGenerateToken = () => {
-    const bytes = new Uint8Array(16);
-    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-      crypto.getRandomValues(bytes);
-    } else {
-      for (let i = 0; i < bytes.length; i++) {
-        bytes[i] = Math.floor(Math.random() * 256);
-      }
-    }
-    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-    setProbeToken(`orbi-${hex}`);
+    setProbeToken(generateClientRandomToken());
     setShowToken(true);
+  };
+
+  const handleCopyToken = async () => {
+    if (!probeToken.trim()) return;
+    try {
+      await navigator.clipboard.writeText(probeToken.trim());
+      setCopiedToken(true);
+      setTimeout(() => setCopiedToken(false), 2000);
+    } catch {
+      // Clipboard API fallback ignored
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -95,18 +75,9 @@ export function SettingsView({
     setSaving(true);
     try {
       await onSaveSettings({
-        probeToken: probeToken.trim() || serverConfig.probeToken || 'orbi-rbk50-voxel-secret',
+        probeToken: probeToken.trim() || serverConfig.probeToken,
         persistenceMode,
         cacheDir: cacheDir.trim() || '/config/cache',
-        geoipEnabled,
-        geoipDir: geoipDir.trim() || '/config/geoip',
-        rdnsEnabled,
-        rdnsTtlSec: Math.max(60, Number(rdnsTtlSec) || 3600),
-        rdnsSkipPrivate,
-        lanDnsEnabled,
-        lanDnsServer: lanDnsServer.trim(),
-        lanDnsTtlSec: Math.max(30, Number(lanDnsTtlSec) || 300),
-        stripLanDomain,
       });
       setSavedNotice('Settings saved to configuration file');
       setTimeout(() => setSavedNotice(''), 2500);
@@ -115,55 +86,24 @@ export function SettingsView({
     }
   };
 
-  const handleReloadDatabases = async () => {
-    setReloadingGeoip(true);
-    try {
-      await onReloadGeoip();
-      setGeoipNotice({ ok: true, text: 'Scanned MaxMind folder for .mmdb files' });
-      setTimeout(() => setGeoipNotice(null), 3000);
-    } finally {
-      setReloadingGeoip(false);
-    }
-  };
-
-  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    setUploadingGeoip(true);
-    setGeoipNotice(null);
-    try {
-      const res = await onUploadGeoip(file);
-      setGeoipNotice({ ok: res.ok, text: res.message });
-      setTimeout(() => setGeoipNotice(null), 4000);
-    } finally {
-      setUploadingGeoip(false);
-    }
-  };
-
   const activeCacheDiffers =
     serverStats.activeCacheDir &&
     cacheDir.trim() &&
     serverStats.activeCacheDir !== cacheDir.trim();
 
-  const activeGeoipDiffers =
-    serverStats.geoipActiveDir &&
-    geoipDir.trim() &&
-    serverStats.geoipActiveDir !== geoipDir.trim();
-
   return (
-    <form onSubmit={handleSubmit} className="space-y-6 max-w-4xl">
-      {/* Persistent Configuration File & Router Agent Token */}
+    <form onSubmit={handleSubmit} className="space-y-6 max-w-3xl">
+      {/* Persistent Configuration File & Shared Router Agent Token */}
       <section className="app-surface border rounded-2xl p-5 space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1 min-w-0 flex-1">
             <h2 className="font-display text-sm font-semibold flex items-center gap-2">
               <FileCog className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
-              <span>Persistent Configuration Volume</span>
+              <span>Persistent Configuration</span>
             </h2>
             <p className="text-xs app-text-muted">
-              All server settings, router agent token, device aliases, and alert rules are saved in
-              the <span className="font-mono app-text-secondary">/config</span>{' '}
+              All settings, shared agent token, device aliases, alert rules, and notification
+              channels are stored in the <span className="font-mono app-text-secondary">/config</span>{' '}
               <TechTerm
                 label="Docker volume"
                 tip="A persistent folder mounted from your host machine into /config inside the container so settings survive restarts and image upgrades without application environment variables."
@@ -181,7 +121,7 @@ export function SettingsView({
           </div>
         </div>
 
-        <div className="pt-3 border-t app-border space-y-1.5">
+        <div className="pt-3 border-t app-border space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <label
               htmlFor="probe-token-input"
@@ -192,10 +132,12 @@ export function SettingsView({
             </label>
             <button
               type="button"
+              data-testid="regenerate-token-btn"
               onClick={handleGenerateToken}
-              className="text-[11px] font-medium text-sky-500 hover:text-sky-400 transition-colors"
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-500 hover:text-sky-400 transition-colors"
             >
-              Generate random token
+              <RefreshCw className="h-3 w-3" aria-hidden="true" />
+              <span>Regenerate random token</span>
             </button>
           </div>
           <div className="flex items-center gap-2">
@@ -205,13 +147,14 @@ export function SettingsView({
               type={showToken ? 'text' : 'password'}
               value={probeToken}
               onChange={(e) => setProbeToken(e.target.value)}
-              placeholder="orbi-rbk50-voxel-secret"
+              placeholder="Auto-generated random token"
               className="flex-1 min-w-0 app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
             />
             <button
               type="button"
               onClick={() => setShowToken((prev) => !prev)}
               aria-label={showToken ? 'Hide shared agent token' : 'Show shared agent token'}
+              title={showToken ? 'Hide token' : 'Show token'}
               className="inline-flex items-center justify-center h-9 w-9 rounded-xl border app-border app-surface app-row-hover transition-colors shrink-0"
             >
               {showToken ? (
@@ -220,485 +163,134 @@ export function SettingsView({
                 <Eye className="h-4 w-4 app-text-muted" aria-hidden="true" />
               )}
             </button>
+            <button
+              type="button"
+              onClick={handleCopyToken}
+              aria-label="Copy shared agent token"
+              title="Copy token"
+              className="inline-flex items-center justify-center h-9 w-9 rounded-xl border app-border app-surface app-row-hover transition-colors shrink-0"
+            >
+              {copiedToken ? (
+                <Check className="h-4 w-4 text-emerald-500" aria-hidden="true" />
+              ) : (
+                <Copy className="h-4 w-4 app-text-muted" aria-hidden="true" />
+              )}
+            </button>
           </div>
-          <p className="text-[11px] app-text-muted">
-            Required by your Orbi router agent to authenticate snapshots. Takes effect immediately
-            after saving and automatically updates the scripts in Router Agent.
+          <p className="text-[11px] app-text-muted leading-relaxed">
+            Authenticates traffic snapshots pushed by your router agent via the{' '}
+            <span className="font-mono app-text-secondary">X-Probe-Token</span> header so
+            unauthorized devices on your network cannot spoof traffic data. Automatically generated
+            randomly on first start and synced to the scripts in the Agent tab.
           </p>
         </div>
       </section>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Traffic History & Cache Storage */}
-        <section className="app-surface border rounded-2xl p-5 space-y-4">
-          <div>
-            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-              <Database className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
-              <span>Traffic History Storage</span>
-            </h2>
-            <p className="text-xs app-text-muted mt-1">
-              Choose whether traffic snapshots stay in memory or are cached on disk inside your configured storage folder.
-            </p>
-          </div>
+      {/* Traffic History & Cache Storage */}
+      <section className="app-surface border rounded-2xl p-5 space-y-4">
+        <div>
+          <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+            <Database className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+            <span>Traffic History Storage</span>
+          </h2>
+          <p className="text-xs app-text-muted mt-1">
+            Choose whether traffic snapshots stay in memory or are cached on disk inside your
+            configured storage folder.
+          </p>
+        </div>
 
-          <div className="space-y-2.5">
-            <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
-              <input
-                type="radio"
-                name="persistenceMode"
-                value="memory"
-                checked={persistenceMode === 'memory'}
-                onChange={() => setPersistenceMode('memory')}
-                className="mt-0.5 text-sky-500 focus:ring-sky-500"
-              />
-              <div>
-                <div className="text-xs font-semibold">Memory Only (Zero Disk Writes)</div>
-                <div className="text-xs app-text-muted mt-0.5">
-                  Keeps 15-minute high-resolution samples and 24-hour summaries in RAM. Clears traffic history on restart while preserving{' '}
-                  <span className="font-mono">config.json</span>.
-                </div>
-              </div>
-            </label>
-
-            <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
-              <input
-                type="radio"
-                name="persistenceMode"
-                value="disk"
-                checked={persistenceMode === 'disk'}
-                onChange={() => setPersistenceMode('disk')}
-                className="mt-0.5 text-sky-500 focus:ring-sky-500"
-              />
-              <div>
-                <div className="text-xs font-semibold">
-                  Disk Cache (
-                  <TechTerm
-                    label="JSONL"
-                    tip="JSON Lines — a lightweight append-only text format where each line stores one timestamped traffic snapshot, rotated automatically above 5 MB."
-                  />{' '}
-                  + State Snapshot)
-                </div>
-                <div className="text-xs app-text-muted mt-0.5">
-                  Saves traffic history and auto-rotated snapshot logs to disk so charts remain populated across restarts.
-                </div>
-              </div>
-            </label>
-          </div>
-
-          {/* Configurable Cache Directory */}
-          <div className="space-y-1.5 pt-1">
-            <div className="flex items-center justify-between gap-2">
-              <label
-                htmlFor="cache-dir-input"
-                className="flex items-center gap-1.5 text-xs font-medium"
-              >
-                <FolderOpen className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
-                Disk Storage Location
-              </label>
-              {cacheDir !== '/config/cache' && (
-                <button
-                  type="button"
-                  onClick={() => setCacheDir('/config/cache')}
-                  className="text-[11px] text-sky-500 hover:text-sky-400"
-                >
-                  Reset to /config/cache
-                </button>
-              )}
-            </div>
+        <div className="space-y-2.5">
+          <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
             <input
-              id="cache-dir-input"
-              data-testid="cache-dir-input"
-              type="text"
-              value={cacheDir}
-              onChange={(e) => setCacheDir(e.target.value)}
-              placeholder="/config/cache"
-              className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+              type="radio"
+              name="persistenceMode"
+              value="memory"
+              checked={persistenceMode === 'memory'}
+              onChange={() => setPersistenceMode('memory')}
+              className="mt-0.5 text-sky-500 focus:ring-sky-500"
             />
-            <p className="text-[11px] app-text-muted">
-              Default: <span className="font-mono">/config/cache</span>
-              {activeCacheDiffers && (
-                <>
-                  {' '}
-                  · Active path:{' '}
-                  <span className="font-mono app-text-secondary">
-                    {serverStats.activeCacheDir}
-                  </span>
-                </>
-              )}
-            </p>
-          </div>
-
-          <div className="pt-2 border-t app-border flex items-center justify-between text-xs font-mono app-text-muted tabular-nums">
-            <span>Snapshots recorded: {serverStats.persistedSnapshots}</span>
-            <span>Disk usage: {formatBytes(serverStats.diskLogSizeBytes)}</span>
-          </div>
-        </section>
-
-        {/* Cached Reverse DNS */}
-        <section className="app-surface border rounded-2xl p-5 space-y-4">
-          <div>
-            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-              <Globe className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
-              <span>
-                Host Name Lookup (
-                <TechTerm
-                  label="Reverse DNS"
-                  tip="Converts numeric internet IP addresses (like 142.250.80.46) into human-readable domain names using DNS PTR records."
-                />
-                )
-              </span>
-            </h2>
-            <p className="text-xs app-text-muted mt-1">
-              Built-in service matching works offline with zero DNS queries. Enable live{' '}
-              <TechTerm
-                label="PTR"
-                tip="Pointer Record — the DNS record type used to look up a hostname from an IP address."
-              />{' '}
-              lookups only when needed; results are cached in memory to keep DNS traffic minimal.
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <label className="flex items-center justify-between gap-3 cursor-pointer">
-              <span className="text-xs font-medium">
-                Enable live{' '}
-                <TechTerm
-                  label="PTR"
-                  tip="Queries your local DNS resolver to resolve unknown external IP addresses into hostnames."
-                />{' '}
-                lookups
-              </span>
-              <input
-                type="checkbox"
-                checked={rdnsEnabled}
-                onChange={(e) => setRdnsEnabled(e.target.checked)}
-                className="h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
-              />
-            </label>
-
-            <label className="flex items-center justify-between gap-3 cursor-pointer">
-              <span className="text-xs font-medium">
-                Skip private local IPs (
-                <TechTerm
-                  label="RFC1918"
-                  tip="Standard private home/office network address ranges (192.168.x.x, 10.x.x.x, 172.16–31.x.x) that are already named by your router."
-                />
-                )
-              </span>
-              <input
-                type="checkbox"
-                checked={rdnsSkipPrivate}
-                onChange={(e) => setRdnsSkipPrivate(e.target.checked)}
-                className="h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
-              />
-            </label>
-
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="rdns-ttl" className="text-xs font-medium">
-                Cache{' '}
-                <TechTerm
-                  label="TTL"
-                  tip="Time To Live — how many seconds a resolved hostname stays cached before looking it up again."
-                />{' '}
-                (seconds)
-              </label>
-              <input
-                id="rdns-ttl"
-                type="number"
-                min={60}
-                max={86400}
-                value={rdnsTtlSec}
-                onChange={(e) => setRdnsTtlSec(Number(e.target.value) || 3600)}
-                className="w-28 app-input border rounded-xl px-3 py-1.5 text-xs font-mono tabular-nums focus:outline-none focus:border-sky-500"
-              />
+            <div>
+              <div className="text-xs font-semibold">Memory Only (Zero Disk Writes)</div>
+              <div className="text-xs app-text-muted mt-0.5">
+                Keeps 15-minute high-resolution samples and 24-hour summaries in RAM. Clears
+                traffic history on restart while preserving{' '}
+                <span className="font-mono">config.json</span>.
+              </div>
             </div>
-          </div>
+          </label>
 
-          <div className="pt-2 border-t app-border flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span className="font-mono app-text-muted tabular-nums">
-              Cached: {serverStats.rdnsCacheSize} · Hits: {serverStats.rdnsHits} · Misses:{' '}
-              {serverStats.rdnsMisses}
-            </span>
-            <button
-              type="button"
-              onClick={onClearRdnsCache}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border app-border app-row-hover text-xs font-medium transition-colors"
+          <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
+            <input
+              type="radio"
+              name="persistenceMode"
+              value="disk"
+              checked={persistenceMode === 'disk'}
+              onChange={() => setPersistenceMode('disk')}
+              className="mt-0.5 text-sky-500 focus:ring-sky-500"
+            />
+            <div>
+              <div className="text-xs font-semibold">
+                Disk Cache (
+                <TechTerm
+                  label="JSONL"
+                  tip="JSON Lines — a lightweight append-only text format where each line stores one timestamped traffic snapshot, rotated automatically above 5 MB."
+                />{' '}
+                + State Snapshot)
+              </div>
+              <div className="text-xs app-text-muted mt-0.5">
+                Saves traffic history and auto-rotated snapshot logs to disk so charts remain
+                populated across restarts.
+              </div>
+            </div>
+          </label>
+        </div>
+
+        {/* Configurable Cache Directory */}
+        <div className="space-y-1.5 pt-1">
+          <div className="flex items-center justify-between gap-2">
+            <label
+              htmlFor="cache-dir-input"
+              className="flex items-center gap-1.5 text-xs font-medium"
             >
-              <Trash2 className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
-              Flush Cache
-            </button>
-          </div>
-        </section>
-      </div>
-
-      {/* Local Device Name Resolution (LAN DNS / Custom dnsmasq) */}
-      <section
-        data-testid="lan-dns-settings-card"
-        className="app-surface border rounded-2xl p-5 space-y-4"
-      >
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0 flex-1">
-            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-              <Network className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
-              <span>
-                Local Device Resolution (
-                <TechTerm
-                  label="LAN PTR / dnsmasq"
-                  tip="Performs reverse PTR lookups exclusively for local private IPs (RFC1918) against your separate LAN DNS server (e.g. Pi-hole / AdGuard) or router dnsmasq, completely independent of external internet rDNS."
-                />
-                )
-              </span>
-            </h2>
-            <p className="text-xs app-text-muted mt-1">
-              Resolves local device names using reverse lookups against your separate LAN DNS
-              server or custom router <span className="font-mono app-text-secondary">dnsmasq</span>.
-              Leave the server IP blank to use the container&apos;s default DNS, or enter your LAN
-              DNS / router IP directly (e.g.{' '}
-              <span className="font-mono app-text-secondary">192.168.1.2</span> or{' '}
-              <span className="font-mono app-text-secondary">192.168.1.1</span>).
-            </p>
-          </div>
-          <label className="inline-flex items-center gap-2 text-xs font-medium cursor-pointer shrink-0 pt-0.5">
-            <span>Enabled</span>
-            <input
-              type="checkbox"
-              data-testid="lan-dns-enabled-toggle"
-              checked={lanDnsEnabled}
-              onChange={(e) => setLanDnsEnabled(e.target.checked)}
-              className="h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
-            />
-          </label>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-1.5">
-            <label htmlFor="lan-dns-server-input" className="block text-xs font-medium">
-              Local DNS / dnsmasq Server IP
+              <FolderOpen className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
+              Disk Storage Location
             </label>
-            <input
-              id="lan-dns-server-input"
-              data-testid="lan-dns-server-input"
-              type="text"
-              value={lanDnsServer}
-              onChange={(e) => setLanDnsServer(e.target.value)}
-              placeholder="e.g. 192.168.1.2 or 192.168.1.1 (blank = system DNS)"
-              className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
-            />
-            <p className="text-[11px] app-text-muted">
-              Supports optional port or comma-separated fallback (e.g.{' '}
-              <span className="font-mono">192.168.1.2, 192.168.1.1</span>).
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <label className="flex items-center justify-between gap-3 cursor-pointer">
-              <span className="text-xs font-medium">
-                Strip local domain suffix (e.g. <span className="font-mono">.lan</span> /{' '}
-                <span className="font-mono">.home.arpa</span>)
-              </span>
-              <input
-                type="checkbox"
-                checked={stripLanDomain}
-                onChange={(e) => setStripLanDomain(e.target.checked)}
-                className="h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
-              />
-            </label>
-
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="lan-dns-ttl" className="text-xs font-medium">
-                LAN PTR Cache TTL (seconds)
-              </label>
-              <input
-                id="lan-dns-ttl"
-                type="number"
-                min={30}
-                max={86400}
-                value={lanDnsTtlSec}
-                onChange={(e) => setLanDnsTtlSec(Number(e.target.value) || 300)}
-                className="w-28 app-input border rounded-xl px-3 py-1.5 text-xs font-mono tabular-nums focus:outline-none focus:border-sky-500"
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className="pt-2 border-t app-border flex flex-wrap items-center justify-between gap-2 text-xs">
-          <span className="font-mono app-text-muted tabular-nums">
-            Resolved: {serverStats.lanDnsResolved} · Cached: {serverStats.lanDnsCacheSize} ·
-            Private MACs: {serverStats.randomizedMacCount}
-          </span>
-          <button
-            type="button"
-            data-testid="flush-lan-dns-btn"
-            onClick={onClearLanDnsCache}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border app-border app-row-hover text-xs font-medium transition-colors"
-          >
-            <Trash2 className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
-            Flush LAN Cache
-          </button>
-        </div>
-      </section>
-
-      {/* MaxMind GeoIP2 / GeoLite2 Database Card */}
-      <section
-        data-testid="maxmind-settings-card"
-        className="app-surface border rounded-2xl p-5 space-y-4"
-      >
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0 flex-1">
-            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-              <MapPin className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
-              <span>
-                MaxMind IP Location &amp; Network Database (
-                <TechTerm
-                  label="MMDB"
-                  tip="MaxMind DB binary format used by free GeoLite2-City.mmdb, GeoLite2-Country.mmdb, and GeoLite2-ASN.mmdb databases for offline IP geolocation and ISP/organization lookup."
-                />
-                )
-              </span>
-            </h2>
-            <p className="text-xs app-text-muted mt-1">
-              Drop <span className="font-mono app-text-secondary">GeoLite2-City.mmdb</span> (or{' '}
-              <span className="font-mono app-text-secondary">GeoLite2-Country.mmdb</span>) and{' '}
-              <span className="font-mono app-text-secondary">GeoLite2-ASN.mmdb</span> into the
-              database folder below or upload them directly for offline city, country, and{' '}
-              <TechTerm
-                label="ASN"
-                tip="Autonomous System Number — identifies the network operator or cloud provider (e.g. AS15169 Google LLC, AS13335 Cloudflare) owning a public IP address."
-              />{' '}
-              enrichment with zero external API calls.
-            </p>
-          </div>
-          <label className="inline-flex items-center gap-2 text-xs font-medium cursor-pointer shrink-0 pt-0.5">
-            <span>Enabled</span>
-            <input
-              type="checkbox"
-              data-testid="geoip-enabled-toggle"
-              checked={geoipEnabled}
-              onChange={(e) => setGeoipEnabled(e.target.checked)}
-              className="h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
-            />
-          </label>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <label
-                htmlFor="geoip-dir-input"
-                className="flex items-center gap-1.5 text-xs font-medium"
+            {cacheDir !== '/config/cache' && (
+              <button
+                type="button"
+                onClick={() => setCacheDir('/config/cache')}
+                className="text-[11px] text-sky-500 hover:text-sky-400"
               >
-                <FolderOpen className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
-                MaxMind Database Folder
-              </label>
-              {geoipDir !== '/config/geoip' && (
-                <button
-                  type="button"
-                  onClick={() => setGeoipDir('/config/geoip')}
-                  className="text-[11px] text-sky-500 hover:text-sky-400"
-                >
-                  Reset to /config/geoip
-                </button>
-              )}
-            </div>
-            <input
-              id="geoip-dir-input"
-              data-testid="geoip-dir-input"
-              type="text"
-              value={geoipDir}
-              onChange={(e) => setGeoipDir(e.target.value)}
-              placeholder="/config/geoip"
-              className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
-            />
-            <p className="text-[11px] app-text-muted">
-              Default: <span className="font-mono">/config/geoip</span>
-              {activeGeoipDiffers && (
-                <>
-                  {' '}
-                  · Active:{' '}
-                  <span className="font-mono app-text-secondary">
-                    {serverStats.geoipActiveDir}
-                  </span>
-                </>
-              )}
-            </p>
-          </div>
-
-          <div className="rounded-xl border app-border app-input p-3.5 space-y-2 text-xs">
-            <div className="flex items-center justify-between gap-2">
-              <span className="app-text-muted">City / Country DB</span>
-              <span
-                data-testid="geoip-city-status"
-                className={`font-mono ${
-                  serverStats.geoipCityLoaded ? 'text-emerald-500 font-medium' : 'app-text-muted'
-                }`}
-              >
-                {serverStats.geoipCityLoaded
-                  ? serverStats.geoipCityFile || 'Loaded'
-                  : 'Not installed'}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <span className="app-text-muted">ASN / Organization DB</span>
-              <span
-                data-testid="geoip-asn-status"
-                className={`font-mono ${
-                  serverStats.geoipAsnLoaded ? 'text-emerald-500 font-medium' : 'app-text-muted'
-                }`}
-              >
-                {serverStats.geoipAsnLoaded
-                  ? serverStats.geoipAsnFile || 'Loaded'
-                  : 'Not installed'}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2 pt-1.5 border-t app-border">
-              <span className="app-text-muted">Cached IP Lookups</span>
-              <span className="font-mono app-text-secondary tabular-nums">
-                {serverStats.geoipLookups}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-          <div className="text-xs min-h-[18px]">
-            {geoipNotice && (
-              <span className={geoipNotice.ok ? 'text-emerald-500 font-medium' : 'text-red-500'}>
-                {geoipNotice.text}
-              </span>
+                Reset to /config/cache
+              </button>
             )}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".mmdb"
-              onChange={handleFileSelected}
-              className="hidden"
-              aria-label="Upload MaxMind MMDB database file"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadingGeoip}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border app-border app-surface app-row-hover disabled:opacity-60 text-xs font-medium transition-colors"
-            >
-              <Upload className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
-              {uploadingGeoip ? 'Uploading...' : 'Upload .mmdb File'}
-            </button>
-            <button
-              type="button"
-              data-testid="reload-geoip-btn"
-              onClick={handleReloadDatabases}
-              disabled={reloadingGeoip}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border app-border app-surface app-row-hover disabled:opacity-60 text-xs font-medium transition-colors"
-            >
-              <RefreshCw
-                className={`h-3.5 w-3.5 app-text-muted ${reloadingGeoip ? 'animate-spin' : ''}`}
-                aria-hidden="true"
-              />
-              Reload Databases
-            </button>
-          </div>
+          <input
+            id="cache-dir-input"
+            data-testid="cache-dir-input"
+            type="text"
+            value={cacheDir}
+            onChange={(e) => setCacheDir(e.target.value)}
+            placeholder="/config/cache"
+            className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+          />
+          <p className="text-[11px] app-text-muted">
+            Default: <span className="font-mono">/config/cache</span>
+            {activeCacheDiffers && (
+              <>
+                {' '}
+                · Active path:{' '}
+                <span className="font-mono app-text-secondary">
+                  {serverStats.activeCacheDir}
+                </span>
+              </>
+            )}
+          </p>
+        </div>
+
+        <div className="pt-2 border-t app-border flex items-center justify-between text-xs font-mono app-text-muted tabular-nums">
+          <span>Snapshots recorded: {serverStats.persistedSnapshots}</span>
+          <span>Disk usage: {formatBytes(serverStats.diskLogSizeBytes)}</span>
         </div>
       </section>
 
@@ -716,7 +308,7 @@ export function SettingsView({
           disabled={saving}
           className="px-5 py-2.5 rounded-xl app-btn-primary disabled:opacity-60 text-xs font-semibold transition-colors"
         >
-          {saving ? 'Saving Settings...' : 'Save Server Settings'}
+          {saving ? 'Saving Settings...' : 'Save Settings'}
         </button>
       </div>
     </form>

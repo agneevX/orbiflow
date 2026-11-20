@@ -73,15 +73,6 @@ export interface ProbeSnapshot {
   rawConntrackLines?: string[];
 }
 
-export interface GeoIpInfo {
-  countryCode?: string;
-  countryName?: string;
-  city?: string;
-  asn?: number;
-  org?: string;
-  source: 'maxmind';
-}
-
 export interface EnrichedFlow {
   id: string;
   proto: TransportProtocol;
@@ -95,7 +86,6 @@ export interface EnrichedFlow {
   dstIp: string;
   dstHost?: string;
   dstService: string;
-  dstGeo?: GeoIpInfo;
   dport: number;
   txBytes: number;
   rxBytes: number;
@@ -157,7 +147,6 @@ export interface RemoteEndpointSummary {
   ip: string;
   label: string;
   service: string;
-  geo?: GeoIpInfo;
   ports: number[];
   bytes: number;
   bps: number;
@@ -175,10 +164,23 @@ export interface ClientDestinationLink {
   flowCount: number;
 }
 
+export type AlertMetric =
+  | 'wan_rx_mbps'
+  | 'wan_tx_mbps'
+  | 'wan_combined_mbps'
+  | 'host_rx_mbps'
+  | 'host_tx_mbps'
+  | 'host_flows'
+  | 'total_flows'
+  | 'new_device'
+  | 'agent_offline'
+  | 'router_high_load'
+  | 'router_high_mem';
+
 export interface AlertRule {
   id: string;
   name: string;
-  metric: 'wan_rx_mbps' | 'wan_tx_mbps' | 'host_flows' | 'total_flows';
+  metric: AlertMetric;
   threshold: number;
   enabled: boolean;
 }
@@ -193,6 +195,21 @@ export interface AlertEvent {
   threshold: number;
   timestamp: number;
   acknowledged: boolean;
+}
+
+export interface NotificationConfig {
+  ntfy: {
+    enabled: boolean;
+    serverUrl: string;
+    topic: string;
+    token: string;
+    priority: 'low' | 'default' | 'high' | 'urgent';
+  };
+  telegram: {
+    enabled: boolean;
+    botToken: string;
+    chatId: string;
+  };
 }
 
 export interface ProbeStatus {
@@ -210,6 +227,7 @@ export interface ProbeStatus {
   conntrackMax: number;
   lastHeartbeat: number;
   simulatorEnabled: boolean;
+  simulatorAvailable: boolean;
 }
 
 export interface ServerConfig {
@@ -223,8 +241,6 @@ export interface ServerConfig {
   lanDnsServer: string;
   lanDnsTtlSec: number;
   stripLanDomain: boolean;
-  geoipEnabled: boolean;
-  geoipDir: string;
 }
 
 export interface ServerStats {
@@ -240,12 +256,6 @@ export interface ServerStats {
   lanDnsMisses: number;
   lanDnsResolved: number;
   randomizedMacCount: number;
-  geoipActiveDir: string;
-  geoipCityLoaded: boolean;
-  geoipAsnLoaded: boolean;
-  geoipCityFile: string | null;
-  geoipAsnFile: string | null;
-  geoipLookups: number;
 }
 
 export interface DashboardSnapshot {
@@ -270,6 +280,7 @@ export interface DashboardSnapshot {
   clientLinks: ClientDestinationLink[];
   rules: AlertRule[];
   alerts: AlertEvent[];
+  notifications: NotificationConfig;
   deviceAliases: Record<string, DeviceAlias>;
   serverConfig: ServerConfig;
   serverStats: ServerStats;

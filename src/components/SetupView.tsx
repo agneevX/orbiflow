@@ -22,35 +22,35 @@ const ARTIFACT_META: Array<{
     label: 'Python 3 WebSocket',
     filename: 'orbi_probe.py',
     summary:
-      'Recommended for Voxel + Entware (opkg install python3-light). Uses only Python stdlib with built-in RFC 6455 WebSocket framing and 5s low-CPU polling.',
+      'Recommended for Linux routers with Python 3 (including Entware python3-light). Uses only core Python modules with built-in WebSocket framing and 5s low-CPU polling.',
   },
   {
     id: 'ash',
-    label: 'BusyBox Ash (Zero Deps)',
+    label: 'BusyBox Shell (Zero Deps)',
     filename: 'orbi-probe.sh',
     summary:
-      'Runs on stock Voxel firmware without installing Entware packages. Streams /proc/net/nf_conntrack + eth0 byte counters via awk & curl every 5s.',
+      'Runs on minimal BusyBox routers without installing Python. Streams /proc/net/nf_conntrack and interface byte counters via awk & curl every 5s.',
   },
   {
     id: 'c',
-    label: 'Native C (armv7l)',
+    label: 'Native C Source',
     filename: 'orbi-wan-probe.c',
     summary:
-      'Ultra-lightweight (<1.2 MB RSS) native binary for IPQ4019 armv7l. Lowest possible CPU footprint.',
+      'Ultra-lightweight (<1.2 MB RSS) C source you can cross-compile for your router architecture for minimal CPU impact.',
   },
   {
     id: 'init',
-    label: 'Entware Init Service',
+    label: 'Router Init Service',
     filename: 'S99orbi-probe',
     summary:
-      'Autostart daemon script for /opt/etc/init.d/S99orbi-probe on Voxel firmware reboot.',
+      'Autostart daemon script for /opt/etc/init.d/S99orbi-probe so the agent launches automatically after a router reboot.',
   },
   {
     id: 'docker',
     label: 'Docker Compose',
     filename: 'docker-compose.yml',
     summary:
-      'Runs this OrbiFlow server inside a Linux Docker container with persistent /config volume storage for config.json, /config/cache, and /config/geoip MaxMind databases.',
+      'Runs the OrbiFlow server in Docker as non-root (PUID/PGID) with persistent /config volume storage for config.json and optional disk cache.',
   },
 ];
 
@@ -58,7 +58,7 @@ interface SetupViewProps {
   defaultToken?: string;
 }
 
-export function SetupView({ defaultToken = 'orbi-rbk50-voxel-secret' }: SetupViewProps) {
+export function SetupView({ defaultToken = '' }: SetupViewProps) {
   const defaultHost =
     typeof window !== 'undefined' && window.location.hostname !== 'localhost'
       ? window.location.hostname
@@ -83,7 +83,7 @@ export function SetupView({ defaultToken = 'orbi-rbk50-voxel-secret' }: SetupVie
       token,
       iface,
       intervalSec: Math.max(1, Number(intervalSec) || 5),
-      probeId: 'orbi-rbk50-eth0',
+      probeId: `router-${iface || 'wan'}`,
     }),
     [serverHost, serverPort, token, iface, intervalSec]
   );
@@ -132,32 +132,24 @@ export function SetupView({ defaultToken = 'orbi-rbk50-voxel-secret' }: SetupVie
       {/* Architecture & Config Form */}
       <section className="app-surface border rounded-2xl p-5 space-y-5">
         <div>
-          <h2 className="font-display text-base font-semibold">
-            Orbi RBK50 Voxel Agent Configuration
-          </h2>
+          <h2 className="font-display text-base font-semibold">Router Agent Configuration</h2>
           <p className="text-xs app-text-muted mt-1 max-w-2xl">
-            Targeted for <span className="font-mono app-text-secondary">Linux orbi-gateway 3.14.77 armv7l IPQ4019</span>.
-            Reads kernel{' '}
+            Works on any Linux-based router with shell access. Reads kernel{' '}
             <TechTerm
               label="/proc/net/nf_conntrack"
               tip="Linux kernel connection tracking table listing every active network session passing through your router."
               className="font-mono app-text-secondary"
             />{' '}
             &amp;{' '}
-            <span className="font-mono app-text-secondary">/sys/class/net/{iface}/statistics</span> every{' '}
-            {probeCfg.intervalSec}s with minimal CPU overhead, preserving hardware{' '}
-            <TechTerm
-              label="NSS NAT"
-              tip="Qualcomm Network Subsystem hardware acceleration on the Orbi RBK50 that keeps gigabit routing fast without loading the main CPU."
-            />{' '}
-            acceleration.
+            <span className="font-mono app-text-secondary">/sys/class/net/{iface}/statistics</span>{' '}
+            every {probeCfg.intervalSec}s with minimal CPU overhead.
           </p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <div>
             <label htmlFor="cfg-host" className="block text-xs app-text-muted mb-1.5">
-              Docker Server LAN IP
+              Server LAN IP
             </label>
             <input
               id="cfg-host"
@@ -182,8 +174,8 @@ export function SetupView({ defaultToken = 'orbi-rbk50-voxel-secret' }: SetupVie
           <div>
             <label htmlFor="cfg-iface" className="block text-xs app-text-muted mb-1.5">
               <TechTerm
-                label="Internet Interface"
-                tip="The Linux network interface connected to your ISP modem (eth0 on Netgear Orbi RBK50)."
+                label="WAN Interface"
+                tip="The Linux network interface connected to your ISP modem (commonly eth0, wan, or ppp0)."
               />
             </label>
             <input
@@ -214,6 +206,7 @@ export function SetupView({ defaultToken = 'orbi-rbk50-voxel-secret' }: SetupVie
             </label>
             <input
               id="cfg-token"
+              data-testid="setup-token-input"
               type="text"
               value={token}
               onChange={(e) => setToken(e.target.value)}
@@ -223,25 +216,23 @@ export function SetupView({ defaultToken = 'orbi-rbk50-voxel-secret' }: SetupVie
         </div>
       </section>
 
-      {/* Quick Voxel SSH Setup Steps */}
+      {/* Quick SSH Setup Steps */}
       <section className="app-surface border rounded-2xl p-5">
         <div className="flex items-center gap-2 mb-3">
           <Terminal className="h-4 w-4 text-sky-500" aria-hidden="true" />
-          <h2 className="font-display text-sm font-semibold">
-            Router Quick-Start Commands (Voxel SSH)
-          </h2>
+          <h2 className="font-display text-sm font-semibold">Router Quick-Start Commands</h2>
         </div>
         <pre className="app-input border rounded-xl p-3.5 text-xs font-mono app-text-secondary overflow-x-auto leading-relaxed">
-{`# 1. SSH into your Orbi RBK50 router
+{`# 1. SSH into your router
 ssh root@192.168.1.1
 
-# 2. Enable Netfilter per-flow byte accounting in Linux 3.14
+# 2. Enable Netfilter per-flow byte accounting
 echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct
 
-# 3. Install lightweight Python 3 (or use the BusyBox Ash script with zero packages)
+# 3. Install lightweight Python 3 (or use the BusyBox Shell script with zero packages)
 opkg update && opkg install python3-light
 
-# 4. Copy orbi_probe.py to /opt/bin/orbi_probe.py and launch (5s low-CPU polling)
+# 4. Copy orbi_probe.py to /opt/bin/orbi_probe.py and launch
 chmod +x /opt/bin/orbi_probe.py && /opt/bin/orbi_probe.py &`}
         </pre>
       </section>
@@ -249,7 +240,11 @@ chmod +x /opt/bin/orbi_probe.py && /opt/bin/orbi_probe.py &`}
       {/* Artifact Code Viewer */}
       <section className="app-surface border rounded-2xl overflow-hidden">
         <div className="px-5 py-3 border-b app-border flex flex-wrap items-center justify-between gap-3 app-sidebar">
-          <div role="tablist" aria-label="Deployment artifact files" className="flex flex-wrap items-center gap-1">
+          <div
+            role="tablist"
+            aria-label="Deployment artifact files"
+            className="flex flex-wrap items-center gap-1"
+          >
             {ARTIFACT_META.map((tab) => (
               <button
                 key={tab.id}

@@ -261,7 +261,9 @@
   color: var(--text-primary);
 }
 
-.app-border {
+.app-border,
+.divide-y.app-border > :not(:last-child),
+.divide-x.app-border > :not(:last-child) {
   border-color: var(--border-hairline);
 }
 

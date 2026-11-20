@@ -322,7 +322,7 @@ export class OrbiProbeSimulator {
     this.ifaceTxBytes += tickTx;
 
     return {
-      probeId: 'orbi-rbk50-sim',
+      probeId: 'router-dev-sim',
       timestamp,
       source: 'simulator',
       iface: {
@@ -335,9 +335,9 @@ export class OrbiProbeSimulator {
       arp: LAN_DEVICES,
       flows: rawFlows,
       system: {
-        hostname: 'orbi-gateway',
-        kernel: '3.14.77 #1 SMP PREEMPT armv7l',
-        arch: 'armv7l IPQ4019',
+        hostname: 'router-gateway',
+        kernel: 'Linux 6.6',
+        arch: 'linux',
         uptimeSec: 1_248_900 + this.tickCount * stepSeconds,
         load1m: Number((0.28 + 0.1 * Math.abs(Math.sin(this.tickCount * 0.1))).toFixed(2)),
         memUsedPct: 36.2,

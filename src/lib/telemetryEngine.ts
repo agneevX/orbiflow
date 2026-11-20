@@ -6,9 +6,9 @@ import type {
   DashboardSnapshot,
   DeviceAlias,
   EnrichedFlow,
-  GeoIpInfo,
   HostSummary,
   InterfaceCounters,
+  NotificationConfig,
   ProbeSnapshot,
   ProbeStatus,
   ProtocolSummary,
@@ -43,38 +43,101 @@ interface FlowTrackRecord {
 }
 
 export type RdnsLookupFn = (ip: string) => string | null;
-export type GeoIpLookupFn = (ip: string) => GeoIpInfo | null;
 
-const DEFAULT_RULES: AlertRule[] = [
+export const DEFAULT_ALERT_RULES: AlertRule[] = [
   {
     id: 'rule-wan-rx',
-    name: 'High Download Usage',
+    name: 'High Download Speed',
     metric: 'wan_rx_mbps',
     threshold: 250,
     enabled: true,
   },
   {
     id: 'rule-wan-tx',
-    name: 'High Upload Usage',
+    name: 'High Upload Speed',
     metric: 'wan_tx_mbps',
     threshold: 65,
     enabled: true,
   },
   {
+    id: 'rule-wan-combined',
+    name: 'High Combined Bandwidth',
+    metric: 'wan_combined_mbps',
+    threshold: 300,
+    enabled: false,
+  },
+  {
+    id: 'rule-host-rx',
+    name: 'Device Download Spike',
+    metric: 'host_rx_mbps',
+    threshold: 150,
+    enabled: true,
+  },
+  {
+    id: 'rule-host-tx',
+    name: 'Device Upload Spike',
+    metric: 'host_tx_mbps',
+    threshold: 40,
+    enabled: true,
+  },
+  {
     id: 'rule-host-flows',
-    name: 'Device Connection Flood',
+    name: 'Device Connection Spike',
     metric: 'host_flows',
     threshold: 60,
     enabled: true,
   },
   {
     id: 'rule-total-flows',
-    name: 'High Connection Count',
+    name: 'High Total Connections',
     metric: 'total_flows',
     threshold: 1000,
     enabled: false,
   },
+  {
+    id: 'rule-new-device',
+    name: 'New Device Joined Network',
+    metric: 'new_device',
+    threshold: 1,
+    enabled: true,
+  },
+  {
+    id: 'rule-agent-offline',
+    name: 'Router Agent Disconnected',
+    metric: 'agent_offline',
+    threshold: 1,
+    enabled: true,
+  },
+  {
+    id: 'rule-router-load',
+    name: 'High Router CPU Load',
+    metric: 'router_high_load',
+    threshold: 3,
+    enabled: false,
+  },
+  {
+    id: 'rule-router-mem',
+    name: 'High Router Memory Usage',
+    metric: 'router_high_mem',
+    threshold: 85,
+    enabled: false,
+  },
 ];
+
+const DEFAULT_NOTIFICATIONS: NotificationConfig = {
+  ntfy: {
+    enabled: false,
+    serverUrl: 'https://ntfy.sh',
+    topic: '',
+    token: '',
+    priority: 'default',
+  },
+  telegram: {
+    enabled: false,
+    botToken: '',
+    chatId: '',
+  },
+};
 
 /**
  * Parses raw Linux 3.14 /proc/net/nf_conntrack lines emitted by lightweight BusyBox agents.
@@ -163,13 +226,19 @@ export class TrafficMonitorEngine {
   private lastTimestamp = 0;
   private peakRxBps = 0;
   private peakTxBps = 0;
-  private rules: AlertRule[] = DEFAULT_RULES.map((r) => ({ ...r }));
+  private rules: AlertRule[] = DEFAULT_ALERT_RULES.map((r) => ({ ...r }));
   private alerts: AlertEvent[] = [];
   private lastAlertFiredAt = new Map<string, number>();
+  private knownDeviceKeys = new Set<string>();
+  private hasDeviceBaseline = false;
   private deviceAliases: Record<string, DeviceAlias> = {};
+  private notifications: NotificationConfig = {
+    ntfy: { ...DEFAULT_NOTIFICATIONS.ntfy },
+    telegram: { ...DEFAULT_NOTIFICATIONS.telegram },
+  };
 
   private serverConfig: ServerConfig = {
-    probeToken: 'orbi-rbk50-voxel-secret',
+    probeToken: '',
     persistenceMode: 'memory',
     cacheDir: '/config/cache',
     rdnsEnabled: false,
@@ -179,8 +248,6 @@ export class TrafficMonitorEngine {
     lanDnsServer: '',
     lanDnsTtlSec: 300,
     stripLanDomain: true,
-    geoipEnabled: true,
-    geoipDir: '/config/geoip',
   };
 
   private serverStats: ServerStats = {
@@ -196,21 +263,15 @@ export class TrafficMonitorEngine {
     lanDnsMisses: 0,
     lanDnsResolved: 0,
     randomizedMacCount: 0,
-    geoipActiveDir: '/config/geoip',
-    geoipCityLoaded: false,
-    geoipAsnLoaded: false,
-    geoipCityFile: null,
-    geoipAsnFile: null,
-    geoipLookups: 0,
   };
 
   private probeStatus: ProbeStatus = {
     connected: false,
     mode: 'disconnected',
-    probeId: 'orbi-rbk50-eth0',
-    hostname: 'orbi-gateway',
-    kernel: '3.14.77 #1 SMP PREEMPT armv7l',
-    arch: 'armv7l IPQ4019',
+    probeId: 'router-wan',
+    hostname: 'router',
+    kernel: 'Linux',
+    arch: '',
     iface: 'eth0',
     uptimeSec: 0,
     load1m: 0,
@@ -218,7 +279,8 @@ export class TrafficMonitorEngine {
     conntrackCount: 0,
     conntrackMax: 32768,
     lastHeartbeat: 0,
-    simulatorEnabled: true,
+    simulatorEnabled: false,
+    simulatorAvailable: false,
   };
 
   private latestSnapshot: DashboardSnapshot;
@@ -250,6 +312,10 @@ export class TrafficMonitorEngine {
       clientLinks: [],
       rules: this.rules.map((r) => ({ ...r })),
       alerts: [],
+      notifications: {
+        ntfy: { ...this.notifications.ntfy },
+        telegram: { ...this.notifications.telegram },
+      },
       deviceAliases: { ...this.deviceAliases },
       serverConfig: { ...this.serverConfig },
       serverStats: { ...this.serverStats },
@@ -318,9 +384,25 @@ export class TrafficMonitorEngine {
     };
   }
 
+  public setSimulatorAvailable(available: boolean): void {
+    this.probeStatus.simulatorAvailable = available;
+    if (!available) {
+      this.probeStatus.simulatorEnabled = false;
+      if (this.probeStatus.mode === 'simulator') {
+        this.probeStatus.connected = false;
+        this.probeStatus.mode = 'disconnected';
+      }
+    }
+    this.latestSnapshot = {
+      ...this.latestSnapshot,
+      probe: { ...this.probeStatus },
+    };
+  }
+
   public setSimulatorEnabled(enabled: boolean): void {
-    this.probeStatus.simulatorEnabled = enabled;
-    if (!enabled && this.probeStatus.mode === 'simulator') {
+    const effective = this.probeStatus.simulatorAvailable ? enabled : false;
+    this.probeStatus.simulatorEnabled = effective;
+    if (!effective && this.probeStatus.mode === 'simulator') {
       this.probeStatus.connected = false;
       this.probeStatus.mode = 'disconnected';
     }
@@ -331,28 +413,94 @@ export class TrafficMonitorEngine {
   }
 
   public isSimulatorEnabled(): boolean {
-    return this.probeStatus.simulatorEnabled;
+    return this.probeStatus.simulatorAvailable && this.probeStatus.simulatorEnabled;
   }
 
   public hasActiveLiveProbe(now = Date.now()): boolean {
     return this.probeStatus.mode === 'live' && now - this.probeStatus.lastHeartbeat < 20_000;
   }
 
-  public markProbeDisconnected(probeId: string): void {
+  public markProbeDisconnected(probeId: string, now = Date.now()): AlertEvent[] {
+    const fired: AlertEvent[] = [];
     if (this.probeStatus.mode === 'live' && this.probeStatus.probeId === probeId) {
       this.probeStatus.connected = false;
       this.probeStatus.mode = 'disconnected';
+
+      const offlineRule = this.rules.find((r) => r.metric === 'agent_offline' && r.enabled);
+      if (offlineRule) {
+        const lastFired = this.lastAlertFiredAt.get(offlineRule.id) || 0;
+        if (now - lastFired >= 20_000) {
+          const alert: AlertEvent = {
+            id: `${offlineRule.id}-${now}`,
+            ruleId: offlineRule.id,
+            ruleName: offlineRule.name,
+            severity: 'critical',
+            message: `Router agent "${probeId}" disconnected from server`,
+            value: 1,
+            threshold: offlineRule.threshold,
+            timestamp: now,
+            acknowledged: false,
+          };
+          this.lastAlertFiredAt.set(offlineRule.id, now);
+          this.alerts.unshift(alert);
+          if (this.alerts.length > 50) this.alerts.pop();
+          fired.push(alert);
+        }
+      }
+
       this.latestSnapshot = {
         ...this.latestSnapshot,
         probe: { ...this.probeStatus },
+        alerts: this.alerts.map((a) => ({ ...a })),
       };
     }
+    return fired;
+  }
+
+  public updateNotifications(cfg: NotificationConfig): NotificationConfig {
+    this.notifications = {
+      ntfy: { ...cfg.ntfy },
+      telegram: { ...cfg.telegram },
+    };
+    this.latestSnapshot = {
+      ...this.latestSnapshot,
+      notifications: {
+        ntfy: { ...this.notifications.ntfy },
+        telegram: { ...this.notifications.telegram },
+      },
+    };
+    return this.latestSnapshot.notifications;
+  }
+
+  public mergeWithDefaultRules(savedRules: AlertRule[]): AlertRule[] {
+    const byId = new Map(savedRules.map((r) => [r.id, r]));
+    const merged: AlertRule[] = [];
+    for (const def of DEFAULT_ALERT_RULES) {
+      const existing = byId.get(def.id);
+      if (existing) {
+        merged.push({
+          ...def,
+          ...existing,
+          threshold: Math.max(0.1, Number(existing.threshold) || def.threshold),
+        });
+        byId.delete(def.id);
+      } else {
+        merged.push({ ...def });
+      }
+    }
+    for (const extra of byId.values()) {
+      merged.push({
+        ...extra,
+        threshold: Math.max(0.1, Number(extra.threshold) || 1),
+      });
+    }
+    return this.updateRules(merged);
   }
 
   public updateRules(nextRules: AlertRule[]): AlertRule[] {
     this.rules = nextRules.map((r) => ({
       ...r,
-      threshold: Math.max(1, Number(r.threshold) || 1),
+      threshold: Math.max(0.1, Number(r.threshold) || 1),
     }));
     this.latestSnapshot = {
       ...this.latestSnapshot,
@@ -498,7 +646,6 @@ export class TrafficMonitorEngine {
   public ingest(
     snapshot: ProbeSnapshot,
     rdnsLookup?: RdnsLookupFn,
-    geoipLookup?: GeoIpLookupFn,
     lanRdnsLookup?: RdnsLookupFn
   ): {
     dashboard: DashboardSnapshot;
@@ -514,7 +661,7 @@ export class TrafficMonitorEngine {
       ...this.probeStatus,
       connected: true,
       mode: snapshot.source,
-      probeId: snapshot.probeId || 'orbi-rbk50-eth0',
+      probeId: snapshot.probeId || 'router-wan',
       iface: snapshot.iface?.iface || 'eth0',
       hostname: snapshot.system?.hostname || this.probeStatus.hostname,
       kernel: snapshot.system?.kernel || this.probeStatus.kernel,
@@ -585,7 +732,6 @@ export class TrafficMonitorEngine {
       const dstCachedRdns = dstIsPrivate
         ? (lanRdnsLookup ? lanRdnsLookup(raw.dst) : null)
         : (rdnsLookup ? rdnsLookup(raw.dst) : null);
-      const dstGeo = !dstIsPrivate && geoipLookup ? geoipLookup(raw.dst) || undefined : undefined;
 
       const meaningfulArpHost =
         arp && isMeaningfulHostname(arp.hostname, raw.src) ? arp.hostname : undefined;
@@ -605,7 +751,7 @@ export class TrafficMonitorEngine {
       const dstArp = arpByIp.get(raw.dst);
       const meaningfulDstArp =
         dstArp && isMeaningfulHostname(dstArp.hostname, raw.dst) ? dstArp.hostname : undefined;
-      const baseRemoteInfo = dstIsPrivate
+      const remoteInfo = dstIsPrivate
         ? {
             label: resolveHostIdentity({
               ip: raw.dst,
@@ -620,14 +766,6 @@ export class TrafficMonitorEngine {
           }
         : describeRemoteIp(raw.dst, dstCachedRdns);
 
-      const remoteInfo = {
-        label: baseRemoteInfo.label,
-        service:
-          baseRemoteInfo.service === 'External IP' && dstGeo?.org
-            ? dstGeo.org
-            : baseRemoteInfo.service,
-      };
-
       const flow: EnrichedFlow = {
         id,
         proto,
@@ -641,7 +779,6 @@ export class TrafficMonitorEngine {
         dstIp: raw.dst,
         dstHost: remoteInfo.label,
         dstService: remoteInfo.service,
-        dstGeo,
         dport: raw.dport,
         txBytes: raw.txBytes,
         rxBytes: raw.rxBytes,
@@ -788,15 +925,13 @@ export class TrafficMonitorEngine {
       const remoteIp = !isPrivateIp(f.dstIp) ? f.dstIp : !isPrivateIp(f.srcIp) ? f.srcIp : null;
       if (remoteIp) {
         const cached = rdnsLookup ? rdnsLookup(remoteIp) : null;
-        const geo = geoipLookup ? geoipLookup(remoteIp) || undefined : undefined;
         const desc = describeRemoteIp(remoteIp, cached);
         let rem = remoteMap.get(remoteIp);
         if (!rem) {
           rem = {
             ip: remoteIp,
             label: desc.label,
-            service: desc.service === 'External IP' && geo?.org ? geo.org : desc.service,
-            geo,
+            service: desc.service,
             ports: [],
             portSet: new Set<number>(),
             bytes: 0,
@@ -907,7 +1042,15 @@ export class TrafficMonitorEngine {
       .sort((a, b) => b.totalBps - a.totalBps || b.totalBytes - a.totalBytes)
       .slice(0, 24);
 
-    const newAlerts = this.evaluateRules(now, rxBps, txBps, hosts, enrichedFlows.length);
+    const newAlerts = this.evaluateRules(
+      now,
+      rxBps,
+      txBps,
+      hosts,
+      enrichedFlows.length,
+      snapshot.system?.load1m ?? this.probeStatus.load1m,
+      snapshot.system?.memUsedPct ?? this.probeStatus.memUsedPct
+    );
 
     this.latestSnapshot = {
       probe: { ...this.probeStatus },
@@ -931,6 +1074,10 @@ export class TrafficMonitorEngine {
       clientLinks,
       rules: this.rules.map((r) => ({ ...r })),
       alerts: this.alerts.map((a) => ({ ...a })),
+      notifications: {
+        ntfy: { ...this.notifications.ntfy },
+        telegram: { ...this.notifications.telegram },
+      },
       deviceAliases: { ...this.deviceAliases },
       serverConfig: { ...this.serverConfig },
       serverStats: { ...this.serverStats },
@@ -947,44 +1094,117 @@ export class TrafficMonitorEngine {
     rxBps: number,
     txBps: number,
     hosts: HostSummary[],
-    totalFlows: number
+    totalFlows: number,
+    routerLoad1m: number,
+    routerMemPct: number
   ): AlertEvent[] {
     const triggered: AlertEvent[] = [];
     const rxMbps = Math.round((rxBps * 8) / 1_000_000);
     const txMbps = Math.round((txBps * 8) / 1_000_000);
-    const maxHost = hosts.reduce<HostSummary | null>(
+    const combinedMbps = rxMbps + txMbps;
+
+    const maxFlowHost = hosts.reduce<HostSummary | null>(
       (acc, h) => (!acc || h.activeFlows > acc.activeFlows ? h : acc),
       null
     );
+    const maxRxHost = hosts.reduce<HostSummary | null>(
+      (acc, h) => (!acc || h.rxBps > acc.rxBps ? h : acc),
+      null
+    );
+    const maxTxHost = hosts.reduce<HostSummary | null>(
+      (acc, h) => (!acc || h.txBps > acc.txBps ? h : acc),
+      null
+    );
+
+    // Track newly discovered local devices (after baseline snapshot)
+    const newlyJoined: HostSummary[] = [];
+    for (const host of hosts) {
+      const deviceKey = host.mac && host.mac !== '00:00:00:00:00:00' ? host.mac : host.ip;
+      if (!this.knownDeviceKeys.has(deviceKey)) {
+        this.knownDeviceKeys.add(deviceKey);
+        if (this.hasDeviceBaseline) {
+          newlyJoined.push(host);
+        }
+      }
+    }
+    if (!this.hasDeviceBaseline && hosts.length > 0) {
+      this.hasDeviceBaseline = true;
+    }
 
     for (const rule of this.rules) {
       if (!rule.enabled) continue;
+      if (rule.metric === 'agent_offline') continue;
+
       const lastFired = this.lastAlertFiredAt.get(rule.id) || 0;
-      if (now - lastFired < 20_000) continue;
+      if (rule.metric !== 'new_device' && now - lastFired < 20_000) continue;
 
       let value = 0;
+      let shouldFire = false;
+      let severity: 'warning' | 'critical' = 'warning';
       let message = '';
 
       if (rule.metric === 'wan_rx_mbps') {
         value = rxMbps;
+        shouldFire = value > rule.threshold;
+        severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
         message = `Internet download reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
       } else if (rule.metric === 'wan_tx_mbps') {
         value = txMbps;
+        shouldFire = value > rule.threshold;
+        severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
         message = `Internet upload reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
-      } else if (rule.metric === 'host_flows' && maxHost) {
-        value = maxHost.activeFlows;
-        message = `${maxHost.hostname} (${maxHost.ip}) opened ${value} active connections (threshold ${rule.threshold})`;
+      } else if (rule.metric === 'wan_combined_mbps') {
+        value = combinedMbps;
+        shouldFire = value > rule.threshold;
+        severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
+        message = `Combined bandwidth reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+      } else if (rule.metric === 'host_rx_mbps' && maxRxHost) {
+        value = Math.round((maxRxHost.rxBps * 8) / 1_000_000);
+        shouldFire = value > rule.threshold;
+        severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
+        message = `${maxRxHost.hostname} (${maxRxHost.ip}) download reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+      } else if (rule.metric === 'host_tx_mbps' && maxTxHost) {
+        value = Math.round((maxTxHost.txBps * 8) / 1_000_000);
+        shouldFire = value > rule.threshold;
+        severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
+        message = `${maxTxHost.hostname} (${maxTxHost.ip}) upload reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+      } else if (rule.metric === 'host_flows' && maxFlowHost) {
+        value = maxFlowHost.activeFlows;
+        shouldFire = value > rule.threshold;
+        severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
+        message = `${maxFlowHost.hostname} (${maxFlowHost.ip}) opened ${value} active connections (threshold ${rule.threshold})`;
       } else if (rule.metric === 'total_flows') {
         value = totalFlows;
+        shouldFire = value > rule.threshold;
+        severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
         message = `Active router connections reached ${value} (threshold ${rule.threshold})`;
+      } else if (rule.metric === 'new_device' && newlyJoined.length > 0) {
+        const first = newlyJoined[0];
+        value = newlyJoined.length;
+        shouldFire = true;
+        severity = 'warning';
+        message =
+          newlyJoined.length === 1
+            ? `New device detected: ${first.hostname} (${first.ip}${first.mac ? ` · ${first.mac}` : ''})`
+            : `${newlyJoined.length} new devices detected (including ${first.hostname} · ${first.ip})`;
+      } else if (rule.metric === 'router_high_load') {
+        value = Number(routerLoad1m.toFixed(2));
+        shouldFire = value > rule.threshold;
+        severity = value > rule.threshold * 1.5 ? 'critical' : 'warning';
+        message = `Router 1-min CPU load reached ${value} (threshold ${rule.threshold})`;
+      } else if (rule.metric === 'router_high_mem') {
+        value = Math.round(routerMemPct);
+        shouldFire = value > rule.threshold;
+        severity = value >= 95 ? 'critical' : 'warning';
+        message = `Router memory usage reached ${value}% (threshold ${rule.threshold}%)`;
       }
 
-      if (value > rule.threshold) {
+      if (shouldFire) {
         const alert: AlertEvent = {
-          id: `${rule.id}-${now}`,
+          id: `${rule.id}-${now}-${triggered.length}`,
           ruleId: rule.id,
           ruleName: rule.name,
-          severity: value > rule.threshold * 1.4 ? 'critical' : 'warning',
+          severity,
           message,
           value,
           threshold: rule.threshold,

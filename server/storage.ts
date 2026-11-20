@@ -1,9 +1,11 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
   AlertEvent,
   AlertRule,
   DeviceAlias,
+  NotificationConfig,
   PersistenceMode,
   ServerConfig,
   TrafficPoint,
@@ -11,7 +13,11 @@ import type {
 
 export const DEFAULT_CONFIG_DIR = '/config';
 export const DEFAULT_CACHE_DIR = '/config/cache';
-export const DEFAULT_PROBE_TOKEN = 'orbi-rbk50-voxel-secret';
+export const LEGACY_STATIC_PROBE_TOKEN = 'orbi-rbk50-voxel-secret';
+
+export function generateRandomProbeToken(): string {
+  return `of_${crypto.randomBytes(24).toString('hex')}`;
+}
 
 export interface PersistedUserConfig {
   probeToken?: string;
@@ -25,9 +31,8 @@ export interface PersistedUserConfig {
   lanDnsServer?: string;
   lanDnsTtlSec?: number;
   stripLanDomain?: boolean;
-  geoipEnabled?: boolean;
-  geoipDir?: string;
   deviceAliases?: Record<string, DeviceAlias>;
+  notifications?: NotificationConfig;
   rules?: AlertRule[];
 }
 

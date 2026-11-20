@@ -1,10 +1,10 @@
 import {
-  Activity,
   Bell,
   Cpu,
   Database,
   Globe,
   HardDrive,
+  Home,
   Layers,
   Monitor,
   Moon,
@@ -47,13 +47,13 @@ interface SidebarProps {
   onCloseMobile: () => void;
 }
 
-const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Activity }> = [
-  { id: 'overview', label: 'Network Summary', icon: Activity },
+const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Home }> = [
+  { id: 'overview', label: 'Home', icon: Home },
   { id: 'flows', label: 'Connections', icon: Layers },
-  { id: 'hosts', label: 'Local Devices', icon: Network },
-  { id: 'alerts', label: 'Alerts & Rules', icon: Bell },
-  { id: 'setup', label: 'Router Agent', icon: Terminal },
-  { id: 'settings', label: 'Server Settings', icon: Sliders },
+  { id: 'hosts', label: 'Devices', icon: Network },
+  { id: 'alerts', label: 'Alerts', icon: Bell },
+  { id: 'setup', label: 'Agent', icon: Terminal },
+  { id: 'settings', label: 'Settings', icon: Sliders },
 ];
 
 const THEME_MODES: Array<{ id: ThemeMode; label: string; icon: typeof Monitor }> = [
@@ -86,9 +86,9 @@ export function Sidebar({
 
   const statusText =
     probe.mode === 'live'
-      ? 'Live RBK50'
+      ? 'Live'
       : probe.mode === 'simulator'
-        ? 'Simulated RBK50'
+        ? 'Dev Simulator'
         : 'Awaiting Agent';
 
   const statusColor =
@@ -283,7 +283,7 @@ export function Sidebar({
               <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               <TechTerm
                 label="Internet Port"
-                tip="The router network interface connected to your ISP modem (usually eth0 on Netgear Orbi RBK50)."
+                tip="The router network interface connected to your ISP modem (commonly eth0 or wan)."
               />
             </span>
             <span className="font-mono app-text-secondary">
@@ -327,7 +327,7 @@ export function Sidebar({
               <Database className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               <TechTerm
                 label="nf_conntrack"
-                tip="Linux Netfilter connection tracking table on your Orbi router. Shows active tracked internet connections versus the kernel table limit."
+                tip="Linux Netfilter connection tracking table on your router. Shows active tracked internet connections versus the kernel table limit."
               />
             </span>
             <span className="font-mono tabular-nums app-text-secondary">
@@ -342,9 +342,10 @@ export function Sidebar({
           </div>
         </div>
 
-        {probe.mode !== 'live' && (
+        {probe.simulatorAvailable && probe.mode !== 'live' && (
           <button
             type="button"
+            data-testid="toggle-simulator-btn"
             onClick={() => onToggleSimulator(!probe.simulatorEnabled)}
             className="w-full py-2 px-3 rounded-xl border app-border app-surface app-row-hover text-xs font-medium transition-colors whitespace-nowrap"
           >

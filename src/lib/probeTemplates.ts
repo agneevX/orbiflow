@@ -10,10 +10,9 @@ export interface ProbeConfigOptions {
 export function generatePythonProbe(cfg: ProbeConfigOptions): string {
   return `#!/usr/bin/env python3
 """
-OrbiFlow Low-CPU Traffic Collector for Netgear Orbi RBK50 (Voxel Firmware)
-Target: Linux orbi-gateway 3.14.77 armv7l IPQ4019 GNU/Linux
-Requires only Python 3 stdlib (python3-light on Entware) — zero pip packages.
-Polls every ${cfg.intervalSec}s with minimal CPU (< 0.3% on IPQ4019).
+OrbiFlow Low-CPU Router Traffic Collector
+Requires only Python 3 core modules (works with Entware python3-light) — zero pip packages.
+Polls every ${cfg.intervalSec}s with minimal CPU overhead.
 """
 import base64
 import json
@@ -350,8 +349,8 @@ if __name__ == "__main__":
 
 export function generateBusyBoxAshProbe(cfg: ProbeConfigOptions): string {
   return `#!/bin/sh
-# OrbiFlow Zero-Dependency BusyBox Ash Collector for Orbi RBK50 (Voxel Firmware)
-# Polls every ${cfg.intervalSec}s to minimize CPU usage on IPQ4019.
+# OrbiFlow Zero-Dependency BusyBox Shell Collector
+# Polls every ${cfg.intervalSec}s with minimal router CPU usage.
 
 SERVER_HTTP_URL="${cfg.httpUrl}"
 AUTH_TOKEN="${cfg.token}"
@@ -366,7 +365,7 @@ while true; do
   TX_BYTES=$(cat /sys/class/net/$WAN_IFACE/statistics/tx_bytes 2>/dev/null || echo 0)
   UPTIME=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
   LOAD1M=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
-  HOSTNAME=$(hostname 2>/dev/null || echo orbi-gateway)
+  HOSTNAME=$(hostname 2>/dev/null || echo router-gateway)
   KERNEL=$(uname -r)
   ARCH=$(uname -m)
 
@@ -415,10 +414,9 @@ done
 
 export function generateCProbeSource(cfg: ProbeConfigOptions): string {
   return `/*
- * orbi-wan-probe.c — Low-CPU native C agent for Orbi RBK50 (Voxel Firmware)
- * Target: armv7l IPQ4019 (Linux 3.14.77)
- * Build:  arm-openwrt-linux-gcc -O2 -s -o orbi-wan-probe orbi-wan-probe.c
- * Memory footprint: < 1.2 MB RSS | CPU impact: < 0.1% at ${cfg.intervalSec}s interval
+ * orbi-wan-probe.c — Low-CPU native C agent for Linux routers
+ * Example cross-compile: gcc -O2 -s -o orbi-wan-probe orbi-wan-probe.c
+ * Memory footprint: < 1.2 MB RSS | Low CPU impact at ${cfg.intervalSec}s interval
  */
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -582,7 +580,7 @@ export function generateDockerCompose(_cfg?: ProbeConfigOptions): string {
 
 export function generateInitScript(): string {
   return `#!/bin/sh /etc/rc.common
-# /opt/etc/init.d/S99orbi-probe — Entware / Voxel Firmware autostart service
+# /opt/etc/init.d/S99orbi-probe — Router autostart service
 
 START=99
 STOP=10

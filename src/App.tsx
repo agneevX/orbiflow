@@ -31,6 +31,7 @@ import type {
   DashboardSnapshot,
   EnrichedFlow,
   HostSummary,
+  NotificationConfig,
   ServerConfig,
   TimeWindow,
 } from './types/telemetry';
@@ -247,34 +248,30 @@ export default function App() {
     }
   };
 
-  const handleClearRdnsCache = async () => {
-    const res = await fetch('/api/rdns/clear', { method: 'POST' });
-    if (res.ok && snapshot) {
-      const data = await res.json();
-      setSnapshot({ ...snapshot, serverStats: data.serverStats });
-    }
-  };
-
-  const handleReloadGeoip = async () => {
-    const res = await fetch('/api/geoip/reload', { method: 'POST' });
-    if (res.ok && snapshot) {
-      const data = await res.json();
-      setSnapshot({ ...snapshot, serverStats: data.serverStats });
-    }
-  };
-
-  const handleUploadGeoip = async (file: File): Promise<{ ok: boolean; message: string }> => {
-    const res = await fetch(`/api/geoip/upload?filename=${encodeURIComponent(file.name)}`, {
+  const handleSaveNotifications = async (notifications: NotificationConfig) => {
+    const res = await fetch('/api/notifications', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: file,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(notifications),
     });
-    const data = await res.json().catch(() => ({ ok: false, error: 'Upload failed' }));
-    if (res.ok && data.ok && snapshot) {
-      setSnapshot({ ...snapshot, serverStats: data.serverStats });
-      return { ok: true, message: `Loaded ${data.savedFile}` };
+    if (res.ok && snapshot) {
+      const data = await res.json();
+      setSnapshot({ ...snapshot, notifications: data.notifications });
     }
-    return { ok: false, message: data.error || 'Failed to upload MaxMind database' };
+  };
+
+  const handleTestNotification = async (
+    channel: 'ntfy' | 'telegram',
+    config: NotificationConfig
+  ): Promise<{ ok: boolean; error?: string; detail?: string }> => {
+    const res = await fetch('/api/notifications/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel, config }),
+    });
+    return res
+      .json()
+      .catch(() => ({ ok: false, error: 'Unable to parse server response' }));
   };
 
   const handleAcknowledgeAlert = async (id: string) => {
@@ -291,14 +288,6 @@ export default function App() {
     await fetch('/api/alerts/clear', { method: 'POST' });
     if (snapshot) {
       setSnapshot({ ...snapshot, alerts: [] });
-    }
-  };
-
-  const handleClearLanDnsCache = async () => {
-    const res = await fetch('/api/lan-dns/clear', { method: 'POST' });
-    const data = await res.json();
-    if (snapshot && data.serverStats) {
-      setSnapshot({ ...snapshot, serverStats: data.serverStats });
     }
   };
 
@@ -457,7 +446,10 @@ export default function App() {
             <AlertsView
               rules={snapshot.rules}
               alerts={snapshot.alerts}
+              notifications={snapshot.notifications}
               onSaveRules={handleSaveRules}
+              onSaveNotifications={handleSaveNotifications}
+              onTestNotification={handleTestNotification}
               onAcknowledgeAlert={handleAcknowledgeAlert}
               onClearAlerts={handleClearAlerts}
             />
@@ -472,10 +464,6 @@ export default function App() {
               serverConfig={snapshot.serverConfig}
               serverStats={snapshot.serverStats}
               onSaveSettings={handleSaveSettings}
-              onClearRdnsCache={handleClearRdnsCache}
-              onClearLanDnsCache={handleClearLanDnsCache}
-              onReloadGeoip={handleReloadGeoip}
-              onUploadGeoip={handleUploadGeoip}
             />
           )}
         </main>

@@ -14,13 +14,15 @@ interface TopBarProps {
 }
 
 const TAB_TITLES: Record<NavTab, string> = {
-  overview: 'Network Summary',
-  flows: 'Active Connections',
-  hosts: 'Local Devices',
-  alerts: 'Alerts & Rules',
-  setup: 'Router Agent',
-  settings: 'Server Settings',
+  overview: 'Home',
+  flows: 'Connections',
+  hosts: 'Devices',
+  alerts: 'Alerts',
+  setup: 'Agent',
+  settings: 'Settings',
 };
+
+const PAUSABLE_TABS = new Set<NavTab>(['overview', 'flows', 'hosts']);
 
 export function TopBar({
   activeTab,
@@ -31,6 +33,8 @@ export function TopBar({
   onTogglePause,
   onOpenMobileMenu,
 }: TopBarProps) {
+  const showPauseButton = PAUSABLE_TABS.has(activeTab);
+
   return (
     <header className="sticky top-0 z-30 h-16 app-canvas border-b app-border px-4 sm:px-6 flex items-center justify-between gap-4">
       <div className="flex items-center gap-3 min-w-0">
@@ -100,22 +104,24 @@ export function TopBar({
           </div>
         )}
 
-        <button
-          type="button"
-          data-testid="pause-stream-btn"
-          onClick={onTogglePause}
-          aria-label={paused ? 'Resume live updates' : 'Pause live updates'}
-          title={paused ? 'Resume live updates' : 'Pause live updates'}
-          className={`inline-flex items-center justify-center h-10 w-10 rounded-xl transition-colors shrink-0 ${
-            paused ? 'app-btn-warning' : 'app-btn-primary'
-          }`}
-        >
-          {paused ? (
-            <Play className="h-4 w-4" aria-hidden="true" />
-          ) : (
-            <Pause className="h-4 w-4" aria-hidden="true" />
-          )}
-        </button>
+        {showPauseButton && (
+          <button
+            type="button"
+            data-testid="pause-stream-btn"
+            onClick={onTogglePause}
+            aria-label={paused ? 'Resume live updates' : 'Pause live updates'}
+            title={paused ? 'Resume live updates' : 'Pause live updates'}
+            className={`inline-flex items-center justify-center h-10 w-10 rounded-xl transition-colors shrink-0 ${
+              paused ? 'app-btn-warning' : 'app-btn-primary'
+            }`}
+          >
+            {paused ? (
+              <Play className="h-4 w-4" aria-hidden="true" />
+            ) : (
+              <Pause className="h-4 w-4" aria-hidden="true" />
+            )}
+          </button>
+        )}
       </div>
     </header>
   );

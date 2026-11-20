@@ -50,10 +50,7 @@ export function FlowsView({
       if (protoFilter !== 'ALL' && f.proto !== protoFilter) return false;
       if (stateFilter !== 'ALL' && f.state !== stateFilter) return false;
       if (q) {
-        const geoStr = f.dstGeo
-          ? `${f.dstGeo.city || ''} ${f.dstGeo.countryName || ''} ${f.dstGeo.countryCode || ''} ${f.dstGeo.org || ''} ${f.dstGeo.asn ? `AS${f.dstGeo.asn}` : ''}`
-          : '';
-        const hay = `${f.srcIp} ${f.srcHost} ${f.dstIp} ${f.dstHost || ''} ${f.dstService} ${f.app} ${f.sport} ${f.dport} ${geoStr}`.toLowerCase();
+        const hay = `${f.srcIp} ${f.srcHost} ${f.dstIp} ${f.dstHost || ''} ${f.dstService} ${f.app} ${f.sport} ${f.dport}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -87,7 +84,7 @@ export function FlowsView({
       <div className="app-surface border rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
         <div className="relative flex-1 min-w-[220px] max-w-md">
           <label htmlFor="flow-search-input" className="sr-only">
-            Filter connections by IP, device, service, location, port, or application
+            Filter connections by IP, device, service, port, or application
           </label>
           <Search
             className="h-4 w-4 app-text-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
@@ -98,7 +95,7 @@ export function FlowsView({
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Filter by IP, device, service, location, port..."
+            placeholder="Filter by IP, device, service, port..."
             className="w-full pl-9 pr-8 py-2 app-input border rounded-xl text-xs focus:outline-none focus:border-sky-500"
           />
           {search && (
@@ -265,15 +262,7 @@ export function FlowsView({
                       <span>{flow.dstIp}</span>
                       <span className="app-text-muted">:{flow.dport}</span>
                       <span className="ml-1.5 font-sans app-text-muted">
-                        ({flow.dstService}
-                        {flow.dstGeo && (flow.dstGeo.city || flow.dstGeo.countryCode)
-                          ? ` · ${
-                              flow.dstGeo.city && flow.dstGeo.countryCode
-                                ? `${flow.dstGeo.city}, ${flow.dstGeo.countryCode}`
-                                : flow.dstGeo.city || flow.dstGeo.countryCode
-                            }`
-                          : ''}
-                        )
+                        ({flow.dstService})
                       </span>
                     </td>
                     <td

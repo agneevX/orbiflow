@@ -23,11 +23,12 @@ case "$PGID_VAL" in
 esac
 
 export TZ="$TZ_VAL"
+export HOME="/config"
 
 # If container was already launched as non-root (e.g. `docker run --user 1000:1000`),
-# create subdirectories if writable and exec directly.
+# ensure cache subdir exists if writable and exec directly.
 if [ "$(id -u)" -ne 0 ]; then
-  mkdir -p /config/cache /config/geoip 2>/dev/null || true
+  mkdir -p /config/cache 2>/dev/null || true
   exec "$@"
 fi
 
@@ -51,7 +52,7 @@ fi
 
 EXISTING_GROUP="$(getent group "$PGID_VAL" | cut -d: -f1 || true)"
 if [ -z "$EXISTING_GROUP" ]; then
-  addgroup -g "$PGID_VAL" -S orbiflow
+  addgroup -g "$PGID_VAL" -S orbiflow 2>/dev/null || true
   TARGET_GROUP="orbiflow"
 else
   TARGET_GROUP="$EXISTING_GROUP"
@@ -59,24 +60,12 @@ fi
 
 EXISTING_USER="$(getent passwd "$PUID_VAL" | cut -d: -f1 || true)"
 if [ -z "$EXISTING_USER" ]; then
-  adduser -u "$PUID_VAL" -S -D -H -h /app -s /sbin/nologin -G "$TARGET_GROUP" orbiflow
+  adduser -u "$PUID_VAL" -S -D -H -h /config -s /sbin/nologin -G "$TARGET_GROUP" orbiflow 2>/dev/null || true
 fi
 
-# Ensure /config layout exists and is writable by PUID:PGID
-mkdir -p /config /config/cache /config/geoip
-CURRENT_OWNER="$(stat -c '%u:%g' /config 2>/dev/null || echo '')"
-if [ "$CURRENT_OWNER" != "${PUID_VAL}:${PGID_VAL}" ]; then
-  chown -R "${PUID_VAL}:${PGID_VAL}" /config
-else
-  for target in /config/config.json /config/cache /config/geoip; do
-    if [ -e "$target" ]; then
-      TARGET_OWNER="$(stat -c '%u:%g' "$target" 2>/dev/null || echo '')"
-      if [ "$TARGET_OWNER" != "${PUID_VAL}:${PGID_VAL}" ]; then
-        chown -R "${PUID_VAL}:${PGID_VAL}" "$target"
-      fi
-    fi
-  done
-fi
+# Ensure /config exists and fix ownership on every mismatched file or folder on startup
+mkdir -p /config /config/cache
+find /config \( ! -uid "$PUID_VAL" -o ! -gid "$PGID_VAL" \) -exec chown "${PUID_VAL}:${PGID_VAL}" {} + 2>/dev/null || chown -R "${PUID_VAL}:${PGID_VAL}" /config
 
-echo "[orbiflow] Starting as non-root UID=${PUID_VAL} GID=${PGID_VAL} TZ=${TZ_VAL}"
+echo "[orbiflow] Dropping privileges to UID=${PUID_VAL} GID=${PGID_VAL} TZ=${TZ_VAL}"
 exec su-exec "${PUID_VAL}:${PGID_VAL}" "$@"

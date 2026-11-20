@@ -1,16 +1,16 @@
 # OrbiFlow
 
-Lightweight, real-time internet traffic monitor and connection inspector built for **Netgear Orbi RBK50** routers running **Voxel firmware**. OrbiFlow streams live kernel connection tracking (`nf_conntrack`) and WAN interface counters from your router to a self-hosted Docker server with an interactive, multi-theme web dashboard.
+Lightweight, real-time internet traffic monitor and connection inspector for Linux routers. OrbiFlow streams live kernel connection tracking (`nf_conntrack`) and WAN interface counters from your router to a self-hosted non-root Docker server with an interactive, multi-theme web dashboard and push alerts.
 
-![OrbiFlow Network Summary — Desktop Dark (Tokyo Night)](docs/screenshots/desktop-overview-dark.png)
+![OrbiFlow Home — Desktop Dark (Tokyo Night)](docs/screenshots/desktop-overview-dark.png)
 
 ## Features
 
-- **Real-Time Bandwidth & Interactive Chart Inspection**: Live download and upload throughput graphs across `1m`, `5m`, `15m`, `1h`, `6h`, and `24h` windows. Time spans without recorded telemetry are explicitly marked as *No data*. Drag horizontally across any graph to inspect Average, Peak, and Estimated Transfer breakdowns for Download and Upload or zoom directly into the range.
-- **Connection & Local Device Visibility**: Inspect active TCP/UDP/ICMP connections, resolve local LAN devices via dedicated LAN reverse DNS (targeting your separate LAN DNS server or custom router `dnsmasq`) + ARP/DHCP tables, detect IEEE 802.3 randomized (Private) MAC addresses with passive traffic hints, assign persistent custom device aliases, and visualize live traffic paths between devices and internet services.
-- **Offline MaxMind GeoIP2 / GeoLite2 Integration**: Drop `GeoLite2-City.mmdb` (or `GeoLite2-Country.mmdb`) and `GeoLite2-ASN.mmdb` into `/config/geoip` or upload `.mmdb` files directly from Server Settings for offline city, country, and ASN/organization enrichment with zero external API calls.
-- **Zero-Noise Reverse DNS**: Built-in offline service matching for popular cloud, streaming, and CDN networks. Live DNS PTR lookups are disabled by default and configurable with an in-memory TTL cache when enabled.
-- **Persistent `/config` Volume**: Stores user settings and alert rules in `/config/config.json`, optional disk history cache in `/config/cache` (configurable), and MaxMind databases in `/config/geoip`.
+- **Real-Time Bandwidth & Interactive Chart Inspection**: Live download and upload throughput graphs across `1m`, `5m`, `15m`, `1h`, `6h`, and `24h` windows. Time spans without recorded telemetry are explicitly marked as *No data*. Drag horizontally across any graph to inspect Average, Peak, and Estimated Transfer breakdowns or zoom directly into the range.
+- **Connections & Device Visibility**: Inspect active TCP/UDP/ICMP connections, resolve local devices via ARP/DHCP/LAN PTR, detect IEEE 802.3 randomized (Private) MAC addresses with passive traffic hints, assign persistent custom device aliases, and visualize live traffic paths between local devices and internet services.
+- **Expanded Alerts with ntfy & Telegram Notifications**: Built-in alert rules for WAN download/upload/combined bandwidth, per-device bandwidth & connection spikes, total connections, new LAN devices, agent offline events, and router CPU load / memory usage — with direct server-side push notifications to **ntfy** (ntfy.sh or self-hosted) and **Telegram**.
+- **Auto-Randomized Shared Agent Token**: On first start, the server automatically generates a cryptographically random token (`of_...`) stored in `/config/config.json` to authenticate snapshots from your router agent (`X-Probe-Token`) so untrusted LAN devices cannot spoof traffic data.
+- **Persistent `/config` Volume & Non-Root Container**: Runs as non-root (`PUID:PGID`, fixing `/config` file ownership on startup) and uses only `PUID`, `PGID`, and `TZ` environment variables.
 - **Appearance & Theme System**: Split **Auto / Dark / Light** appearance selector paired with curated dark palettes (*Obsidian Night*, *Catppuccin Mocha*, *Dracula Pro*, *Nord*, *Tokyo Night*) and light palettes (*Daylight Slate*, *Catppuccin Latte*, *Nord Snow*).
 - **Multi-Arch Docker Server Image**: Automated GitHub Actions workflow publishing `linux/amd64`, `linux/arm64`, and `linux/arm/v7` images to GitHub Container Registry (`ghcr.io`).
 
@@ -18,15 +18,12 @@ Lightweight, real-time internet traffic monitor and connection inspector built f
 
 ## Screenshots
 
-### Desktop — Active Connections & Inspector Drawer (Dark)
+### Desktop — Connections & Inspector Drawer (Dark)
 ![OrbiFlow Active Connections & Inspector Drawer](docs/screenshots/desktop-connections-dark.png)
 
-### Desktop — Server Settings & MaxMind MMDB Configuration (Light)
-![OrbiFlow Server Settings — Daylight Slate](docs/screenshots/desktop-settings-light.png)
-
-### Mobile — Responsive 2×2 Summary & Bandwidth History
+### Mobile — Responsive 2×2 Summary & Live Bandwidth
 <p align="center">
-  <img src="docs/screenshots/mobile-overview-dark.png" alt="OrbiFlow Mobile Network Summary" width="360" />
+  <img src="docs/screenshots/mobile-overview-dark.png" alt="OrbiFlow Mobile Home" width="360" />
 </p>
 
 ---
@@ -35,9 +32,9 @@ Lightweight, real-time internet traffic monitor and connection inspector built f
 
 ```text
 ┌──────────────────────────────┐        WebSocket / HTTP JSON (5s poll)        ┌─────────────────────────────────┐
-│  Netgear Orbi RBK50 (Voxel)  │ ────────────────────────────────────────────► │      OrbiFlow Docker Server     │
+│         Linux Router         │ ────────────────────────────────────────────► │      OrbiFlow Docker Server     │
 │  /proc/net/nf_conntrack      │                                               │  Express + WS + TelemetryEngine │
-│  /sys/class/net/eth0/stats   │                                               │  MaxMind MMDB + Optional rDNS   │
+│  /sys/class/net/<wan>/stats  │                                               │  Alerts (ntfy + Telegram)       │
 │  /proc/net/arp + DHCP leases │                                               │  /config persistent volume      │
 └──────────────────────────────┘                                               └────────────────┬────────────────┘
                                                                                                 │ WebSocket + REST
@@ -51,7 +48,7 @@ Lightweight, real-time internet traffic monitor and connection inspector built f
 
 ## Quick Start (Docker Compose)
 
-Run the OrbiFlow server as a non-root container with a single persistent `/config` volume. The container only uses `PUID`, `PGID`, and `TZ` environment variables—all application settings (shared router token, storage mode, LAN DNS, MaxMind databases, device aliases, and alert rules) are configured in **Server Settings** and stored in `/config/config.json`:
+Run the OrbiFlow server as a non-root container with a single persistent `/config` volume. The container only uses `PUID`, `PGID`, and `TZ` environment variables—all application settings (shared agent token, storage mode, device aliases, alert rules, and ntfy/Telegram channels) are stored in `/config/config.json`:
 
 ```yaml
 services:
@@ -90,48 +87,33 @@ docker run -d --name orbiflow-server \
   orbiflow-server
 ```
 
-You can also start the container directly with `--user 1000:1000` (already non-root); the entrypoint detects non-root execution and launches the server directly without privilege escalation.
+On startup, the entrypoint repairs ownership of any mismatched files inside `/config` to `PUID:PGID` and drops privileges via `su-exec` before launching Node.js. You can verify the active runtime UID/GID in container logs or via `GET /api/health`.
 
 ---
 
 ## Persistent `/config` Volume Layout
 
-All user state and server settings live inside `/config` so container upgrades never lose settings, history, or GeoIP databases:
+All user state and server settings live inside `/config` so container upgrades never lose settings or history:
 
 ```text
 /config/
-├── config.json          # Shared agent token, storage mode/path, LAN DNS, rDNS, MaxMind, device aliases & alert rules
-├── cache/               # Optional disk traffic cache (JSONL + state snapshot)
-│   ├── traffic-state.json
-│   └── traffic-snapshots.jsonl
-└── geoip/               # Optional offline MaxMind MMDB databases
-    ├── GeoLite2-City.mmdb
-    └── GeoLite2-ASN.mmdb
+├── config.json          # Randomized shared agent token, storage mode/path, device aliases, alert rules & notification channels
+└── cache/               # Optional disk traffic cache (JSONL + state snapshot)
+    ├── traffic-state.json
+    └── traffic-snapshots.jsonl
 ```
 
 ---
 
-## MaxMind GeoLite2 Setup (Optional)
+## Router Agent
 
-OrbiFlow supports offline IP geolocation and ASN/organization lookups using official MaxMind `.mmdb` databases:
+Open the **Agent** tab inside the web dashboard to generate pre-configured scripts pre-filled with your server IP and randomized shared token. Three lightweight agents are provided:
 
-1. Create a free [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) account and download:
-   - `GeoLite2-City.mmdb` (or `GeoLite2-Country.mmdb`)
-   - `GeoLite2-ASN.mmdb`
-2. Either copy the `.mmdb` files into your mounted `./config/geoip/` folder and click **Reload Databases** in **Server Settings**, or upload them directly using **Upload .mmdb File** in the UI.
-3. Once loaded, active connections and the **Connection Details** drawer automatically display each remote endpoint's city/country and network operator (`ASxxxxx · Organization`), and the Connections search bar matches location and ASN fields.
+1. **Python 3 WebSocket (`orbi_probe.py`)** — Works with Python 3 core modules (including Entware `python3-light`, zero `pip` dependencies, no `urllib` or `idna` required).
+2. **BusyBox Shell (`orbi-probe.sh`)** — Zero extra packages required (`awk` + `curl`).
+3. **Native C Source (`orbi-wan-probe.c`)** — Minimal-footprint C source (<1.2 MB RSS).
 
----
-
-## Netgear Orbi RBK50 (Voxel Firmware) Router Agent
-
-Open the **Router Agent** tab inside the web dashboard to generate pre-configured scripts with your Docker server IP and shared token. Three lightweight agents are provided:
-
-1. **Python 3 WebSocket (`orbi_probe.py`)** — Recommended when Entware is installed (`opkg install python3-light`). Uses Python stdlib only with built-in RFC 6455 WebSocket framing and 5s polling.
-2. **BusyBox Ash (`orbi-probe.sh`)** — Zero extra packages required on stock Voxel firmware (`awk` + `curl`).
-3. **Native C (`orbi-wan-probe.c`)** — Minimal-footprint `armv7l` binary for IPQ4019 (<1.2 MB RSS).
-
-Enable Netfilter per-flow byte accounting on the router before starting the agent:
+Enable Netfilter per-flow byte accounting on your router before starting the agent:
 
 ```sh
 ssh root@192.168.1.1
@@ -142,7 +124,7 @@ echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct
 
 ## Environment Variables
 
-OrbiFlow intentionally uses only standard container user/timezone variables. The Node.js server always drops privileges to run as non-root (`PUID:PGID`, refusing UID `0`) and reads all application configuration from `/config/config.json` (editable in the **Server Settings** tab).
+OrbiFlow intentionally uses only standard container user/timezone variables. The Node.js server always drops privileges to run as non-root (`PUID:PGID`, refusing UID `0`) and reads all application configuration from `/config/config.json`.
 
 | Variable | Default | Description |
 | --- | --- | --- |

@@ -25,19 +25,21 @@ RUN apk add --no-cache su-exec tzdata && \
   deluser --remove-home node 2>/dev/null || true && \
   delgroup node 2>/dev/null || true && \
   addgroup -g 1000 -S orbiflow && \
-  adduser -u 1000 -S -D -H -h /app -s /sbin/nologin -G orbiflow orbiflow
+  adduser -u 1000 -S -D -H -h /config -s /sbin/nologin -G orbiflow orbiflow
 
 COPY package.json ./
-RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws', 'maxmind'].map((k) => k + '@' + d[k]).join(' '));" \
+RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws'].map((k) => k + '@' + d[k]).join(' '));" \
   | xargs npm install --no-save --no-audit --no-fund && \
   rm -f package.json package-lock.json && \
-  mkdir -p /config/cache /config/geoip && \
+  mkdir -p /config/cache && \
   chown -R orbiflow:orbiflow /config
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.mjs ./server.mjs
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
+  chmod 0755 /usr/local/bin/docker-entrypoint.sh && \
+  chmod -R a+rX /app
 
 EXPOSE 3000
 VOLUME ["/config"]
