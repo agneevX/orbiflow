@@ -226,6 +226,29 @@ def parse_ws_url(url):
     return scheme, host, port, path
 
 
+def create_tcp_connection(host, port, timeout=8):
+    # Pass ASCII bytes so Entware python3-light never loads missing encodings.idna
+    host_bytes = host.encode("ascii") if isinstance(host, str) else host
+    last_err = None
+    for af, socktype, proto, _, sa in socket.getaddrinfo(
+        host_bytes, port, 0, socket.SOCK_STREAM
+    ):
+        sock = None
+        try:
+            sock = socket.socket(af, socktype, proto)
+            sock.settimeout(timeout)
+            addr = (sa[0].encode("ascii") if isinstance(sa[0], str) else sa[0],) + sa[1:]
+            sock.connect(addr)
+            return sock
+        except OSError as exc:
+            last_err = exc
+            if sock is not None:
+                sock.close()
+    if last_err is not None:
+        raise last_err
+    raise OSError(f"Unable to resolve host: {host}")
+
+
 class MiniWebSocket:
     def __init__(self, url, token):
         scheme, host, port, path = parse_ws_url(url)
@@ -237,12 +260,12 @@ class MiniWebSocket:
         self.sock = None
 
     def connect(self):
-        raw = socket.create_connection((self.host, self.port), timeout=8)
+        raw = create_tcp_connection(self.host, self.port, timeout=8)
         if self.use_tls:
             import ssl
             ctx = ssl.create_default_context()
             raw = ctx.wrap_socket(raw, server_hostname=self.host)
-        key = base64.b64encode(os.urandom(16)).decode()
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
         host_header = f"[{self.host}]:{self.port}" if ":" in self.host else f"{self.host}:{self.port}"
         req = (
             f"GET {self.path} HTTP/1.1\\r\\n"
@@ -253,8 +276,8 @@ class MiniWebSocket:
             "Sec-WebSocket-Version: 13\\r\\n"
             f"X-Probe-Token: {self.token}\\r\\n\\r\\n"
         )
-        raw.sendall(req.encode())
-        resp = raw.recv(4096).decode(errors="ignore")
+        raw.sendall(req.encode("utf-8"))
+        resp = raw.recv(4096).decode("utf-8", errors="ignore")
         if "101 Switching Protocols" not in resp:
             raw.close()
             first_line = resp.splitlines()[0] if resp.splitlines() else "empty response"
