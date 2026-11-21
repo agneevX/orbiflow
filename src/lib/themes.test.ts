@@ -39,8 +39,10 @@ test('resolveThemeId follows mode (auto/dark/light) and picks the matching palet
   assert.equal(resolveThemeId('light', true, 'dracula-pro', 'catppuccin-latte'), 'catppuccin-latte');
 });
 
-test('DARK_THEMES and LIGHT_THEMES cover every theme in THEMES', () => {
+test('DARK_THEMES and LIGHT_THEMES cover every theme in THEMES and exclude Midnight Amber', () => {
   assert.equal(DARK_THEMES.length + LIGHT_THEMES.length, Object.keys(THEMES).length);
+  assert.equal('amber' in THEMES, false);
+  assert.equal(normalizeDarkTheme('amber'), 'obsidian');
   assert.ok(THEMES['catppuccin-mocha'].isDark);
   assert.ok(THEMES['dracula-pro'].isDark);
   assert.ok(THEMES['nord'].isDark);

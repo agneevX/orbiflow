@@ -26,7 +26,8 @@ Options:
   --log-file PATH           Append timestamped logs to PATH
   -i, --interval SEC        Fast traffic polling interval in seconds (default: ${cfg.intervalSec})
   --sys-interval SEC        Router uptime/load/memory polling interval in seconds (default: 30)
-  --neigh-interval SEC      ARP/DHCP neighbor refresh interval in seconds (default: 15)
+  --ports-interval SEC      Switch/Ethernet port refresh interval in seconds (default: 30)
+  --neigh-interval SEC      ARP/DHCP/Wi-Fi neighbor refresh interval in seconds (default: 15)
   --iface NAME              WAN interface name (default: ${cfg.iface})
   --dhcp-leases PATH        Custom DHCP leases file path (auto-detect if omitted)
   --ws-url URL              Collector WebSocket URL
@@ -40,17 +41,19 @@ import os
 import signal
 import socket
 import struct
+import subprocess
 import sys
 import time
 
-WS_URL = "${cfg.wsUrl}"
-AUTH_TOKEN = "${cfg.token}"
-WAN_IFACE = "${cfg.iface}"
-PROBE_ID = "${cfg.probeId}"
-INTERVAL_SEC = ${cfg.intervalSec}
+WS_URL = ${JSON.stringify(cfg.wsUrl)}
+AUTH_TOKEN = ${JSON.stringify(cfg.token)}
+WAN_IFACE = ${JSON.stringify(cfg.iface)}
+PROBE_ID = ${JSON.stringify(cfg.probeId)}
+INTERVAL_SEC = ${Math.max(1, Math.min(60, Math.round(Number(cfg.intervalSec) || 3)))}
 SYS_INTERVAL_SEC = 30
+PORTS_INTERVAL_SEC = 30
 NEIGH_INTERVAL_SEC = 15
-DHCP_LEASES_PATH = "${(cfg.dhcpLeasesPath || '').replace(/["\\]/g, '')}"
+DHCP_LEASES_PATH = ${JSON.stringify((cfg.dhcpLeasesPath || '').trim())}
 
 LOG_LEVELS = {"silent": 0, "error": 1, "info": 2, "debug": 3}
 
@@ -100,6 +103,7 @@ def parse_args(argv):
         "probe_id": PROBE_ID,
         "interval": float(INTERVAL_SEC),
         "sys_interval": float(SYS_INTERVAL_SEC),
+        "ports_interval": float(PORTS_INTERVAL_SEC),
         "neigh_interval": float(NEIGH_INTERVAL_SEC),
         "dhcp_leases": DHCP_LEASES_PATH,
         "daemonize": False,
@@ -143,6 +147,8 @@ def parse_args(argv):
             cfg["interval"] = max(1.0, float(need_val(arg)))
         elif arg == "--sys-interval":
             cfg["sys_interval"] = max(5.0, float(need_val(arg)))
+        elif arg == "--ports-interval":
+            cfg["ports_interval"] = max(5.0, float(need_val(arg)))
         elif arg == "--neigh-interval":
             cfg["neigh_interval"] = max(5.0, float(need_val(arg)))
         elif arg == "--iface":
@@ -218,6 +224,14 @@ def read_int(path):
         return 0
 
 
+def find_binary(name):
+    for d in ("/usr/sbin", "/sbin", "/usr/bin", "/bin", "/opt/sbin", "/opt/bin"):
+        p = f"{d}/{name}"
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
 def ensure_conntrack_acct():
     acct_path = "/proc/sys/net/netfilter/nf_conntrack_acct"
     try:
@@ -229,6 +243,25 @@ def ensure_conntrack_acct():
 
 
 def read_iface_counters(iface):
+    # Single-open /proc/net/dev read avoids 4 sysfs opens on every fast tick
+    prefix = f"{iface}:"
+    try:
+        with open("/proc/net/dev", "r") as f:
+            for line in f:
+                stripped = line.lstrip()
+                if stripped.startswith(prefix):
+                    fields = stripped[len(prefix):].split()
+                    if len(fields) >= 11:
+                        return {
+                            "iface": iface,
+                            "rxBytes": int(fields[0]),
+                            "rxErrors": int(fields[2]),
+                            "txBytes": int(fields[8]),
+                            "txErrors": int(fields[10]),
+                        }
+                    break
+    except (OSError, ValueError):
+        pass
     base = f"/sys/class/net/{iface}/statistics"
     return {
         "iface": iface,
@@ -239,12 +272,13 @@ def read_iface_counters(iface):
     }
 
 
-def read_swconfig_ports():
+def read_swconfig_ports(swconfig_bin):
     ports = []
+    if not swconfig_bin:
+        return ports
     try:
-        import subprocess
         out = subprocess.check_output(
-            ["swconfig", "dev", "switch0", "show"],
+            [swconfig_bin, "dev", "switch0", "show"],
             stderr=subprocess.DEVNULL,
             timeout=2,
         ).decode("utf-8", errors="ignore")
@@ -275,8 +309,7 @@ def read_swconfig_ports():
                 "_pnum": pnum,
             }
         elif cur is not None and "link:" in line:
-            parts = line.split()
-            for tok in parts:
+            for tok in line.split():
                 if tok == "link:up":
                     cur["linkUp"] = True
                 elif tok.startswith("speed:"):
@@ -310,9 +343,23 @@ def read_swconfig_ports():
     return ports
 
 
-def read_router_ports(wan_iface):
+def read_router_ports(wan_iface, swconfig_bin):
     ports = []
     seen = set()
+    # Read all interface byte counters in one /proc/net/dev pass
+    dev_bytes = {}
+    try:
+        with open("/proc/net/dev", "r") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                name_part, rest = line.split(":", 1)
+                fields = rest.split()
+                if len(fields) >= 9:
+                    dev_bytes[name_part.strip()] = (int(fields[0]), int(fields[8]))
+    except (OSError, ValueError):
+        pass
+
     try:
         names = sorted(os.listdir("/sys/class/net"))
     except OSError:
@@ -335,8 +382,7 @@ def read_router_ports(wan_iface):
         duplex = read_text(f"{base}/duplex").strip().lower()
         if duplex not in ("full", "half"):
             duplex = "unknown"
-        rx_b = read_int(f"{base}/statistics/rx_bytes")
-        tx_b = read_int(f"{base}/statistics/tx_bytes")
+        rx_b, tx_b = dev_bytes.get(name, (0, 0))
         is_wan = name == wan_iface
         ports.append({
             "id": name,
@@ -352,7 +398,7 @@ def read_router_ports(wan_iface):
         })
         seen.add(name)
 
-    for sp in read_swconfig_ports():
+    for sp in read_swconfig_ports(swconfig_bin):
         if sp["id"] not in seen:
             ports.append(sp)
             seen.add(sp["id"])
@@ -414,45 +460,79 @@ def discover_dnsmasq_files(custom_lease_path=""):
     return lease_paths, hosts_paths, static_hosts
 
 
-def read_dhcp_leases(custom_lease_path=""):
-    leases = {}
-    active_clients = {}
-    now_epoch = int(time.time())
-    lease_paths, hosts_paths, static_hosts = discover_dnsmasq_files(custom_lease_path)
-    for hpath in hosts_paths:
-        for line in read_text(hpath).splitlines():
-            clean = line.split("#", 1)[0].strip()
-            parts = clean.split()
-            if len(parts) >= 2 and parts[0].count(".") == 3 and not parts[0].startswith("127."):
-                leases[parts[0]] = parts[1]
-    leases.update(static_hosts)
-    for path in lease_paths:
-        content = read_text(path)
-        if not content:
-            continue
-        for line in content.splitlines():
-            clean = line.split("#", 1)[0].strip()
-            if not clean:
+class LeaseCache:
+    def __init__(self, custom_lease_path=""):
+        self.custom_lease_path = custom_lease_path
+        self.lease_paths = []
+        self.hosts_paths = []
+        self.static_hosts = {}
+        self.last_discover = 0.0
+        self.last_sig = None
+        self.leases = {}
+        self.active_clients = {}
+
+    def _file_sig(self, paths):
+        sig = []
+        for p in paths:
+            try:
+                st = os.stat(p)
+                sig.append((p, st.st_mtime_ns, st.st_size))
+            except OSError:
+                pass
+        return tuple(sig)
+
+    def read(self, now_ts):
+        if now_ts - self.last_discover >= 300.0 or not self.lease_paths:
+            self.lease_paths, self.hosts_paths, self.static_hosts = discover_dnsmasq_files(
+                self.custom_lease_path
+            )
+            self.last_discover = now_ts
+            self.last_sig = None
+
+        sig = self._file_sig(self.hosts_paths + self.lease_paths)
+        if sig == self.last_sig and self.last_sig is not None:
+            return self.leases, self.active_clients
+
+        leases = {}
+        active_clients = {}
+        now_epoch = int(now_ts)
+        for hpath in self.hosts_paths:
+            for line in read_text(hpath).splitlines():
+                clean = line.split("#", 1)[0].strip()
+                parts = clean.split()
+                if len(parts) >= 2 and parts[0].count(".") == 3 and not parts[0].startswith("127."):
+                    leases[parts[0]] = parts[1]
+        leases.update(self.static_hosts)
+        for path in self.lease_paths:
+            content = read_text(path)
+            if not content:
                 continue
-            parts = clean.split()
-            if len(parts) >= 4 and parts[2].count(".") == 3:
-                expiry_str, mac_str, ip, host = parts[0], parts[1], parts[2], parts[3]
-                if host != "*" and host != ip:
-                    leases[ip] = host
-                try:
-                    expiry = int(expiry_str)
-                except ValueError:
-                    expiry = 0
-                if (expiry == 0 or expiry > now_epoch) and mac_str.count(":") == 5:
-                    active_clients[ip] = {
-                        "ip": ip,
-                        "mac": mac_str.lower(),
-                        "device": "br0",
-                        "hostname": "" if host in ("*", ip) else host,
-                    }
-            elif len(parts) >= 2 and parts[0].count(".") == 3 and not parts[0].startswith("127."):
-                leases[parts[0]] = parts[1]
-    return leases, active_clients
+            for line in content.splitlines():
+                clean = line.split("#", 1)[0].strip()
+                if not clean:
+                    continue
+                parts = clean.split()
+                if len(parts) >= 4 and parts[2].count(".") == 3:
+                    expiry_str, mac_str, ip, host = parts[0], parts[1], parts[2], parts[3]
+                    if host != "*" and host != ip:
+                        leases[ip] = host
+                    try:
+                        expiry = int(expiry_str)
+                    except ValueError:
+                        expiry = 0
+                    if (expiry == 0 or expiry > now_epoch) and mac_str.count(":") == 5:
+                        active_clients[ip] = {
+                            "ip": ip,
+                            "mac": mac_str.lower(),
+                            "device": "br0",
+                            "hostname": "" if host in ("*", ip) else host,
+                        }
+                elif len(parts) >= 2 and parts[0].count(".") == 3 and not parts[0].startswith("127."):
+                    leases[parts[0]] = parts[1]
+        self.leases = leases
+        self.active_clients = active_clients
+        self.last_sig = sig
+        return leases, active_clients
 
 
 def read_arp_table(leases, active_dhcp_clients=None):
@@ -469,7 +549,6 @@ def read_arp_table(leases, active_dhcp_clients=None):
                     "device": dev,
                     "hostname": leases.get(ip, ""),
                 }
-    # Merge active DHCP leases so idle connected devices stay visible even if kernel ARP aged out
     if active_dhcp_clients:
         for ip, info in active_dhcp_clients.items():
             if ip not in entries_by_ip:
@@ -482,118 +561,148 @@ def read_arp_table(leases, active_dhcp_clients=None):
     return list(entries_by_ip.values())
 
 
-def read_router_wifi_clients():
-    clients = {}
+def discover_wifi_ifaces():
     try:
-        import subprocess
         ifaces = sorted(os.listdir("/sys/class/net"))
-    except Exception:
+    except OSError:
         return []
-
-    wifi_ifaces = [
+    return [
         n for n in ifaces
         if os.path.isdir(f"/sys/class/net/{n}/wireless") or n.startswith("ath") or n.startswith("wlan")
     ]
-    for wif in wifi_ifaces:
-        try:
-            out = subprocess.check_output(
-                ["wlanconfig", wif, "list", "sta"],
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            ).decode("utf-8", errors="ignore")
-            for raw in out.splitlines():
-                parts = raw.split()
-                if len(parts) >= 6 and parts[0].count(":") == 5:
-                    mac = parts[0].lower()
-                    tx_m = int(parts[3].rstrip("Mm")) if parts[3].rstrip("Mm").isdigit() else 0
-                    rx_m = int(parts[4].rstrip("Mm")) if parts[4].rstrip("Mm").isdigit() else 0
-                    rssi = int(parts[5]) if parts[5].lstrip("-").isdigit() else 0
-                    clients[mac] = {
-                        "mac": mac,
-                        "connectionType": "wifi",
-                        "portOrRadio": wif,
-                        "linkSpeedMbps": max(tx_m, rx_m),
-                        "signalDbm": (-95 + rssi) if rssi > 0 else rssi,
-                        "rxBytes": 0,
-                        "txBytes": 0,
-                        "rxBps": 0,
-                        "txBps": 0,
-                    }
-            continue
-        except Exception:
-            pass
 
-        try:
-            out = subprocess.check_output(
-                ["iw", "dev", wif, "station", "dump"],
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            ).decode("utf-8", errors="ignore")
-            cur_mac = None
-            for raw in out.splitlines():
-                line = raw.strip()
-                if line.startswith("Station "):
-                    parts = line.split()
-                    if len(parts) >= 2 and parts[1].count(":") == 5:
-                        cur_mac = parts[1].lower()
-                        clients[cur_mac] = {
-                            "mac": cur_mac,
+
+def read_router_wifi_clients(wifi_ifaces, wifi_tool):
+    if not wifi_ifaces or not wifi_tool:
+        return []
+    tool_kind, tool_bin = wifi_tool
+    clients = {}
+    for wif in wifi_ifaces:
+        if tool_kind == "wlanconfig":
+            try:
+                out = subprocess.check_output(
+                    [tool_bin, wif, "list", "sta"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                ).decode("utf-8", errors="ignore")
+                for raw in out.splitlines():
+                    parts = raw.split()
+                    if len(parts) >= 6 and parts[0].count(":") == 5:
+                        mac = parts[0].lower()
+                        tx_tok = parts[3].rstrip("Mm")
+                        rx_tok = parts[4].rstrip("Mm")
+                        tx_m = int(tx_tok) if tx_tok.isdigit() else 0
+                        rx_m = int(rx_tok) if rx_tok.isdigit() else 0
+                        rssi = int(parts[5]) if parts[5].lstrip("-").isdigit() else 0
+                        clients[mac] = {
+                            "mac": mac,
                             "connectionType": "wifi",
                             "portOrRadio": wif,
-                            "linkSpeedMbps": 0,
+                            "linkSpeedMbps": max(tx_m, rx_m),
+                            "wifiTxMbps": tx_m,
+                            "wifiRxMbps": rx_m,
+                            "signalDbm": (-95 + rssi) if rssi > 0 else rssi,
                             "rxBytes": 0,
                             "txBytes": 0,
                             "rxBps": 0,
                             "txBps": 0,
                         }
-                elif cur_mac and line.startswith("rx bytes:"):
-                    val = line.split(":", 1)[1].strip()
-                    if val.isdigit():
-                        clients[cur_mac]["rxBytes"] = int(val)
-                elif cur_mac and line.startswith("tx bytes:"):
-                    val = line.split(":", 1)[1].strip()
-                    if val.isdigit():
-                        clients[cur_mac]["txBytes"] = int(val)
-                elif cur_mac and line.startswith("signal:"):
-                    tok = line.split(":", 1)[1].strip().split()[0]
-                    if tok.lstrip("-").isdigit():
-                        clients[cur_mac]["signalDbm"] = int(tok)
-                elif cur_mac and line.startswith("tx bitrate:"):
-                    tok = line.split(":", 1)[1].strip().split()[0]
-                    try:
-                        clients[cur_mac]["linkSpeedMbps"] = int(round(float(tok)))
-                    except ValueError:
-                        pass
-        except Exception:
-            pass
+            except Exception:
+                pass
+        elif tool_kind == "iw":
+            try:
+                out = subprocess.check_output(
+                    [tool_bin, "dev", wif, "station", "dump"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                ).decode("utf-8", errors="ignore")
+                cur = None
+                for raw in out.splitlines():
+                    line = raw.strip()
+                    if line.startswith("Station "):
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1].count(":") == 5:
+                            mac = parts[1].lower()
+                            cur = {
+                                "mac": mac,
+                                "connectionType": "wifi",
+                                "portOrRadio": wif,
+                                "linkSpeedMbps": 0,
+                                "wifiTxMbps": 0,
+                                "wifiRxMbps": 0,
+                                "rxBytes": 0,
+                                "txBytes": 0,
+                                "rxBps": 0,
+                                "txBps": 0,
+                            }
+                            clients[mac] = cur
+                    elif cur is not None:
+                        if line.startswith("rx bytes:"):
+                            val = line.split(":", 1)[1].strip()
+                            if val.isdigit():
+                                cur["rxBytes"] = int(val)
+                        elif line.startswith("tx bytes:"):
+                            val = line.split(":", 1)[1].strip()
+                            if val.isdigit():
+                                cur["txBytes"] = int(val)
+                        elif line.startswith("signal:"):
+                            tok = line.split(":", 1)[1].strip().split()[0]
+                            if tok.lstrip("-").isdigit():
+                                cur["signalDbm"] = int(tok)
+                        elif line.startswith("tx bitrate:"):
+                            tok = line.split(":", 1)[1].strip().split()[0]
+                            try:
+                                v = int(round(float(tok)))
+                                cur["wifiTxMbps"] = v
+                                cur["linkSpeedMbps"] = max(cur["linkSpeedMbps"], v)
+                            except ValueError:
+                                pass
+                        elif line.startswith("rx bitrate:"):
+                            tok = line.split(":", 1)[1].strip().split()[0]
+                            try:
+                                v = int(round(float(tok)))
+                                cur["wifiRxMbps"] = v
+                                cur["linkSpeedMbps"] = max(cur["linkSpeedMbps"], v)
+                            except ValueError:
+                                pass
+            except Exception:
+                pass
     return list(clients.values())
 
 
-SKIP_STATES = (
-    "TIME_WAIT",
-    "CLOSE_WAIT",
-    "FIN_WAIT",
-    "CLOSE ",
-    "SYN_SENT",
-    "SYN_RECV",
-    "[UNREPLIED]",
-)
-
-
-def read_conntrack_lines(limit=500):
-    lines = []
+def detect_conntrack_path():
     for path in ("/proc/net/nf_conntrack", "/proc/net/ip_conntrack"):
         if os.path.exists(path):
-            with open(path, "r") as f:
-                for line in f:
-                    if "bytes=" not in line or "bytes=0 " in line:
-                        continue
-                    if any(s in line for s in SKIP_STATES):
-                        continue
-                    lines.append(line.strip())
-                    if len(lines) >= limit:
-                        break
-            break
+            return path
+    return None
+
+
+def read_conntrack_lines(ct_path, limit=500):
+    if not ct_path:
+        return []
+    lines = []
+    append = lines.append
+    try:
+        with open(ct_path, "r") as f:
+            for line in f:
+                if "bytes=" not in line or "bytes=0 " in line:
+                    continue
+                if (
+                    "TIME_WAIT" in line
+                    or "CLOSE_WAIT" in line
+                    or "FIN_WAIT" in line
+                    or "CLOSE " in line
+                    or "SYN_SENT" in line
+                    or "SYN_RECV" in line
+                    or "[UNREPLIED]" in line
+                    or "src=127.0.0.1 " in line
+                ):
+                    continue
+                append(line.strip())
+                if len(lines) >= limit:
+                    break
+    except OSError:
+        pass
     return lines
 
 
@@ -612,13 +721,20 @@ def read_system_metrics(flow_count, static_info):
     uptime_sec = int(float(uptime_raw[0])) if uptime_raw else 0
     load_raw = read_text("/proc/loadavg").split()
     load_1m = float(load_raw[0]) if load_raw else 0.0
-    meminfo = read_text("/proc/meminfo")
     total_kb = avail_kb = 0
-    for line in meminfo.splitlines():
-        if line.startswith("MemTotal:"):
-            total_kb = int(line.split()[1])
-        elif line.startswith("MemAvailable:") or line.startswith("MemFree:"):
-            avail_kb = max(avail_kb, int(line.split()[1]))
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total_kb = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    avail_kb = int(line.split()[1])
+                    if total_kb:
+                        break
+                elif line.startswith("MemFree:") and avail_kb == 0:
+                    avail_kb = int(line.split()[1])
+    except (OSError, ValueError):
+        pass
     mem_pct = round(((total_kb - avail_kb) / total_kb) * 100, 1) if total_kb else 0.0
     return {
         "hostname": static_info["hostname"],
@@ -684,6 +800,17 @@ def create_tcp_connection(host, port, timeout=8):
     raise OSError(f"Unable to resolve host: {host}")
 
 
+def fast_ws_mask(payload, mask):
+    length = len(payload)
+    if length == 0:
+        return b""
+    # C-level big-integer XOR is ~50-100x faster than Python byte-by-byte loops on routers
+    repeated = (mask * ((length + 3) // 4))[:length]
+    return (int.from_bytes(payload, "big") ^ int.from_bytes(repeated, "big")).to_bytes(
+        length, "big"
+    )
+
+
 class MiniWebSocket:
     def __init__(self, url, token):
         scheme, host, port, path = parse_ws_url(url)
@@ -723,18 +850,13 @@ class MiniWebSocket:
         payload = json.dumps(obj, separators=(",", ":")).encode("utf-8")
         mask = os.urandom(4)
         length = len(payload)
-        header = bytearray([0x81])
         if length < 126:
-            header.append(0x80 | length)
+            header = struct.pack("!BB4s", 0x81, 0x80 | length, mask)
         elif length < 65536:
-            header.append(0x80 | 126)
-            header.extend(struct.pack("!H", length))
+            header = struct.pack("!BBH4s", 0x81, 0x80 | 126, length, mask)
         else:
-            header.append(0x80 | 127)
-            header.extend(struct.pack("!Q", length))
-        header.extend(mask)
-        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-        self.sock.sendall(bytes(header) + masked)
+            header = struct.pack("!BBQ4s", 0x81, 0x80 | 127, length, mask)
+        self.sock.sendall(header + fast_ws_mask(payload, mask))
 
     def close(self):
         if self.sock:
@@ -768,20 +890,31 @@ def main():
 
     ensure_conntrack_acct()
     static_info = read_static_host_info()
+    ct_path = detect_conntrack_path()
+    swconfig_bin = find_binary("swconfig")
+    wlanconfig_bin = find_binary("wlanconfig")
+    iw_bin = find_binary("iw")
+    wifi_tool = ("wlanconfig", wlanconfig_bin) if wlanconfig_bin else (("iw", iw_bin) if iw_bin else None)
+    wifi_ifaces = discover_wifi_ifaces()
+    lease_cache = LeaseCache(cfg["dhcp_leases"])
+
     ws = MiniWebSocket(cfg["ws_url"], cfg["token"])
-    leases = {}
     arp = []
     router_clients = []
     last_neigh_refresh = 0.0
+    last_ports_refresh = 0.0
     last_sys_refresh = 0.0
+    last_wifi_iface_scan = time.time()
 
     logger.info(
         f"Starting probe={cfg['probe_id']} iface={cfg['iface']} "
-        f"interval={cfg['interval']}s sys_interval={cfg['sys_interval']}s target={cfg['ws_url']}"
+        f"interval={cfg['interval']}s ports_interval={cfg['ports_interval']}s "
+        f"sys_interval={cfg['sys_interval']}s target={cfg['ws_url']}"
     )
 
     try:
         while running:
+            tick_start = time.monotonic()
             try:
                 if ws.sock is None:
                     ws.connect()
@@ -793,27 +926,34 @@ def main():
                     logger.info(f"Connected to {cfg['ws_url']}")
 
                 now_ts = time.time()
+                if now_ts - last_wifi_iface_scan >= 60.0:
+                    wifi_ifaces = discover_wifi_ifaces()
+                    last_wifi_iface_scan = now_ts
+
                 if now_ts - last_neigh_refresh >= cfg["neigh_interval"]:
-                    leases, active_dhcp = read_dhcp_leases(cfg["dhcp_leases"])
+                    leases, active_dhcp = lease_cache.read(now_ts)
                     arp = read_arp_table(leases, active_dhcp)
-                    router_clients = read_router_wifi_clients()
+                    router_clients = read_router_wifi_clients(wifi_ifaces, wifi_tool)
                     last_neigh_refresh = now_ts
                     logger.debug(
                         f"Refreshed {len(arp)} ARP/DHCP devices, {len(router_clients)} Wi-Fi clients"
                     )
 
-                conntrack_lines = read_conntrack_lines()
+                conntrack_lines = read_conntrack_lines(ct_path)
                 data = {
                     "probeId": cfg["probe_id"],
                     "timestamp": int(now_ts * 1000),
                     "source": "live",
                     "iface": read_iface_counters(cfg["iface"]),
-                    "ports": read_router_ports(cfg["iface"]),
                     "routerClients": router_clients,
                     "arp": arp,
                     "flows": [],
                     "rawConntrackLines": conntrack_lines,
                 }
+
+                if now_ts - last_ports_refresh >= cfg["ports_interval"]:
+                    data["ports"] = read_router_ports(cfg["iface"], swconfig_bin)
+                    last_ports_refresh = now_ts
 
                 if now_ts - last_sys_refresh >= cfg["sys_interval"]:
                     data["system"] = read_system_metrics(len(conntrack_lines), static_info)
@@ -824,7 +964,10 @@ def main():
 
                 ws.send_json({"type": "probe:snapshot", "data": data})
                 logger.debug(f"Sent snapshot: flows={len(conntrack_lines)}")
-                time.sleep(cfg["interval"])
+                elapsed = time.monotonic() - tick_start
+                sleep_for = cfg["interval"] - elapsed
+                if sleep_for > 0.1:
+                    time.sleep(sleep_for)
             except Exception as exc:
                 logger.error(f"Reconnecting after error: {exc}")
                 ws.close()

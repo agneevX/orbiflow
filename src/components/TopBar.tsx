@@ -346,8 +346,16 @@ export function TopBar({
             type="button"
             data-testid="pause-stream-btn"
             onClick={onTogglePause}
-            aria-label={paused ? 'Resume live updates' : 'Pause live updates'}
-            title={paused ? 'Resume live updates' : 'Pause live updates'}
+            aria-label={
+              paused
+                ? 'Resume live display (background collection active)'
+                : 'Pause display updates (background collection continues)'
+            }
+            title={
+              paused
+                ? 'Resume live display (data still collecting in background)'
+                : 'Pause display updates (data continues collecting in background)'
+            }
             className={`inline-flex items-center justify-center h-9 w-9 sm:h-10 sm:w-10 rounded-xl border transition-colors shrink-0 ${
               paused
                 ? 'border-amber-500/40 bg-amber-500/12 text-amber-500 hover:bg-amber-500/20'

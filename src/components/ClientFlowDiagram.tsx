@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react';
 import type { BandwidthUnit, ClientDestinationLink } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
-import { formatBandwidth, formatBytes } from '../lib/formatters';
+import { formatBandwidth, formatBytes, isPrivateIp } from '../lib/formatters';
+
+export type FlowScopeTab = 'internet' | 'lan';
 
 interface ClientFlowDiagramProps {
   links: ClientDestinationLink[];
+  scope: FlowScopeTab;
   unit: BandwidthUnit;
   theme: ThemePalette;
   onSelectFilter: (query: string) => void;
@@ -22,8 +25,22 @@ interface PositionedNode {
   color: string;
 }
 
+const MAX_FLOW_DEVICES = 3;
+const MAX_FLOW_DESTINATIONS = 5;
+
+function matchesScope(link: ClientDestinationLink, scope: FlowScopeTab): boolean {
+  const effectiveScope: FlowScopeTab =
+    link.scope === 'lan' || link.scope === 'internet'
+      ? link.scope
+      : link.category === 'Local Network' || (link.dstIp ? isPrivateIp(link.dstIp) : false)
+        ? 'lan'
+        : 'internet';
+  return effectiveScope === scope;
+}
+
 export function ClientFlowDiagram({
   links,
+  scope,
   unit,
   theme,
   onSelectFilter,
@@ -33,36 +50,73 @@ export function ClientFlowDiagram({
   const [hoveredLinkKey, setHoveredLinkKey] = useState<string | null>(null);
 
   const layout = useMemo(() => {
-    const clientTotals = new Map<string, { name: string; bps: number; bytes: number }>();
-    const serviceTotals = new Map<string, { bps: number; bytes: number }>();
+    const scopedLinks = links.filter((l) => matchesScope(l, scope));
 
-    for (const l of links) {
+    const clientTotals = new Map<string, { name: string; bps: number; bytes: number }>();
+    for (const l of scopedLinks) {
       const c = clientTotals.get(l.clientIp) || { name: l.clientName, bps: 0, bytes: 0 };
       c.bps += l.totalBps;
       c.bytes += l.totalBytes;
       clientTotals.set(l.clientIp, c);
+    }
 
+    // Show up to a max of 3 active devices with traffic
+    const topClients = Array.from(clientTotals.entries())
+      .sort((a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes)
+      .slice(0, MAX_FLOW_DEVICES);
+
+    const clientSet = new Set(topClients.map(([ip]) => ip));
+    const linksForTopClients = scopedLinks.filter((l) => clientSet.has(l.clientIp));
+
+    // Aggregate destinations ONLY from the selected top devices so every device has connecting ribbons
+    const serviceTotals = new Map<string, { bps: number; bytes: number }>();
+    for (const l of linksForTopClients) {
       const s = serviceTotals.get(l.service) || { bps: 0, bytes: 0 };
       s.bps += l.totalBps;
       s.bytes += l.totalBytes;
       serviceTotals.set(l.service, s);
     }
 
-    const topClients = Array.from(clientTotals.entries())
-      .sort((a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes)
-      .slice(0, 6);
+    // Guarantee each top device's primary destination is included, then fill up to MAX_FLOW_DESTINATIONS
+    const guaranteedServices = new Set<string>();
+    for (const [clientIp] of topClients) {
+      const bestForClient = linksForTopClients
+        .filter((l) => l.clientIp === clientIp)
+        .sort((a, b) => b.totalBps - a.totalBps || b.totalBytes - a.totalBytes)[0];
+      if (bestForClient) {
+        guaranteedServices.add(bestForClient.service);
+      }
+    }
 
-    const topServices = Array.from(serviceTotals.entries())
-      .sort((a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes)
-      .slice(0, 6);
+    const sortedServices = Array.from(serviceTotals.entries()).sort(
+      (a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes
+    );
 
-    const clientSet = new Set(topClients.map(([ip]) => ip));
+    const topServices: Array<[string, { bps: number; bytes: number }]> = [];
+    const chosenServiceKeys = new Set<string>();
+
+    for (const entry of sortedServices) {
+      if (guaranteedServices.has(entry[0]) && !chosenServiceKeys.has(entry[0])) {
+        topServices.push(entry);
+        chosenServiceKeys.add(entry[0]);
+      }
+    }
+    for (const entry of sortedServices) {
+      if (topServices.length >= MAX_FLOW_DESTINATIONS) break;
+      if (!chosenServiceKeys.has(entry[0])) {
+        topServices.push(entry);
+        chosenServiceKeys.add(entry[0]);
+      }
+    }
+    topServices.sort((a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes);
+
     const serviceSet = new Set(topServices.map(([srv]) => srv));
 
+    // ~15% tighter height than 320px and mathematically bounded so devices can never clip
     const svgWidth = 860;
-    const svgHeight = 320;
-    const padY = 16;
-    const gap = 10;
+    const svgHeight = 256;
+    const padY = 10;
+    const gap = 8;
     const usableH = svgHeight - padY * 2;
 
     const distributeNodes = <T,>(
@@ -73,15 +127,26 @@ export function ClientFlowDiagram({
       usePalette: boolean
     ): PositionedNode[] => {
       if (items.length === 0) return [];
-      const totalGap = gap * Math.max(0, items.length - 1);
-      const avail = Math.max(60, usableH - totalGap);
+      const count = items.length;
+      const totalGap = gap * Math.max(0, count - 1);
+      const avail = Math.max(44, usableH - totalGap);
       const weights = items.map(([, v]) => Math.max(1, getWeight(v)));
       const sumW = weights.reduce((a, b) => a + b, 0);
 
+      // Compute balanced heights that ALWAYS fit strictly inside `avail`
+      const minH = Math.min(36, Math.floor(avail / count));
+      const maxH = Math.min(68, Math.floor(avail - minH * (count - 1)));
+      const rawHeights = weights.map((w) => {
+        const proportional = (w / sumW) * avail;
+        return Math.max(minH, Math.min(maxH, proportional));
+      });
+      const sumRaw = rawHeights.reduce((a, b) => a + b, 0);
+      const scale = sumRaw > avail ? avail / sumRaw : 1;
+      const heights = rawHeights.map((h) => Math.max(26, Math.floor(h * scale)));
+
       let cursorY = padY;
       return items.map(([key, v], idx) => {
-        const rawH = (weights[idx] / sumW) * avail;
-        const h = Math.max(28, Math.min(80, rawH));
+        const h = heights[idx];
         const info = getLabel(key, v);
         const node: PositionedNode = {
           id: key,
@@ -105,7 +170,7 @@ export function ClientFlowDiagram({
       topClients,
       (v) => v.bps || v.bytes,
       (ip, v) => ({ label: v.name, sub: ip, bps: v.bps, bytes: v.bytes }),
-      14,
+      1,
       true
     );
 
@@ -113,16 +178,17 @@ export function ClientFlowDiagram({
       topServices,
       (v) => v.bps || v.bytes,
       (srv, v) => ({ label: srv, sub: formatBytes(v.bytes), bps: v.bps, bytes: v.bytes }),
-      svgWidth - 194,
+      svgWidth - 181,
       false
     );
 
-    // Center both columns vertically if shorter than svgHeight
+    // Center both columns vertically within svgHeight without ever exceeding padY bounds
     const centerColumn = (nodes: PositionedNode[]) => {
       if (nodes.length === 0) return;
       const last = nodes[nodes.length - 1];
       const totalSpan = last.y + last.height - nodes[0].y;
-      const offset = Math.max(0, (svgHeight - totalSpan) / 2 - nodes[0].y);
+      const targetStart = Math.max(padY, (svgHeight - totalSpan) / 2);
+      const offset = targetStart - nodes[0].y;
       for (const n of nodes) n.y += offset;
     };
     centerColumn(clientNodes);
@@ -131,7 +197,7 @@ export function ClientFlowDiagram({
     const clientNodeMap = new Map(clientNodes.map((n) => [n.id, n]));
     const serviceNodeMap = new Map(serviceNodes.map((n) => [n.id, n]));
 
-    const filteredLinks = links.filter(
+    const filteredLinks = linksForTopClients.filter(
       (l) => clientSet.has(l.clientIp) && serviceSet.has(l.service)
     );
     const maxLinkWeight = Math.max(
@@ -146,7 +212,7 @@ export function ClientFlowDiagram({
       const src = clientNodeMap.get(l.clientIp)!;
       const dst = serviceNodeMap.get(l.service)!;
       const weight = l.totalBps || l.totalBytes;
-      const thickness = Math.max(2.5, Math.min(18, (weight / maxLinkWeight) * 16));
+      const thickness = Math.max(2.5, Math.min(14, (weight / maxLinkWeight) * 13));
 
       const cOff = clientOffsets.get(src.id) ?? 0;
       const sOff = serviceOffsets.get(dst.id) ?? 0;
@@ -154,15 +220,21 @@ export function ClientFlowDiagram({
       const y1 = Math.min(src.y + src.height - 6, src.y + 8 + cOff);
       const y2 = Math.min(dst.y + dst.height - 6, dst.y + 8 + sOff);
 
-      clientOffsets.set(src.id, (cOff + Math.max(4, thickness * 0.55)) % Math.max(8, src.height - 12));
-      serviceOffsets.set(dst.id, (sOff + Math.max(4, thickness * 0.55)) % Math.max(8, dst.height - 12));
+      clientOffsets.set(
+        src.id,
+        (cOff + Math.max(4, thickness * 0.55)) % Math.max(8, src.height - 12)
+      );
+      serviceOffsets.set(
+        dst.id,
+        (sOff + Math.max(4, thickness * 0.55)) % Math.max(8, dst.height - 12)
+      );
 
       const x1 = src.x + 180;
       const x2 = dst.x;
       const mx = (x1 + x2) / 2;
 
       return {
-        key: `${l.clientIp}=>${l.service}`,
+        key: `${scope}:${l.clientIp}=>${l.service}`,
         link: l,
         path: `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`,
         thickness,
@@ -171,7 +243,7 @@ export function ClientFlowDiagram({
     });
 
     return { svgWidth, svgHeight, clientNodes, serviceNodes, ribbons };
-  }, [links, theme]);
+  }, [links, scope, theme]);
 
   const activeLink = useMemo(() => {
     if (!hoveredLinkKey) return null;
@@ -180,14 +252,24 @@ export function ClientFlowDiagram({
 
   if (layout.clientNodes.length === 0 || layout.serviceNodes.length === 0) {
     return (
-      <div className="py-10 text-center text-xs app-text-muted">
-        Waiting for active client-to-destination traffic flows...
+      <div
+        data-testid="client-flow-empty"
+        className="py-8 text-center text-xs app-text-muted"
+      >
+        {scope === 'lan'
+          ? 'No active LAN-to-LAN traffic flows detected right now.'
+          : 'Waiting for active internet traffic flows...'}
       </div>
     );
   }
 
   return (
-    <div className="relative" data-testid="client-flow-diagram">
+    <div
+      className="relative"
+      data-testid="client-flow-diagram"
+      data-scope={scope}
+      data-client-count={layout.clientNodes.length}
+    >
       {activeLink && (
         <div className="pointer-events-none absolute right-2 top-1 z-10 px-2.5 py-1 rounded-lg border app-border app-surface/95 shadow text-[11px] tabular-nums app-text-secondary">
           {activeLink.clientName} → {activeLink.service} ·{' '}
@@ -199,9 +281,13 @@ export function ClientFlowDiagram({
       <div className="w-full overflow-x-auto">
         <svg
           viewBox={`0 0 ${layout.svgWidth} ${layout.svgHeight}`}
-          className="w-full min-w-[600px] h-auto block select-none"
+          className="w-full min-w-[600px] max-h-[260px] h-auto block select-none"
           role="img"
-          aria-label="Client to destination traffic flow diagram"
+          aria-label={
+            scope === 'lan'
+              ? 'Local network device-to-device traffic flow diagram'
+              : 'Client to internet service traffic flow diagram'
+          }
         >
           {/* Curved Flow Ribbons */}
           <g>
@@ -231,13 +317,14 @@ export function ClientFlowDiagram({
             })}
           </g>
 
-          {/* Left Column: LAN Clients */}
+          {/* Left Column: Active Source Devices (Max 3) */}
           <g>
             {layout.clientNodes.map((n) => {
               const active = hoveredClient === n.id;
               return (
                 <g
                   key={n.id}
+                  data-testid={`flow-client-node-${n.id}`}
                   transform={`translate(${n.x}, ${n.y})`}
                   className="cursor-pointer"
                   onMouseEnter={() => setHoveredClient(n.id)}
@@ -285,13 +372,14 @@ export function ClientFlowDiagram({
             })}
           </g>
 
-          {/* Right Column: Destination Services */}
+          {/* Right Column: Destination Services / LAN Targets */}
           <g>
             {layout.serviceNodes.map((n) => {
               const active = hoveredService === n.id;
               return (
                 <g
                   key={n.id}
+                  data-testid={`flow-service-node-${n.id}`}
                   transform={`translate(${n.x}, ${n.y})`}
                   className="cursor-pointer"
                   onMouseEnter={() => setHoveredService(n.id)}

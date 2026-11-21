@@ -4,6 +4,7 @@ import {
   buildTopologyGraph,
   computeIspUtilization,
   formatLinkSpeed,
+  formatWifiRatesLabel,
   inferTopologyDeviceIcon,
   parseSatelliteSshOutput,
   toPublicSatelliteConfig,
@@ -43,6 +44,11 @@ test('formatLinkSpeed formats Ethernet negotiation rates and Wi-Fi speeds', () =
   assert.equal(formatLinkSpeed(1200, 'wifi', true), '1.2 Gbps Wi-Fi');
   assert.equal(formatLinkSpeed(866, 'wifi', true), '866 Mbps Wi-Fi');
   assert.equal(formatLinkSpeed(1000, 'ethernet', false), 'Down');
+  assert.equal(formatWifiRatesLabel(780, 866), 'RX 780 / TX 866 Mbps');
+  assert.equal(formatWifiRatesLabel(0, 866), 'TX 866 Mbps');
+  assert.equal(formatWifiRatesLabel(780, 0), 'RX 780 Mbps');
+  assert.equal(formatWifiRatesLabel(0, 0, 433), '433 Mbps Wi-Fi');
+  assert.equal(formatWifiRatesLabel(0, 0, 0), 'Wi-Fi');
 });
 
 test('toPublicSatelliteConfig strips raw SSH password and privateKey', () => {
@@ -257,6 +263,8 @@ function makeSnapshot(): DashboardSnapshot {
               connectionType: 'wifi',
               portOrRadio: 'ath0',
               linkSpeedMbps: 433,
+              wifiRxMbps: 390,
+              wifiTxMbps: 433,
               rxBytes: 0,
               txBytes: 0,
               rxBps: 0,
@@ -332,7 +340,12 @@ test('buildTopologyGraph builds 4-tier hierarchy and handles collapse + idle fil
   assert.equal(full.nodes.find((n) => n.id === 'router')?.linkSpeedLabel, '2.5 GbE');
   assert.equal(full.nodes.find((n) => n.id === 'sat:sat-living')?.linkSpeedLabel, '2.5 GbE');
   assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.10')?.column, 3);
+  assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.10')?.linkSpeedLabel, 'Ethernet');
+  assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.10')?.linkSpeedMbps, 0);
+  assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.11')?.linkSpeedLabel, 'RX 390 / TX 433 Mbps');
   assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.20')?.column, 2);
+  assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.20')?.linkSpeedLabel, 'Ethernet');
+  assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.20')?.linkSpeedMbps, 0);
 
   // Collapse satellite hides its 2 clients
   const collapsedSat = buildTopologyGraph(snap, {
@@ -469,9 +482,11 @@ test('convertProbeToTelemetry detects Wi-Fi backhaul via gateway MAC + brif and 
   const wifiClient = telemetry.clients.find((c) => c.mac === '7c:d9:5c:31:aa:02');
   assert.equal(wifiClient?.connectionType, 'wifi');
   assert.equal(wifiClient?.portOrRadio, '5 GHz (ath1)');
+  assert.equal(wifiClient?.wifiTxMbps, 866);
+  assert.equal(wifiClient?.wifiRxMbps, 780);
   const wiredClient = telemetry.clients.find((c) => c.mac === 'b4:fb:e4:12:77:09');
   assert.equal(wiredClient?.connectionType, 'ethernet');
-  assert.equal(wiredClient?.linkSpeedMbps, 1000);
+  assert.equal(wiredClient?.linkSpeedMbps, 0);
 });
 
 test('convertProbeToTelemetry detects Ethernet backhaul via switch FDB and excludes uplink port MACs', () => {

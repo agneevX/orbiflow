@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownRight, ArrowUpRight, Clock, RotateCcw, X, ZoomIn } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, Clock, RotateCcw } from 'lucide-react';
 import type { BandwidthUnit, TimeFormat, TrafficPoint } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
 import {
-  sliceAnalysisToRange,
+  buildZoomedRangeAnalysis,
+  getDisplaySegmentsForAnalysis,
   summarizeSelectionRange,
   type TimeRange,
   type TimeWindowAnalysis,
@@ -12,6 +13,8 @@ import { formatBandwidth, formatBytes, formatDuration, formatTimestamp } from '.
 
 interface ThroughputChartProps {
   analysis: TimeWindowAnalysis;
+  fullHistory?: TrafficPoint[];
+  fullRollupHistory?: TrafficPoint[];
   unit: BandwidthUnit;
   timeFormat?: TimeFormat;
   theme: ThemePalette;
@@ -23,8 +26,100 @@ const PAD_RIGHT = 6;
 const PAD_TOP = 12;
 const PAD_BOTTOM = 26;
 
+interface PlotPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * Traces a smooth monotone cubic Hermite spline (Fritsch-Carlson) through sorted points.
+ * Preserves local extrema without overshooting below baseline or introducing artificial waves.
+ */
+function traceMonotoneSpline(ctx: CanvasRenderingContext2D, pts: PlotPoint[], baselineY: number): void {
+  const n = pts.length;
+  if (n === 0) return;
+  ctx.moveTo(pts[0].x, pts[0].y);
+  if (n === 1) return;
+  if (n === 2) {
+    ctx.lineTo(pts[1].x, pts[1].y);
+    return;
+  }
+
+  const dx: number[] = new Array(n - 1);
+  const dy: number[] = new Array(n - 1);
+  const slopes: number[] = new Array(n - 1);
+  for (let i = 0; i < n - 1; i++) {
+    dx[i] = Math.max(0.0001, pts[i + 1].x - pts[i].x);
+    dy[i] = pts[i + 1].y - pts[i].y;
+    slopes[i] = dy[i] / dx[i];
+  }
+
+  const tangents: number[] = new Array(n);
+  tangents[0] = slopes[0];
+  tangents[n - 1] = slopes[n - 1];
+
+  for (let i = 1; i < n - 1; i++) {
+    if (slopes[i - 1] * slopes[i] <= 0) {
+      tangents[i] = 0;
+    } else {
+      const w1 = 2 * dx[i] + dx[i - 1];
+      const w2 = dx[i] + 2 * dx[i - 1];
+      tangents[i] = (w1 + w2) / (w1 / slopes[i - 1] + w2 / slopes[i]);
+    }
+  }
+
+  for (let i = 0; i < n - 1; i++) {
+    if (Math.abs(slopes[i]) < 1e-6) {
+      tangents[i] = 0;
+      tangents[i + 1] = 0;
+    } else {
+      const a = tangents[i] / slopes[i];
+      const b = tangents[i + 1] / slopes[i];
+      const sq = a * a + b * b;
+      if (sq > 9) {
+        const t = 3 / Math.sqrt(sq);
+        tangents[i] = t * a * slopes[i];
+        tangents[i + 1] = t * b * slopes[i];
+      }
+    }
+  }
+
+  for (let i = 0; i < n - 1; i++) {
+    const h = dx[i] / 3;
+    const cp1x = pts[i].x + h;
+    const cp1y = Math.min(baselineY, Math.max(PAD_TOP, pts[i].y + tangents[i] * h));
+    const cp2x = pts[i + 1].x - h;
+    const cp2y = Math.min(baselineY, Math.max(PAD_TOP, pts[i + 1].y - tangents[i + 1] * h));
+    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i + 1].x, pts[i + 1].y);
+  }
+}
+
+/**
+ * Mixes a hex color with white/black/alpha to build a smooth gradient stroke that matches every theme.
+ */
+function hexToRgba(hex: string, alpha: number, lighten = 0): string {
+  const cleaned = hex.replace('#', '').trim();
+  if (cleaned.length !== 6) return hex;
+  let r = parseInt(cleaned.slice(0, 2), 16);
+  let g = parseInt(cleaned.slice(2, 4), 16);
+  let b = parseInt(cleaned.slice(4, 6), 16);
+  if (lighten > 0) {
+    r = Math.min(255, Math.round(r + (255 - r) * lighten));
+    g = Math.min(255, Math.round(g + (255 - g) * lighten));
+    b = Math.min(255, Math.round(b + (255 - b) * lighten));
+  } else if (lighten < 0) {
+    const factor = 1 + lighten;
+    r = Math.max(0, Math.round(r * factor));
+    g = Math.max(0, Math.round(g * factor));
+    b = Math.max(0, Math.round(b * factor));
+  }
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 export function ThroughputChart({
   analysis,
+  fullHistory,
+  fullRollupHistory,
   unit,
   timeFormat = '12h',
   theme,
@@ -40,9 +135,8 @@ export function ThroughputChart({
   const [showDownload, setShowDownload] = useState(true);
   const [showUpload, setShowUpload] = useState(true);
 
-  // Interactive range selection & zoom state
+  // Interactive drag-to-zoom state
   const [zoomRange, setZoomRange] = useState<TimeRange | null>(null);
-  const [selectedRange, setSelectedRange] = useState<TimeRange | null>(null);
   const [dragState, setDragState] = useState<{
     startX: number;
     currentX: number;
@@ -52,7 +146,6 @@ export function ThroughputChart({
 
   useEffect(() => {
     setZoomRange(null);
-    setSelectedRange(null);
     setDragState(null);
   }, [analysis.window]);
 
@@ -74,14 +167,28 @@ export function ThroughputChart({
     setShowUpload((prev) => !prev);
   };
 
+  // When zoomed, resolve full un-downsampled resolution across the zoomed span
   const displayAnalysis = useMemo(() => {
     if (!zoomRange) return analysis;
-    return sliceAnalysisToRange(analysis, zoomRange.start, zoomRange.end);
-  }, [analysis, zoomRange]);
+    return buildZoomedRangeAnalysis(
+      analysis,
+      zoomRange.start,
+      zoomRange.end,
+      fullHistory,
+      fullRollupHistory
+    );
+  }, [analysis, zoomRange, fullHistory, fullRollupHistory]);
+
+  // Reduce points on 15m+ windows for smooth overview curves; show full data when zoomed
+  const plottedSegments = useMemo(
+    () => getDisplaySegmentsForAnalysis(displayAnalysis, Boolean(zoomRange)),
+    [displayAnalysis, zoomRange]
+  );
+
+  const plottedPoints = useMemo(() => plottedSegments.flat(), [plottedSegments]);
 
   const {
-    points,
-    segments,
+    points: fullRangePoints,
     leadingAnchor,
     noDataRanges,
     windowStart,
@@ -109,12 +216,12 @@ export function ThroughputChart({
 
   const maxBps = useMemo(() => {
     let m = 250_000;
-    for (const p of points) {
+    for (const p of plottedPoints) {
       if (showDownload && p.rxBps > m) m = p.rxBps;
       if (showUpload && p.txBps > m) m = p.txBps;
     }
     return m * 1.18;
-  }, [points, showDownload, showUpload]);
+  }, [plottedPoints, showDownload, showUpload]);
 
   // Measure tight left gutter so Y-axis speed labels sit flush left with "Internet traffic"
   const padLeft = useMemo(() => {
@@ -131,24 +238,22 @@ export function ThroughputChart({
     return Math.max(46, Math.ceil(maxLen * 6.5) + 10);
   }, [maxBps, unit]);
 
-  const activeSelectionRange: TimeRange | null = useMemo(() => {
+  const activeDragRange: TimeRange | null = useMemo(() => {
     if (dragState && Math.abs(dragState.currentX - dragState.startX) >= 4) {
       return {
         start: Math.min(dragState.startTs, dragState.currentTs),
         end: Math.max(dragState.startTs, dragState.currentTs),
       };
     }
-    return selectedRange;
-  }, [dragState, selectedRange]);
+    return null;
+  }, [dragState]);
 
+  // Show live summary while dragging OR for the currently zoomed range (using full-resolution points)
+  const inspectedRange = activeDragRange || zoomRange;
   const selectionSummary = useMemo(() => {
-    if (!activeSelectionRange) return null;
-    return summarizeSelectionRange(
-      displayAnalysis.points,
-      activeSelectionRange.start,
-      activeSelectionRange.end
-    );
-  }, [activeSelectionRange, displayAnalysis.points]);
+    if (!inspectedRange) return null;
+    return summarizeSelectionRange(fullRangePoints, inspectedRange.start, inspectedRange.end);
+  }, [inspectedRange, fullRangePoints]);
 
   const hoverInfo = useMemo(() => {
     if (hoverXRatio === null || dragState !== null) return null;
@@ -156,7 +261,7 @@ export function ThroughputChart({
     const hoverTs = windowStart + hoverXRatio * span;
 
     const inNoData = noDataRanges.find((r) => hoverTs >= r.start && hoverTs <= r.end);
-    if (inNoData || points.length === 0) {
+    if (inNoData || plottedPoints.length === 0) {
       return {
         timestamp: hoverTs,
         point: null as TrafficPoint | null,
@@ -164,13 +269,13 @@ export function ThroughputChart({
       };
     }
 
-    let nearest = points[0];
-    let bestDist = Math.abs(points[0].timestamp - hoverTs);
-    for (let i = 1; i < points.length; i++) {
-      const dist = Math.abs(points[i].timestamp - hoverTs);
+    let nearest = plottedPoints[0];
+    let bestDist = Math.abs(plottedPoints[0].timestamp - hoverTs);
+    for (let i = 1; i < plottedPoints.length; i++) {
+      const dist = Math.abs(plottedPoints[i].timestamp - hoverTs);
       if (dist < bestDist) {
         bestDist = dist;
-        nearest = points[i];
+        nearest = plottedPoints[i];
       }
     }
 
@@ -179,7 +284,7 @@ export function ThroughputChart({
       point: nearest,
       isNoData: false,
     };
-  }, [hoverXRatio, dragState, windowStart, windowEnd, noDataRanges, points]);
+  }, [hoverXRatio, dragState, windowStart, windowEnd, noDataRanges, plottedPoints]);
 
   const clientXToPlot = useCallback(
     (clientX: number) => {
@@ -200,7 +305,7 @@ export function ThroughputChart({
     [width, padLeft, windowStart, windowEnd]
   );
 
-  // Global mousemove/mouseup while dragging so releasing outside canvas commits cleanly
+  // Drag-selecting an area immediately zooms into that range with full-resolution data
   useEffect(() => {
     if (!dragState) return;
 
@@ -225,10 +330,8 @@ export function ThroughputChart({
           const start = Math.min(prev.startTs, pos.ts);
           const end = Math.max(prev.startTs, pos.ts);
           if (end - start >= 1000) {
-            setSelectedRange({ start, end });
+            setZoomRange({ start, end });
           }
-        } else {
-          setSelectedRange(null);
         }
         return null;
       });
@@ -256,9 +359,9 @@ export function ThroughputChart({
 
     const plotW = Math.max(40, width - padLeft - PAD_RIGHT);
     const plotH = Math.max(40, height - PAD_TOP - PAD_BOTTOM);
+    const baselineY = PAD_TOP + plotH;
     const span = Math.max(1, windowEnd - windowStart);
 
-    // Unclamped X projection for clipped curve segments (prevents left/right edge gaps)
     const xForTimeRaw = (ts: number) => padLeft + ((ts - windowStart) / span) * plotW;
 
     const xForTime = (ts: number) => {
@@ -268,7 +371,7 @@ export function ThroughputChart({
 
     const yForBps = (bps: number) => {
       const norm = Math.min(1, Math.max(0, bps / maxBps));
-      return PAD_TOP + plotH - norm * plotH;
+      return baselineY - norm * plotH;
     };
 
     // Draw horizontal gridlines + left-aligned Y-axis labels flush with card heading
@@ -279,7 +382,7 @@ export function ThroughputChart({
 
     for (let i = 0; i <= ticks; i++) {
       const ratio = i / ticks;
-      const y = PAD_TOP + plotH - ratio * plotH;
+      const y = baselineY - ratio * plotH;
       const val = ratio * maxBps;
 
       ctx.strokeStyle = theme.gridColor;
@@ -320,7 +423,7 @@ export function ThroughputChart({
       const step = 12;
       ctx.beginPath();
       for (let x = x1 - plotH; x < x2 + plotH; x += step) {
-        ctx.moveTo(x, PAD_TOP + plotH);
+        ctx.moveTo(x, baselineY);
         ctx.lineTo(x + plotH, PAD_TOP);
       }
       ctx.stroke();
@@ -333,13 +436,13 @@ export function ThroughputChart({
       if (x1 > padLeft + 1) {
         ctx.beginPath();
         ctx.moveTo(x1, PAD_TOP);
-        ctx.lineTo(x1, PAD_TOP + plotH);
+        ctx.lineTo(x1, baselineY);
         ctx.stroke();
       }
       if (x2 < padLeft + plotW - 1) {
         ctx.beginPath();
         ctx.moveTo(x2, PAD_TOP);
-        ctx.lineTo(x2, PAD_TOP + plotH);
+        ctx.lineTo(x2, baselineY);
         ctx.stroke();
       }
       ctx.restore();
@@ -376,25 +479,25 @@ export function ThroughputChart({
     ctx.fillText(
       formatTimestamp(windowStart, effectiveLong, is24h, timeFormat),
       padLeft,
-      PAD_TOP + plotH + 8
+      baselineY + 8
     );
 
     ctx.textAlign = 'center';
     ctx.fillText(
       formatTimestamp(windowStart + span / 2, effectiveLong, is24h, timeFormat),
       padLeft + plotW / 2,
-      PAD_TOP + plotH + 8
+      baselineY + 8
     );
 
     ctx.textAlign = 'right';
     ctx.fillText(
       formatTimestamp(windowEnd, effectiveLong, is24h, timeFormat),
       padLeft + plotW,
-      PAD_TOP + plotH + 8
+      baselineY + 8
     );
 
     // Empty state for the full selected window
-    if (status === 'empty' || segments.length === 0) {
+    if (status === 'empty' || plottedSegments.length === 0) {
       ctx.fillStyle = theme.axisTextColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -415,13 +518,11 @@ export function ThroughputChart({
       return;
     }
 
-    // Build render segments, prepending leadingAnchor to the first segment so the line
-    // seamlessly crosses padLeft and clips flush at the left border with zero empty gap.
-    const renderSegments = segments.map((seg, idx) =>
+    // Prepend leadingAnchor to the first segment so the curve enters flush at padLeft
+    const renderSegments = plottedSegments.map((seg, idx) =>
       idx === 0 && leadingAnchor ? [leadingAnchor, ...seg] : seg
     );
 
-    // Clip plotted series strictly to the chart plot area so anchored edges stay crisp
     ctx.save();
     ctx.beginPath();
     ctx.rect(padLeft, PAD_TOP, plotW, plotH);
@@ -429,62 +530,70 @@ export function ThroughputChart({
 
     const drawSeries = (
       accessor: (p: TrafficPoint) => number,
-      strokeColor: string,
-      fillTop: string,
-      fillBottom: string
+      baseColor: string
     ) => {
+      // Smooth vertical gradient fill beneath the curve
+      const areaGrad = ctx.createLinearGradient(0, PAD_TOP, 0, baselineY);
+      areaGrad.addColorStop(0, hexToRgba(baseColor, theme.isDark ? 0.30 : 0.22, theme.isDark ? 0.12 : 0));
+      areaGrad.addColorStop(0.55, hexToRgba(baseColor, theme.isDark ? 0.11 : 0.08));
+      areaGrad.addColorStop(1, hexToRgba(baseColor, 0.0));
+
+      // Refined vertical gradient stroke (brighter peaks, softer low baseline)
+      const strokeGrad = ctx.createLinearGradient(0, PAD_TOP, 0, baselineY);
+      strokeGrad.addColorStop(0, hexToRgba(baseColor, 1, theme.isDark ? 0.28 : -0.06));
+      strokeGrad.addColorStop(0.65, hexToRgba(baseColor, 0.94));
+      strokeGrad.addColorStop(1, hexToRgba(baseColor, 0.62, theme.isDark ? -0.1 : 0.08));
+
       for (const seg of renderSegments) {
         if (seg.length === 0) continue;
         if (seg.length === 1) {
           const px = xForTimeRaw(seg[0].timestamp);
           const py = yForBps(accessor(seg[0]));
           ctx.beginPath();
-          ctx.arc(px, py, 3, 0, Math.PI * 2);
-          ctx.fillStyle = strokeColor;
+          ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = baseColor;
           ctx.fill();
           continue;
         }
 
+        const pts: PlotPoint[] = seg.map((p) => ({
+          x: xForTimeRaw(p.timestamp),
+          y: yForBps(accessor(p)),
+        }));
+
+        // Fill gradient area under the smooth spline first
         ctx.beginPath();
-        seg.forEach((p, idx) => {
-          const x = xForTimeRaw(p.timestamp);
-          const y = yForBps(accessor(p));
-          if (idx === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
-
-        ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = 2;
-        ctx.lineJoin = 'round';
-        ctx.stroke();
-
-        const lastX = xForTimeRaw(seg[seg.length - 1].timestamp);
-        const firstX = xForTimeRaw(seg[0].timestamp);
-        ctx.lineTo(lastX, PAD_TOP + plotH);
-        ctx.lineTo(firstX, PAD_TOP + plotH);
+        traceMonotoneSpline(ctx, pts, baselineY);
+        ctx.lineTo(pts[pts.length - 1].x, baselineY);
+        ctx.lineTo(pts[0].x, baselineY);
         ctx.closePath();
-
-        const grad = ctx.createLinearGradient(0, PAD_TOP, 0, PAD_TOP + plotH);
-        grad.addColorStop(0, fillTop);
-        grad.addColorStop(1, fillBottom);
-        ctx.fillStyle = grad;
+        ctx.fillStyle = areaGrad;
         ctx.fill();
+
+        // Draw thinner smooth gradient stroke on top
+        ctx.beginPath();
+        traceMonotoneSpline(ctx, pts, baselineY);
+        ctx.strokeStyle = strokeGrad;
+        ctx.lineWidth = 1.4;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.stroke();
       }
     };
 
     if (showDownload) {
-      drawSeries((p) => p.rxBps, theme.rxColor, theme.rxFillTop, theme.rxFillBottom);
+      drawSeries((p) => p.rxBps, theme.rxColor);
     }
     if (showUpload) {
-      drawSeries((p) => p.txBps, theme.txColor, theme.txFillTop, theme.txFillBottom);
+      drawSeries((p) => p.txBps, theme.txColor);
     }
 
     ctx.restore();
 
-    // Highlight active brush selection band with subtle side dimming + crisp handles
-    if (activeSelectionRange) {
-      const sx1 = xForTime(activeSelectionRange.start);
-      const sx2 = xForTime(activeSelectionRange.end);
+    // Highlight active brush selection band while dragging
+    if (activeDragRange) {
+      const sx1 = xForTime(activeDragRange.start);
+      const sx2 = xForTime(activeDragRange.end);
       const sw = Math.max(2, sx2 - sx1);
 
       ctx.save();
@@ -502,19 +611,19 @@ export function ThroughputChart({
       ctx.fillRect(sx1, PAD_TOP, sw, plotH);
 
       ctx.strokeStyle = theme.rxColor;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.25;
       ctx.beginPath();
       ctx.moveTo(sx1, PAD_TOP);
-      ctx.lineTo(sx1, PAD_TOP + plotH);
+      ctx.lineTo(sx1, baselineY);
       ctx.moveTo(sx2, PAD_TOP);
-      ctx.lineTo(sx2, PAD_TOP + plotH);
+      ctx.lineTo(sx2, baselineY);
       ctx.stroke();
 
       const midY = PAD_TOP + plotH / 2;
       ctx.fillStyle = theme.rxColor;
       for (const ex of [sx1, sx2]) {
         ctx.beginPath();
-        ctx.roundRect(ex - 2.5, midY - 12, 5, 24, 3);
+        ctx.roundRect(ex - 2, midY - 12, 4, 24, 2);
         ctx.fill();
       }
       ctx.restore();
@@ -531,7 +640,7 @@ export function ThroughputChart({
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(hx, PAD_TOP);
-      ctx.lineTo(hx, PAD_TOP + plotH);
+      ctx.lineTo(hx, baselineY);
       ctx.stroke();
       ctx.setLineDash([]);
 
@@ -541,19 +650,18 @@ export function ThroughputChart({
         if (showUpload) markers.push([yForBps(hoverInfo.point.txBps), theme.txColor]);
         for (const [hy, color] of markers) {
           ctx.beginPath();
-          ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+          ctx.arc(hx, hy, 3.5, 0, Math.PI * 2);
           ctx.fillStyle = color;
           ctx.fill();
           ctx.strokeStyle = theme.nodeFill;
-          ctx.lineWidth = 1.5;
+          ctx.lineWidth = 1.4;
           ctx.stroke();
         }
       }
     }
   }, [
     displayAnalysis,
-    points,
-    segments,
+    plottedSegments,
     leadingAnchor,
     noDataRanges,
     windowStart,
@@ -565,7 +673,7 @@ export function ThroughputChart({
     padLeft,
     maxBps,
     hoverInfo,
-    activeSelectionRange,
+    activeDragRange,
     zoomRange,
     unit,
     timeFormat,
@@ -624,27 +732,18 @@ export function ThroughputChart({
         const start = Math.min(prev.startTs, prev.currentTs);
         const end = Math.max(prev.startTs, prev.currentTs);
         if (end - start >= 1000) {
-          setSelectedRange({ start, end });
+          setZoomRange({ start, end });
         }
-      } else {
-        setSelectedRange(null);
       }
       return null;
     });
   };
 
-  const handleZoomToSelection = () => {
-    if (!selectedRange) return;
-    setZoomRange(selectedRange);
-    setSelectedRange(null);
-  };
-
   const handleResetZoom = () => {
     setZoomRange(null);
-    setSelectedRange(null);
+    setDragState(null);
   };
 
-  // Position subtle floating tooltip while hovering
   const tooltipLeftPct = hoverXRatio !== null ? Math.min(82, Math.max(18, hoverXRatio * 100)) : 50;
 
   return (
@@ -653,6 +752,8 @@ export function ThroughputChart({
         <canvas
           ref={canvasRef}
           data-testid="throughput-chart"
+          data-zoomed={zoomRange ? 'true' : 'false'}
+          data-plotted-points={plottedPoints.length}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseLeave={() => setHoverXRatio(null)}
@@ -758,35 +859,41 @@ export function ThroughputChart({
           )}
         </div>
 
-        {zoomRange && (
-          <button
-            type="button"
-            data-testid="reset-zoom-btn"
-            onClick={handleResetZoom}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border app-border app-input app-row-hover text-[11px] font-medium transition-colors"
-          >
-            <RotateCcw className="h-3 w-3" aria-hidden="true" />
-            Reset Zoom
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {!zoomRange && (
+            <span className="text-[11px] app-text-muted hidden sm:inline">
+              Drag to zoom into full resolution
+            </span>
+          )}
+          {zoomRange && (
+            <button
+              type="button"
+              data-testid="reset-zoom-btn"
+              onClick={handleResetZoom}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border app-border app-input app-row-hover text-[11px] font-medium transition-colors"
+            >
+              <RotateCcw className="h-3 w-3" aria-hidden="true" />
+              Reset Zoom
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Structured Selected Range Inspection Panel */}
+      {/* Structured Zoomed / Selected Range Inspection Panel */}
       {selectionSummary && (
         <div
           data-testid="chart-selection-inspector"
           className="rounded-xl border app-border app-input p-4 space-y-3"
         >
-          {/* Panel Header: Time Span + Actions */}
           <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b app-border">
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
               <span className="inline-flex items-center gap-1.5 font-medium app-text-secondary">
                 <Clock className="h-3.5 w-3.5 text-sky-500 shrink-0" aria-hidden="true" />
-                Selected Range
+                {activeDragRange ? 'Selecting Range' : 'Zoomed Range (Full Data)'}
               </span>
               <span className="font-semibold tabular-nums">
-                {formatTimestamp(selectionSummary.start, effectiveLong, is24h, timeFormat)} –{' '}
-                {formatTimestamp(selectionSummary.end, effectiveLong, is24h, timeFormat)}
+                {formatTimestamp(selectionSummary.start, false, is24h, timeFormat)} –{' '}
+                {formatTimestamp(selectionSummary.end, false, is24h, timeFormat)}
               </span>
               <span className="app-text-muted" aria-hidden="true">
                 ·
@@ -799,35 +906,21 @@ export function ThroughputChart({
               </span>
             </div>
 
-            {selectedRange && (
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  data-testid="zoom-selection-btn"
-                  onClick={handleZoomToSelection}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl app-btn-primary text-xs font-semibold transition-colors"
-                >
-                  <ZoomIn className="h-3.5 w-3.5" aria-hidden="true" />
-                  Zoom In
-                </button>
-                <button
-                  type="button"
-                  data-testid="clear-selection-btn"
-                  onClick={() => setSelectedRange(null)}
-                  aria-label="Clear selected range"
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border app-border app-surface app-row-hover text-xs font-medium transition-colors"
-                >
-                  <X className="h-3.5 w-3.5" aria-hidden="true" />
-                  Clear
-                </button>
-              </div>
+            {zoomRange && !activeDragRange && (
+              <button
+                type="button"
+                data-testid="inspector-reset-zoom-btn"
+                onClick={handleResetZoom}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border app-border app-surface app-row-hover text-xs font-medium transition-colors shrink-0"
+              >
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                Reset Zoom
+              </button>
             )}
           </div>
 
-          {/* Structured Download | Upload Breakdown */}
           {selectionSummary.hasData ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:divide-x app-border">
-              {/* Download Summary Column */}
               <div className="space-y-2">
                 <div className="flex items-center gap-1.5 text-xs font-semibold">
                   <ArrowDownRight
@@ -859,7 +952,6 @@ export function ThroughputChart({
                 </div>
               </div>
 
-              {/* Upload Summary Column */}
               <div className="space-y-2 md:pl-4 pt-3 md:pt-0 border-t md:border-t-0 app-border">
                 <div className="flex items-center gap-1.5 text-xs font-semibold">
                   <ArrowUpRight
@@ -893,7 +985,7 @@ export function ThroughputChart({
             </div>
           ) : (
             <div className="text-xs text-amber-500 font-medium py-1">
-              No data recorded in this selected time range.
+              No data recorded in this zoomed time range.
             </div>
           )}
         </div>

@@ -10,6 +10,7 @@ import { RdnsCache } from './server/rdnsCache';
 import { LanResolver } from './server/lanResolver';
 import { NotificationDispatcher } from './server/notifications';
 import { SatelliteSshPoller, validateSatelliteInput } from './server/satellitePoller';
+import { deployAndRestartRouterAgent } from './server/routerDeployer';
 import { toPublicSatelliteConfig } from './src/lib/topology';
 import {
   DEFAULT_TABLE_PREFERENCES,
@@ -650,6 +651,38 @@ async function startServer() {
     res.status(result.ok ? 200 : 400).json(result);
   });
 
+  app.post('/api/probe/deploy', async (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const currentCfg = engine.getSnapshot().serverConfig;
+    const result = await deployAndRestartRouterAgent({
+      host: typeof body.host === 'string' ? body.host : '',
+      port: typeof body.port === 'number' || typeof body.port === 'string' ? Number(body.port) : 22,
+      username: typeof body.username === 'string' ? body.username : 'root',
+      authMethod: body.authMethod === 'key' ? 'key' : 'password',
+      password: typeof body.password === 'string' ? body.password : undefined,
+      privateKey: typeof body.privateKey === 'string' ? body.privateKey : undefined,
+      remotePath: typeof body.remotePath === 'string' ? body.remotePath : '/opt/bin/orbi_probe.py',
+      restartAgent: body.restartAgent !== false,
+      wsUrl: typeof body.wsUrl === 'string' ? body.wsUrl : '',
+      httpUrl: typeof body.httpUrl === 'string' ? body.httpUrl : undefined,
+      token:
+        typeof body.token === 'string' && body.token.trim()
+          ? body.token
+          : currentCfg.probeToken,
+      iface: typeof body.iface === 'string' ? body.iface : 'eth0',
+      intervalSec:
+        typeof body.intervalSec === 'number' || typeof body.intervalSec === 'string'
+          ? Number(body.intervalSec)
+          : 3,
+      probeId: typeof body.probeId === 'string' ? body.probeId : undefined,
+      dhcpLeasesPath:
+        typeof body.dhcpLeasesPath === 'string'
+          ? body.dhcpLeasesPath
+          : currentCfg.dhcpLeasesPath,
+    });
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
   app.post('/api/notifications', (req, res) => {
     const body = req.body as Partial<NotificationConfig> | undefined;
     const updated = notifier.updateConfig(body);
@@ -743,10 +776,13 @@ async function startServer() {
 
   if (IS_DEV) {
     const { createServer: createViteServer } = await import('vite');
+    const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
         allowedHosts: true,
+        hmr: hmrDisabled ? false : { server },
+        ws: hmrDisabled ? false : undefined,
       },
       appType: 'spa',
     });

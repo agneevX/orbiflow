@@ -6,7 +6,6 @@ export type ThemeId =
   | 'dracula-pro'
   | 'nord'
   | 'tokyo-night'
-  | 'amber'
   | 'daylight'
   | 'catppuccin-latte';
 
@@ -107,22 +106,6 @@ export const THEMES: Record<ThemeId, ThemePalette> = {
     nodeFill: '#1A1B26',
     nodeBorder: '#3B4261',
     ribbonColors: ['#7AA2F7', '#9ECE6A', '#BB9AF7', '#E0AF68', '#F7768E', '#7DCFFF'],
-  },
-  amber: {
-    id: 'amber',
-    label: 'Midnight Amber',
-    isDark: true,
-    rxColor: '#F59E0B',
-    txColor: '#2DD4BF',
-    rxFillTop: 'rgba(245, 158, 11, 0.22)',
-    rxFillBottom: 'rgba(245, 158, 11, 0.01)',
-    txFillTop: 'rgba(45, 212, 191, 0.16)',
-    txFillBottom: 'rgba(45, 212, 191, 0.01)',
-    gridColor: 'rgba(168, 162, 158, 0.14)',
-    axisTextColor: '#A8A29E',
-    nodeFill: '#1A1815',
-    nodeBorder: '#44403C',
-    ribbonColors: ['#F59E0B', '#2DD4BF', '#FB923C', '#A3E635', '#FACC15', '#38BDF8'],
   },
   daylight: {
     id: 'daylight',

@@ -1100,16 +1100,34 @@ export class TrafficMonitorEngine {
 
     // Refresh connected host presence cache from ARP + router/satellite client tables
     const attachedMacs = new Set<string>();
+    const clientLinkByMac = new Map<string, SatelliteClientLink>();
+    const clientLinkByIp = new Map<string, SatelliteClientLink>();
+    const registerClientLink = (link: SatelliteClientLink) => {
+      const m = normalizeMac(link.mac);
+      if (m && m !== '00:00:00:00:00:00') {
+        attachedMacs.add(m);
+        const existing = clientLinkByMac.get(m);
+        // Prefer direct Wi-Fi station records over L2 Ethernet bridge entries
+        if (!existing || (existing.connectionType !== 'wifi' && link.connectionType === 'wifi')) {
+          clientLinkByMac.set(m, link);
+        }
+      }
+      if (link.ip) {
+        const existingIp = clientLinkByIp.get(link.ip);
+        if (!existingIp || (existingIp.connectionType !== 'wifi' && link.connectionType === 'wifi')) {
+          clientLinkByIp.set(link.ip, link);
+        }
+      }
+    };
+
     const allSatellites = this.buildTopologyTelemetry().satellites;
     for (const rc of this.routerClients) {
-      const m = normalizeMac(rc.mac);
-      if (m && m !== '00:00:00:00:00:00') attachedMacs.add(m);
+      registerClientLink(rc);
     }
     for (const sat of allSatellites) {
       if (!sat.connected) continue;
       for (const sc of sat.clients || []) {
-        const m = normalizeMac(sc.mac);
-        if (m && m !== '00:00:00:00:00:00') attachedMacs.add(m);
+        registerClientLink(sc);
       }
     }
 
@@ -1337,6 +1355,20 @@ export class TrafficMonitorEngine {
           stableTopServices = cachedSvc.services;
         }
 
+        const normMac = normalizeMac(rest.mac);
+        const clientLink =
+          (normMac && normMac !== '00:00:00:00:00:00' ? clientLinkByMac.get(normMac) : undefined) ||
+          clientLinkByIp.get(rest.ip);
+        const isWifi = clientLink?.connectionType === 'wifi';
+        const fallbackWifiSpeed =
+          isWifi && clientLink.linkSpeedMbps > 0 ? clientLink.linkSpeedMbps : undefined;
+        const wifiRxMbps = isWifi
+          ? (clientLink.wifiRxMbps && clientLink.wifiRxMbps > 0 ? clientLink.wifiRxMbps : fallbackWifiSpeed)
+          : undefined;
+        const wifiTxMbps = isWifi
+          ? (clientLink.wifiTxMbps && clientLink.wifiTxMbps > 0 ? clientLink.wifiTxMbps : fallbackWifiSpeed)
+          : undefined;
+
         return {
           ...rest,
           hostname: identity.hostname,
@@ -1349,39 +1381,94 @@ export class TrafficMonitorEngine {
           aliasMatchBy: identity.aliasMatchBy,
           topApps: sortedApps,
           topServices: stableTopServices,
+          connectionType: clientLink?.connectionType,
+          linkRadioOrPort: clientLink?.portOrRadio,
+          wifiRxMbps,
+          wifiTxMbps,
+          wifiSignalDbm: isWifi ? clientLink.signalDbm : undefined,
         };
       })
       .sort((a, b) => b.rxBps + b.txBps - (a.rxBps + a.txBps) || b.totalBytes - a.totalBytes);
 
     // Back-populate resolved hostnames into all flows (including retained ended flows)
-    // and build live tangible client-destination links only from non-ended flows
+    // and build live tangible client-destination links cleanly separated by Internet vs LAN scope
     for (const f of enrichedFlows) {
-      const lanIp = isPrivateIp(f.srcIp) ? f.srcIp : isPrivateIp(f.dstIp) ? f.dstIp : null;
-      if (isPrivateIp(f.srcIp) && resolvedNameByIp.has(f.srcIp)) {
+      const srcPrivate = isPrivateIp(f.srcIp);
+      const dstPrivate = isPrivateIp(f.dstIp);
+      if (srcPrivate && resolvedNameByIp.has(f.srcIp)) {
         f.srcHost = resolvedNameByIp.get(f.srcIp)!;
       }
-      if (!f.ended && lanIp && hasTangibleTraffic(f.rxBps, f.txBps)) {
-        const clientName = resolvedNameByIp.get(lanIp) || f.srcHost;
-        const serviceName = f.dstService;
-        const linkKey = `${lanIp}=>${serviceName}`;
-        const existingLink = clientLinkMap.get(linkKey) || {
-          clientIp: lanIp,
-          clientName,
-          service: serviceName,
-          category: f.dstCategory,
-          rxBps: 0,
-          txBps: 0,
-          totalBps: 0,
-          totalBytes: 0,
-          flowCount: 0,
-        };
-        existingLink.rxBps += f.rxBps;
-        existingLink.txBps += f.txBps;
-        existingLink.totalBps += f.totalBps;
-        existingLink.totalBytes += f.totalBytes;
-        existingLink.flowCount += 1;
-        clientLinkMap.set(linkKey, existingLink);
+      if (dstPrivate && resolvedNameByIp.has(f.dstIp)) {
+        f.dstHost = resolvedNameByIp.get(f.dstIp)!;
       }
+
+      if (f.ended || !hasTangibleTraffic(f.rxBps, f.txBps)) continue;
+      if (!srcPrivate && !dstPrivate) continue;
+
+      // Skip loopback / self-traffic
+      if (
+        f.srcIp === f.dstIp ||
+        f.srcIp.startsWith('127.') ||
+        f.dstIp.startsWith('127.')
+      ) {
+        continue;
+      }
+
+      let scope: 'internet' | 'lan';
+      let clientIp: string;
+      let clientName: string;
+      let serviceName: string;
+      let category = f.dstCategory;
+      let dstIp: string;
+
+      if (srcPrivate && dstPrivate) {
+        scope = 'lan';
+        clientIp = f.srcIp;
+        clientName = resolvedNameByIp.get(f.srcIp) || f.srcHost;
+        serviceName = resolvedNameByIp.get(f.dstIp) || f.dstHost || f.dstIp;
+        category = 'Local Network';
+        dstIp = f.dstIp;
+      } else if (srcPrivate && !dstPrivate) {
+        scope = 'internet';
+        clientIp = f.srcIp;
+        clientName = resolvedNameByIp.get(f.srcIp) || f.srcHost;
+        serviceName =
+          f.dstService && f.dstService !== 'Local Network'
+            ? f.dstService
+            : f.dstHost || f.dstIp;
+        category = f.dstCategory === 'Local Network' ? 'Other' : f.dstCategory;
+        dstIp = f.dstIp;
+      } else {
+        // !srcPrivate && dstPrivate (inbound internet flow targeting a LAN host)
+        scope = 'internet';
+        clientIp = f.dstIp;
+        clientName = resolvedNameByIp.get(f.dstIp) || f.dstHost || f.dstIp;
+        const remoteDesc = describeRemoteIp(f.srcIp, null, f.proto, f.sport);
+        serviceName = remoteDesc.service;
+        category = remoteDesc.category;
+        dstIp = f.srcIp;
+      }
+
+      const linkKey = `${scope}:${clientIp}=>${serviceName}`;
+      const existingLink = clientLinkMap.get(linkKey) || {
+        clientIp,
+        clientName,
+        service: serviceName,
+        category,
+        scope,
+        dstIp,
+        rxBps: 0,
+        txBps: 0,
+        totalBps: 0,
+        totalBytes: 0,
+        flowCount: 0,
+      };
+      existingLink.rxBps += f.rxBps;
+      existingLink.txBps += f.txBps;
+      existingLink.totalBps += f.totalBps;
+      existingLink.totalBytes += f.totalBytes;
+      existingLink.flowCount += 1;
+      clientLinkMap.set(linkKey, existingLink);
     }
 
     this.serverStats.randomizedMacCount = randomizedMacCount;

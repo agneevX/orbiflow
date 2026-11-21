@@ -649,6 +649,11 @@ test('generatePythonProbe includes daemonize, logging options, dhcp-leases, and 
   const py = generatePythonProbe(cfg);
   assert.ok(py.includes('INTERVAL_SEC = 3'));
   assert.ok(py.includes('SYS_INTERVAL_SEC = 30'));
+  assert.ok(py.includes('PORTS_INTERVAL_SEC = 30'));
+  assert.ok(py.includes('def fast_ws_mask('));
+  assert.ok(py.includes('class LeaseCache'));
+  assert.ok(py.includes('wifiRxMbps'));
+  assert.ok(py.includes('wifiTxMbps'));
   assert.ok(py.includes('DHCP_LEASES_PATH = "/var/lib/misc/custom.leases"'));
   assert.ok(py.includes('--dhcp-leases'));
   assert.ok(py.includes('--daemonize'));
@@ -741,5 +746,161 @@ test('TrafficMonitorEngine retains recently ended flows for reading and keeps id
   assert.equal(tick3.dashboard.hosts.some((h) => h.ip === '192.168.1.30'), true);
 });
 
+test('TrafficMonitorEngine attaches Wi-Fi RX/TX rates and Ethernet connection type to HostSummary', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_710_000_000_000;
 
+  const snap = engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 100_000, txBytes: 50_000 },
+    arp: [
+      { ip: '192.168.1.50', mac: 'aa:bb:cc:00:00:50', device: 'br0', hostname: 'macbook-pro' },
+      { ip: '192.168.1.51', mac: 'aa:bb:cc:00:00:51', device: 'br0', hostname: 'desktop-nas' },
+    ],
+    routerClients: [
+      {
+        mac: 'aa:bb:cc:00:00:50',
+        ip: '192.168.1.50',
+        connectionType: 'wifi',
+        portOrRadio: '5 GHz (ath1)',
+        linkSpeedMbps: 1200,
+        wifiRxMbps: 1080,
+        wifiTxMbps: 1200,
+        signalDbm: -48,
+        rxBytes: 0,
+        txBytes: 0,
+        rxBps: 0,
+        txBps: 0,
+      },
+      {
+        mac: 'aa:bb:cc:00:00:51',
+        ip: '192.168.1.51',
+        connectionType: 'ethernet',
+        portOrRadio: 'Ethernet',
+        linkSpeedMbps: 0,
+        rxBytes: 0,
+        txBytes: 0,
+        rxBps: 0,
+        txBps: 0,
+      },
+    ],
+    flows: [],
+  });
+
+  const wifiHost = snap.dashboard.hosts.find((h) => h.ip === '192.168.1.50');
+  const wiredHost = snap.dashboard.hosts.find((h) => h.ip === '192.168.1.51');
+
+  assert.ok(wifiHost);
+  assert.equal(wifiHost.connectionType, 'wifi');
+  assert.equal(wifiHost.wifiRxMbps, 1080);
+  assert.equal(wifiHost.wifiTxMbps, 1200);
+  assert.equal(wifiHost.wifiSignalDbm, -48);
+  assert.equal(wifiHost.linkRadioOrPort, '5 GHz (ath1)');
+
+  assert.ok(wiredHost);
+  assert.equal(wiredHost.connectionType, 'ethernet');
+  assert.equal(wiredHost.wifiRxMbps, undefined);
+  assert.equal(wiredHost.wifiTxMbps, undefined);
+});
+
+test('TrafficMonitorEngine separates Internet and LAN clientLinks with zero cross-leakage', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_710_000_000_000;
+  const arp = [
+    { ip: '192.168.1.24', mac: 'aa:bb:cc:00:00:24', device: 'br0', hostname: 'macbook-pro' },
+    { ip: '192.168.1.38', mac: 'aa:bb:cc:00:00:38', device: 'br0', hostname: 'synology-nas' },
+    { ip: '192.168.1.52', mac: 'aa:bb:cc:00:00:52', device: 'br0', hostname: 'apple-tv' },
+  ];
+
+  // Tick 1 establishes flow baselines
+  engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 100_000, txBytes: 50_000 },
+    arp,
+    flows: [
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.24', dst: '140.82.114.4', sport: 51000, dport: 443, rxBytes: 10_000, txBytes: 5_000 },
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.24', dst: '192.168.1.38', sport: 52000, dport: 445, rxBytes: 10_000, txBytes: 5_000 },
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.52', dst: '23.246.18.145', sport: 53000, dport: 443, rxBytes: 10_000, txBytes: 5_000 },
+    ],
+  });
+
+  // Tick 2 generates tangible delta rates
+  const snap = engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0 + 3_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 900_000, txBytes: 250_000 },
+    arp,
+    flows: [
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.24', dst: '140.82.114.4', sport: 51000, dport: 443, rxBytes: 310_000, txBytes: 55_000 },
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.24', dst: '192.168.1.38', sport: 52000, dport: 445, rxBytes: 610_000, txBytes: 105_000 },
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.52', dst: '23.246.18.145', sport: 53000, dport: 443, rxBytes: 910_000, txBytes: 25_000 },
+    ],
+  });
+
+  const internetLinks = snap.dashboard.clientLinks.filter((l) => l.scope === 'internet');
+  const lanLinks = snap.dashboard.clientLinks.filter((l) => l.scope === 'lan');
+
+  assert.equal(internetLinks.length, 2);
+  assert.equal(lanLinks.length, 1);
+  assert.ok(internetLinks.every((l) => l.category !== 'Local Network'));
+  assert.equal(lanLinks[0].clientName, 'macbook-pro');
+  assert.equal(lanLinks[0].service, 'synology-nas');
+  assert.equal(lanLinks[0].category, 'Local Network');
+});
+
+test('validateRouterDeployInput blocks shell injection, path traversal, and loopback targets', async () => {
+  const { validateRouterDeployInput } = await import('../../server/routerDeployer');
+
+  const valid = validateRouterDeployInput({
+    host: '192.168.1.1',
+    port: 22,
+    username: 'root',
+    authMethod: 'password',
+    password: 'secret',
+    remotePath: '/opt/bin/orbi_probe.py',
+    wsUrl: 'ws://192.168.1.10:3000/ws/ingest',
+    iface: 'eth0',
+  });
+  assert.equal(valid.ok, true);
+
+  assert.equal(
+    validateRouterDeployInput({
+      host: '127.0.0.1',
+      password: 'x',
+      wsUrl: 'ws://192.168.1.10:3000/ws/ingest',
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateRouterDeployInput({
+      host: '192.168.1.1; rm -rf /',
+      password: 'x',
+      wsUrl: 'ws://192.168.1.10:3000/ws/ingest',
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateRouterDeployInput({
+      host: '192.168.1.1',
+      password: 'x',
+      remotePath: '/opt/../etc/passwd',
+      wsUrl: 'ws://192.168.1.10:3000/ws/ingest',
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateRouterDeployInput({
+      host: '192.168.1.1',
+      password: 'x',
+      remotePath: "/opt/bin/probe';id;'",
+      wsUrl: 'ws://192.168.1.10:3000/ws/ingest',
+    }).ok,
+    false
+  );
+});
 

@@ -89,6 +89,21 @@ export function formatLinkSpeed(
   return `${Math.round(speedMbps)} MbE`;
 }
 
+export function formatWifiRatesLabel(
+  rxMbps?: number,
+  txMbps?: number,
+  fallbackMbps?: number
+): string {
+  const rx = Number.isFinite(rxMbps) && (rxMbps ?? 0) > 0 ? Math.round(rxMbps!) : 0;
+  const tx = Number.isFinite(txMbps) && (txMbps ?? 0) > 0 ? Math.round(txMbps!) : 0;
+  if (rx > 0 && tx > 0) return `RX ${rx} / TX ${tx} Mbps`;
+  if (rx > 0) return `RX ${rx} Mbps`;
+  if (tx > 0) return `TX ${tx} Mbps`;
+  const fb = Number.isFinite(fallbackMbps) && (fallbackMbps ?? 0) > 0 ? Math.round(fallbackMbps!) : 0;
+  if (fb > 0) return `${fb} Mbps Wi-Fi`;
+  return 'Wi-Fi';
+}
+
 export function toPublicSatelliteConfig(cfg: SatelliteConfig): PublicSatelliteConfig {
   return {
     id: cfg.id,
@@ -568,7 +583,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
         result.wifiStations.push({
           iface: currentWifiIface,
           mac: normalizeMac(qca[1]),
-          txRateMbps: Math.max(txRate, rxRate),
+          txRateMbps: txRate,
           rxRateMbps: rxRate,
           signalDbm: rssi > 0 ? -95 + rssi : rssi,
           rxBytes: 0,
@@ -618,6 +633,9 @@ export interface TopologyNode {
   connectionType?: 'ethernet' | 'wifi';
   linkSpeedMbps?: number;
   linkSpeedLabel?: string;
+  wifiRxMbps?: number;
+  wifiTxMbps?: number;
+  wifiSignalDbm?: number;
   portLabel?: string;
   childCount: number;
   collapsed: boolean;
@@ -1013,18 +1031,20 @@ export function buildTopologyGraph(
           const cy = placed.childYs[idx];
           const clientNodeId = `client:${child.host.ip}`;
           const connType = child.link?.connectionType;
-          const speedMbps = child.link?.linkSpeedMbps || 0;
-          // Only display Ethernet negotiation rate for verified Ethernet links;
-          // never fabricate "1 GbE" on wireless or unknown clients
+          const wifiRxMbps = connType === 'wifi' ? child.link?.wifiRxMbps : undefined;
+          const wifiTxMbps = connType === 'wifi' ? child.link?.wifiTxMbps : undefined;
+          const wifiSignalDbm = connType === 'wifi' ? child.link?.signalDbm : undefined;
+          // Per-client Ethernet port speed cannot be reliably ascertained on L2 bridges;
+          // show Wi-Fi RX/TX PHY rates for wireless clients and plain "Ethernet" for wired clients.
+          const speedMbps =
+            connType === 'wifi'
+              ? Math.max(wifiRxMbps || 0, wifiTxMbps || 0, child.link?.linkSpeedMbps || 0)
+              : 0;
           const speedLabel =
             connType === 'wifi'
-              ? speedMbps > 0
-                ? formatLinkSpeed(speedMbps, 'wifi', true)
-                : 'Wi-Fi'
+              ? formatWifiRatesLabel(wifiRxMbps, wifiTxMbps, child.link?.linkSpeedMbps)
               : connType === 'ethernet'
-                ? speedMbps > 0
-                  ? formatLinkSpeed(speedMbps, 'ethernet', true)
-                  : 'Ethernet'
+                ? 'Ethernet'
                 : '';
           const clientRx =
             child.host.rxBps > 0 ? child.host.rxBps : child.link?.rxBps || 0;
@@ -1056,6 +1076,9 @@ export function buildTopologyGraph(
             connectionType: connType,
             linkSpeedMbps: speedMbps,
             linkSpeedLabel: speedLabel || undefined,
+            wifiRxMbps,
+            wifiTxMbps,
+            wifiSignalDbm,
             portLabel: child.link?.portOrRadio,
             childCount: 0,
             collapsed: false,
@@ -1084,16 +1107,18 @@ export function buildTopologyGraph(
       const { host, link } = placed.item.entry;
       const clientNodeId = `client:${host.ip}`;
       const connType = link?.connectionType;
-      const speedMbps = link?.linkSpeedMbps || 0;
+      const wifiRxMbps = connType === 'wifi' ? link?.wifiRxMbps : undefined;
+      const wifiTxMbps = connType === 'wifi' ? link?.wifiTxMbps : undefined;
+      const wifiSignalDbm = connType === 'wifi' ? link?.signalDbm : undefined;
+      const speedMbps =
+        connType === 'wifi'
+          ? Math.max(wifiRxMbps || 0, wifiTxMbps || 0, link?.linkSpeedMbps || 0)
+          : 0;
       const speedLabel =
         connType === 'wifi'
-          ? speedMbps > 0
-            ? formatLinkSpeed(speedMbps, 'wifi', true)
-            : 'Wi-Fi'
+          ? formatWifiRatesLabel(wifiRxMbps, wifiTxMbps, link?.linkSpeedMbps)
           : connType === 'ethernet'
-            ? speedMbps > 0
-              ? formatLinkSpeed(speedMbps, 'ethernet', true)
-              : 'Ethernet'
+            ? 'Ethernet'
             : '';
       const clientActive = hasTangibleTraffic(host.rxBps, host.txBps);
 
@@ -1121,6 +1146,9 @@ export function buildTopologyGraph(
         connectionType: connType,
         linkSpeedMbps: speedMbps,
         linkSpeedLabel: speedLabel || undefined,
+        wifiRxMbps,
+        wifiTxMbps,
+        wifiSignalDbm,
         portLabel: link?.portOrRadio,
         childCount: 0,
         collapsed: false,

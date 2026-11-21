@@ -369,3 +369,206 @@ export function sliceAnalysisToRange(
   };
 }
 
+/**
+ * Target bucket size (ms) for downsampling overview graphs on 15m+ windows.
+ * Keeps charts clean and smooth while zooming reveals full un-downsampled resolution.
+ */
+const SMOOTH_BUCKET_MS: Partial<Record<TimeWindow, number>> = {
+  '15m': 25_000,   // ~36 points across 15m
+  '1h': 120_000,   // ~30 points across 1h
+  '6h': 600_000,   // ~36 points across 6h
+  '24h': 1_800_000, // ~48 points across 24h
+};
+
+/**
+ * Downsamples a single continuous segment into evenly spaced time buckets,
+ * preserving boundary timestamps so clipped chart edges and no-data gaps stay exact.
+ */
+export function downsampleSegment(
+  segment: TrafficPoint[],
+  bucketMs: number
+): TrafficPoint[] {
+  if (segment.length <= 2 || bucketMs <= 0) return segment;
+
+  const buckets = new Map<number, TrafficPoint[]>();
+  for (const p of segment) {
+    const key = Math.floor(p.timestamp / bucketMs);
+    const list = buckets.get(key);
+    if (list) list.push(p);
+    else buckets.set(key, [p]);
+  }
+
+  const keys = Array.from(buckets.keys()).sort((a, b) => a - b);
+  if (keys.length >= segment.length) return segment;
+
+  const result: TrafficPoint[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const group = buckets.get(keys[i])!;
+    const count = group.length;
+    let sumRx = 0;
+    let sumTx = 0;
+    let sumFlows = 0;
+    let sumLoad = 0;
+    let loadCount = 0;
+    let sumTs = 0;
+
+    for (const p of group) {
+      sumRx += p.rxBps;
+      sumTx += p.txBps;
+      sumFlows += p.activeFlows;
+      sumTs += p.timestamp;
+      if (typeof p.routerLoadPct === 'number' && Number.isFinite(p.routerLoadPct)) {
+        sumLoad += p.routerLoadPct;
+        loadCount += 1;
+      }
+    }
+
+    // Preserve exact start/end timestamps of the segment so gap boundaries stay flush
+    const timestamp =
+      i === 0
+        ? group[0].timestamp
+        : i === keys.length - 1
+          ? group[group.length - 1].timestamp
+          : Math.round(sumTs / count);
+
+    result.push({
+      timestamp,
+      rxBps: Math.round(sumRx / count),
+      txBps: Math.round(sumTx / count),
+      activeFlows: Math.round(sumFlows / count),
+      ...(loadCount > 0 ? { routerLoadPct: Math.round(sumLoad / loadCount) } : {}),
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Reduces point density for 15m and larger overview windows so curves are smooth and uncluttered.
+ * Returns original full-resolution segments for 1m/5m or when zoomed in.
+ */
+export function getDisplaySegmentsForAnalysis(
+  analysis: TimeWindowAnalysis,
+  isZoomed: boolean
+): TrafficPoint[][] {
+  if (isZoomed) return analysis.segments;
+  const bucketMs = SMOOTH_BUCKET_MS[analysis.window];
+  if (!bucketMs) return analysis.segments;
+  return analysis.segments.map((seg) => downsampleSegment(seg, bucketMs));
+}
+
+/**
+ * Builds a full-resolution TimeWindowAnalysis for a zoomed sub-range [rawStart, rawEnd],
+ * merging raw high-resolution `history` points whenever available over 1m `rollupHistory`.
+ */
+export function buildZoomedRangeAnalysis(
+  base: TimeWindowAnalysis,
+  rawStart: number,
+  rawEnd: number,
+  fullHistory?: TrafficPoint[],
+  fullRollupHistory?: TrafficPoint[]
+): TimeWindowAnalysis {
+  if (!fullHistory && !fullRollupHistory) {
+    return sliceAnalysisToRange(base, rawStart, rawEnd);
+  }
+
+  const windowStart = Math.max(base.windowStart, Math.min(rawStart, rawEnd));
+  const windowEnd = Math.min(base.windowEnd, Math.max(rawStart, rawEnd));
+  const windowMs = Math.max(1000, windowEnd - windowStart);
+
+  const highResSorted = [...(fullHistory || [])].sort((a, b) => a.timestamp - b.timestamp);
+  const rollupsSorted = [...(fullRollupHistory || [])].sort((a, b) => a.timestamp - b.timestamp);
+
+  // Merge: prefer full high-res history wherever it covers, backfilled by 1m rollups earlier
+  let mergedSeries: TrafficPoint[];
+  if (highResSorted.length === 0) {
+    mergedSeries = rollupsSorted;
+  } else if (rollupsSorted.length === 0) {
+    mergedSeries = highResSorted;
+  } else {
+    const earliestHighRes = highResSorted[0].timestamp;
+    const earlierRollups = rollupsSorted.filter((p) => p.timestamp < earliestHighRes - 30_000);
+    mergedSeries = [...earlierRollups, ...highResSorted].sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  const points = mergedSeries.filter((p) => p.timestamp >= windowStart && p.timestamp <= windowEnd);
+  const gapThreshold = GAP_THRESHOLD_MS[base.window];
+
+  let leadingAnchor: TrafficPoint | null = null;
+  if (points.length > 0) {
+    for (let i = mergedSeries.length - 1; i >= 0; i--) {
+      const candidate = mergedSeries[i];
+      if (candidate.timestamp < windowStart) {
+        if (points[0].timestamp - candidate.timestamp <= gapThreshold) {
+          leadingAnchor = candidate;
+        }
+        break;
+      }
+    }
+  }
+
+  if (points.length === 0) {
+    return {
+      ...base,
+      windowStart,
+      windowEnd,
+      status: 'empty',
+      points: [],
+      segments: [],
+      leadingAnchor: null,
+      noDataRanges: [{ start: windowStart, end: windowEnd }],
+      coveragePct: 0,
+      coveredMs: 0,
+      missingMs: windowMs,
+      summaryText: 'No data recorded in zoomed range',
+    };
+  }
+
+  const noDataRanges: TimeRange[] = [];
+  const segments: TrafficPoint[][] = [];
+  let currentSegment: TrafficPoint[] = [points[0]];
+
+  if (!leadingAnchor && points[0].timestamp - windowStart > gapThreshold) {
+    noDataRanges.push({ start: windowStart, end: points[0].timestamp });
+  }
+
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    if (curr.timestamp - prev.timestamp > gapThreshold) {
+      segments.push(currentSegment);
+      currentSegment = [curr];
+      noDataRanges.push({ start: prev.timestamp, end: curr.timestamp });
+    } else {
+      currentSegment.push(curr);
+    }
+  }
+  segments.push(currentSegment);
+
+  const lastTs = points[points.length - 1].timestamp;
+  if (windowEnd - lastTs > gapThreshold) {
+    noDataRanges.push({ start: lastTs, end: windowEnd });
+  }
+
+  const missingMs = noDataRanges.reduce((acc, r) => acc + Math.max(0, r.end - r.start), 0);
+  const coveredMs = Math.max(0, windowMs - missingMs);
+  const coveragePct = Math.max(0, Math.min(100, Math.round((coveredMs / windowMs) * 100)));
+
+  return {
+    ...base,
+    windowStart,
+    windowEnd,
+    status: noDataRanges.length === 0 ? 'full' : 'partial',
+    points,
+    segments,
+    leadingAnchor,
+    noDataRanges,
+    coveragePct,
+    coveredMs,
+    missingMs,
+    summaryText:
+      noDataRanges.length === 0
+        ? `Zoomed range (${formatDuration(windowMs / 1000)}) · full resolution`
+        : `Zoomed range · ${coveragePct}% data coverage`,
+  };
+}

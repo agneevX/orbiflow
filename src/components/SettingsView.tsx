@@ -7,7 +7,6 @@ import {
   Eye,
   EyeOff,
   FileCog,
-  FileText,
   FolderOpen,
   Globe,
   KeyRound,
@@ -25,7 +24,7 @@ import type {
   TimeFormat,
 } from '../types/telemetry';
 import { formatBytes } from '../lib/formatters';
-import { validateDhcpLeasesPath, validateDnsServer } from '../lib/tablePreferences';
+import { validateDnsServer } from '../lib/tablePreferences';
 import { TechTerm } from './TechTerm';
 import { SatelliteManager, type SatelliteSavePayload } from './SatelliteManager';
 
@@ -77,8 +76,6 @@ export function SettingsView({
   const [inferDeviceNames, setInferDeviceNames] = useState(
     serverConfig.inferDeviceNames !== false
   );
-  const [dhcpLeasesPath, setDhcpLeasesPath] = useState(serverConfig.dhcpLeasesPath || '');
-  const [dhcpPathError, setDhcpPathError] = useState('');
   const [rdnsServer, setRdnsServer] = useState(serverConfig.rdnsServer || '');
   const [rdnsServerError, setRdnsServerError] = useState('');
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(serverConfig.timeFormat || '12h');
@@ -90,7 +87,6 @@ export function SettingsView({
     setPersistenceMode(serverConfig.persistenceMode);
     setCacheDir(serverConfig.cacheDir || '/config/cache');
     setInferDeviceNames(serverConfig.inferDeviceNames !== false);
-    setDhcpLeasesPath(serverConfig.dhcpLeasesPath || '');
     setRdnsServer(serverConfig.rdnsServer || '');
     setTimeFormat(serverConfig.timeFormat || '12h');
   }, [
@@ -98,7 +94,6 @@ export function SettingsView({
     serverConfig.persistenceMode,
     serverConfig.cacheDir,
     serverConfig.inferDeviceNames,
-    serverConfig.dhcpLeasesPath,
     serverConfig.rdnsServer,
     serverConfig.timeFormat,
   ]);
@@ -121,17 +116,11 @@ export function SettingsView({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const pathCheck = validateDhcpLeasesPath(dhcpLeasesPath);
-    if (!pathCheck.ok) {
-      setDhcpPathError(pathCheck.error || 'Invalid DHCP leases path');
-      return;
-    }
     const dnsCheck = validateDnsServer(rdnsServer);
     if (!dnsCheck.ok) {
       setRdnsServerError(dnsCheck.error || 'Invalid reverse DNS server address');
       return;
     }
-    setDhcpPathError('');
     setRdnsServerError('');
     setSaving(true);
     try {
@@ -140,7 +129,6 @@ export function SettingsView({
         persistenceMode,
         cacheDir: cacheDir.trim() || '/config/cache',
         inferDeviceNames,
-        dhcpLeasesPath: pathCheck.value,
         rdnsServer: dnsCheck.value,
         timeFormat,
       });
@@ -391,56 +379,6 @@ export function SettingsView({
               </div>
             </div>
           </label>
-
-          {/* Configurable DHCP Leases File Location */}
-          <div className="space-y-1.5 pt-2 border-t app-border">
-            <div className="flex items-center justify-between gap-2">
-              <label
-                htmlFor="dhcp-leases-path-input"
-                className="flex items-center gap-1.5 text-xs font-medium"
-              >
-                <FileText className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
-                DHCP Leases File Location
-              </label>
-              {dhcpLeasesPath && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDhcpLeasesPath('');
-                    setDhcpPathError('');
-                  }}
-                  className="text-[11px] text-sky-500 hover:text-sky-400"
-                >
-                  Use auto-detect
-                </button>
-              )}
-            </div>
-            <input
-              id="dhcp-leases-path-input"
-              data-testid="dhcp-leases-path-input"
-              type="text"
-              value={dhcpLeasesPath}
-              onChange={(e) => {
-                setDhcpLeasesPath(e.target.value);
-                if (dhcpPathError) setDhcpPathError('');
-              }}
-              placeholder="/tmp/dhcp.leases (leave blank to auto-detect)"
-              className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
-            />
-            {dhcpPathError ? (
-              <p role="alert" className="text-[11px] text-rose-500 font-medium">
-                {dhcpPathError}
-              </p>
-            ) : (
-              <p className="text-[11px] app-text-muted leading-relaxed">
-                Optional router file path for DHCP hostnames (e.g.{' '}
-                <span className="font-mono app-text-secondary">/tmp/dhcp.leases</span> or{' '}
-                <span className="font-mono app-text-secondary">/var/run/dnsmasq.leases</span>).
-                Saved to <span className="font-mono">config.json</span> and synced automatically to
-                the generated router scripts in the Agent tab.
-              </p>
-            )}
-          </div>
         </section>
 
         {/* Public Reverse DNS & Time Display */}
@@ -506,7 +444,7 @@ export function SettingsView({
             <div>
               <div className="flex items-center gap-1.5 text-xs font-medium">
                 <Clock className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
-                <span>Time Format</span>
+                <span>Clock (Time Format)</span>
               </div>
               <p className="text-[11px] app-text-muted mt-0.5">
                 Controls timestamps on graphs, alerts, and connection details.

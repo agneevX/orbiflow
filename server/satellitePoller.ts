@@ -535,12 +535,17 @@ export function convertProbeToTelemetry(
           : `2.4 GHz (${sta.iface})`
         : sta.iface;
 
+    const wifiTxMbps = sta.txRateMbps || 0;
+    const wifiRxMbps = sta.rxRateMbps || 0;
+
     clientsByMac.set(mac, {
       mac,
       ip: ipByMac.get(mac),
       connectionType: 'wifi',
       portOrRadio: bandTag,
-      linkSpeedMbps: sta.txRateMbps || 0,
+      linkSpeedMbps: Math.max(wifiTxMbps, wifiRxMbps),
+      wifiRxMbps,
+      wifiTxMbps,
       signalDbm: sta.signalDbm,
       rxBytes: sta.rxBytes,
       txBytes: sta.txBytes,
@@ -563,7 +568,7 @@ export function convertProbeToTelemetry(
         ip: ipByMac.get(mac),
         connectionType: 'ethernet',
         portOrRadio: matchingPort?.label || `LAN ${entry.portNum}`,
-        linkSpeedMbps: matchingPort?.speedMbps || 0,
+        linkSpeedMbps: 0,
         rxBytes: 0,
         txBytes: 0,
         rxBps: 0,
@@ -601,7 +606,7 @@ export function convertProbeToTelemetry(
         ip: ipByMac.get(mac),
         connectionType: 'ethernet',
         portOrRadio: matchingPort?.label || brIfaceName,
-        linkSpeedMbps: matchingPort?.speedMbps || brIfaceObj?.speedMbps || 0,
+        linkSpeedMbps: 0,
         rxBytes: 0,
         txBytes: 0,
         rxBps: 0,

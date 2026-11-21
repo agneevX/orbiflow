@@ -134,4 +134,42 @@ test('analyzeTimeWindow populates leadingAnchor when a sample immediately preced
   assert.equal(gappedRes.leadingAnchor, null);
 });
 
+test('getDisplaySegmentsForAnalysis downsamples 15m+ windows when unzoomed and preserves full points when zoomed or on 5m', async () => {
+  const { getDisplaySegmentsForAnalysis, buildZoomedRangeAnalysis } = await import('./timeWindowUtils');
+  const now = 1_700_000_000_000;
+  const history: TrafficPoint[] = [];
+  // 300 high-res samples (every 3s over 15 minutes)
+  for (let s = 900; s >= 0; s -= 3) {
+    history.push({
+      timestamp: now - s * 1000,
+      rxBps: 4_000_000 + (s % 30) * 50_000,
+      txBps: 800_000 + (s % 15) * 10_000,
+      activeFlows: 10,
+    });
+  }
 
+  const analysis15m = analyzeTimeWindow('15m', history, [], now);
+  const overviewSegments = getDisplaySegmentsForAnalysis(analysis15m, false);
+  const overviewCount = overviewSegments.flat().length;
+  assert.ok(overviewCount < 55, `Expected downsampled 15m points < 55, got ${overviewCount}`);
+  assert.ok(overviewCount >= 20, `Expected downsampled 15m points >= 20, got ${overviewCount}`);
+
+  // Zooming into a 3-minute slice restores full 3s resolution (~61 points)
+  const zoomed = buildZoomedRangeAnalysis(
+    analysis15m,
+    now - 180_000,
+    now,
+    history,
+    []
+  );
+  const zoomedSegments = getDisplaySegmentsForAnalysis(zoomed, true);
+  assert.ok(
+    zoomedSegments.flat().length >= 58,
+    `Expected full-res zoomed points >= 58, got ${zoomedSegments.flat().length}`
+  );
+
+  // 5m window keeps full high-res points un-downsampled
+  const analysis5m = analyzeTimeWindow('5m', history, [], now);
+  const segs5m = getDisplaySegmentsForAnalysis(analysis5m, false);
+  assert.equal(segs5m.flat().length, analysis5m.points.length);
+});

@@ -32,6 +32,7 @@ test('DEFAULT_CONNECTIONS_TABLE_PREFS matches exact 7 user-friendly default colu
 test('DEFAULT_DEVICES_TABLE_PREFS hides technical MAC and connection count columns by default', () => {
   assert.equal(DEFAULT_DEVICES_TABLE_PREFS.showIp, true);
   assert.equal(DEFAULT_DEVICES_TABLE_PREFS.showVendorSource, true);
+  assert.equal(DEFAULT_DEVICES_TABLE_PREFS.showConnection, true);
   assert.equal(DEFAULT_DEVICES_TABLE_PREFS.showTopServices, true);
   assert.equal(DEFAULT_DEVICES_TABLE_PREFS.showDownload, true);
   assert.equal(DEFAULT_DEVICES_TABLE_PREFS.showUpload, true);

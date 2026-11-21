@@ -4,12 +4,14 @@ import {
   ArrowRight,
   ArrowUp,
   ArrowUpDown,
+  Cable,
   Check,
   Columns3,
   Pencil,
   RotateCcw,
   Search,
   ShieldAlert,
+  Wifi,
   X,
 } from 'lucide-react';
 import type {
@@ -26,6 +28,7 @@ import {
   hasTangibleTraffic,
 } from '../lib/formatters';
 import { DEFAULT_DEVICES_TABLE_PREFS } from '../lib/tablePreferences';
+import { formatWifiRatesLabel } from '../lib/topology';
 import { TechTerm } from './TechTerm';
 
 interface HostsViewProps {
@@ -72,6 +75,7 @@ const DEVICE_COLUMN_ITEMS: Array<{
 }> = [
   { key: 'showIp', label: 'IP Address', section: 'columns' },
   { key: 'showMac', label: 'MAC Address', section: 'columns' },
+  { key: 'showConnection', label: 'Connection / Wi-Fi Rate', section: 'columns' },
   { key: 'showTopServices', label: 'Top Services', section: 'columns' },
   { key: 'showConnections', label: 'Connections Count', section: 'columns' },
   { key: 'showDownload', label: 'Download', section: 'columns' },
@@ -174,7 +178,8 @@ export function HostsView({
 
       if (!q) return true;
       const services = (h.topServices?.length ? h.topServices : h.topApps).join(' ');
-      const haystack = `${h.hostname} ${h.ip} ${h.mac} ${h.vendor} ${services} ${h.ptrHostname || ''}`.toLowerCase();
+      const connHint = h.connectionType === 'wifi' ? `wifi wi-fi ${h.linkRadioOrPort || ''}` : h.connectionType === 'ethernet' ? 'ethernet wired' : '';
+      const haystack = `${h.hostname} ${h.ip} ${h.mac} ${h.vendor} ${services} ${connHint} ${h.ptrHostname || ''}`.toLowerCase();
       return haystack.includes(q);
     });
 
@@ -234,6 +239,7 @@ export function HostsView({
     [
       prefs.showIp,
       prefs.showMac,
+      prefs.showConnection,
       prefs.showTopServices,
       prefs.showConnections,
       prefs.showDownload,
@@ -430,6 +436,14 @@ export function HostsView({
                     <TechTerm
                       label="MAC Address"
                       tip="Hardware network identifier. Addresses with the IEEE locally administered bit set (2nd hex digit 2, 6, a, or e) are flagged as Private MACs."
+                    />
+                  </th>
+                )}
+                {prefs.showConnection && (
+                  <th className="py-2.5 px-3 whitespace-nowrap">
+                    <TechTerm
+                      label="Connection"
+                      tip="Wi-Fi clients show live RX/TX PHY link rates reported by the router or satellite radio. Ethernet clients show Ethernet because per-client wired port speed cannot be reliably determined across L2 bridges."
                     />
                   </th>
                 )}
@@ -667,6 +681,46 @@ export function HostsView({
                                 tip="IEEE 802.3 locally administered (randomized) MAC address. Pinning a custom name by MAC persists across DHCP renewals on your home Wi-Fi."
                               />
                             </div>
+                          )}
+                        </td>
+                      )}
+
+                      {prefs.showConnection && (
+                        <td
+                          data-testid={`host-connection-${host.ip}`}
+                          className="py-2.5 px-3 align-middle whitespace-nowrap"
+                        >
+                          {host.connectionType === 'wifi' ? (
+                            <div className="space-y-0.5">
+                              <div className="inline-flex items-center gap-1.5 font-mono text-[11px] font-medium tabular-nums">
+                                <Wifi className="h-3.5 w-3.5 text-sky-500 shrink-0" aria-hidden="true" />
+                                <span>
+                                  {formatWifiRatesLabel(host.wifiRxMbps, host.wifiTxMbps)}
+                                </span>
+                              </div>
+                              {(host.linkRadioOrPort || host.wifiSignalDbm !== undefined) && (
+                                <div className="text-[11px] app-text-muted font-mono tabular-nums pl-5 leading-4">
+                                  {[
+                                    host.linkRadioOrPort,
+                                    host.wifiSignalDbm !== undefined
+                                      ? `${host.wifiSignalDbm} dBm`
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
+                                </div>
+                              )}
+                            </div>
+                          ) : host.connectionType === 'ethernet' ? (
+                            <div className="inline-flex items-center gap-1.5 text-xs app-text-secondary">
+                              <Cable
+                                className="h-3.5 w-3.5 text-emerald-500 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>Ethernet</span>
+                            </div>
+                          ) : (
+                            <span className="app-text-muted">—</span>
                           )}
                         </td>
                       )}

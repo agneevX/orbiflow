@@ -96,6 +96,8 @@ export interface SatelliteClientLink {
   connectionType: 'ethernet' | 'wifi';
   portOrRadio: string;
   linkSpeedMbps: number;
+  wifiRxMbps?: number;
+  wifiTxMbps?: number;
   signalDbm?: number;
   rxBytes: number;
   txBytes: number;
@@ -240,6 +242,11 @@ export interface HostSummary {
   topApps: string[];
   topServices: string[];
   lastSeen: number;
+  connectionType?: 'ethernet' | 'wifi';
+  linkRadioOrPort?: string;
+  wifiRxMbps?: number;
+  wifiTxMbps?: number;
+  wifiSignalDbm?: number;
 }
 
 export interface ProtocolSummary {
@@ -267,6 +274,8 @@ export interface ClientDestinationLink {
   clientName: string;
   service: string;
   category: DestinationCategory;
+  scope: 'internet' | 'lan';
+  dstIp?: string;
   rxBps: number;
   txBps: number;
   totalBps: number;
@@ -360,6 +369,7 @@ export interface DevicesTablePrefs {
   showIp: boolean;
   showMac: boolean;
   showVendorSource: boolean;
+  showConnection: boolean;
   showTopServices: boolean;
   showConnections: boolean;
   showDownload: boolean;

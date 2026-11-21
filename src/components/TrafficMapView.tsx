@@ -902,11 +902,14 @@ export function TrafficMapView({
 
                   {showPortSpeeds && edge.linkSpeedLabel && (() => {
                     const isClientEdge = edge.targetId.startsWith('client:');
-                    // For wireless clients, keep edge badge concise ("Wi-Fi") rather than a negotiation rate
-                    const displayLabel =
-                      isClientEdge && edge.connectionType === 'wifi'
+                    // Keep client edge badges concise: "Wi-Fi" for wireless, "Ethernet" for wired
+                    const displayLabel = isClientEdge
+                      ? edge.connectionType === 'wifi'
                         ? 'Wi-Fi'
-                        : edge.linkSpeedLabel;
+                        : edge.connectionType === 'ethernet'
+                          ? 'Ethernet'
+                          : edge.linkSpeedLabel
+                      : edge.linkSpeedLabel;
                     const labelWidth = Math.max(38, displayLabel.length * 6.4 + 12);
                     return (
                       <g transform={`translate(${mid.x}, ${mid.y - 12})`}>
@@ -1057,10 +1060,10 @@ export function TrafficMapView({
 
                 {showPortSpeeds && node.kind !== 'internet' && node.linkSpeedLabel && (
                   <div className="mt-0.5 text-[10px] font-mono app-text-muted whitespace-nowrap">
-                    {node.kind === 'client' && node.connectionType === 'wifi'
-                      ? node.portLabel
-                        ? `${node.portLabel} · Wi-Fi`
-                        : 'Wi-Fi'
+                    {node.kind === 'client'
+                      ? node.connectionType === 'wifi'
+                        ? node.linkSpeedLabel
+                        : 'Ethernet'
                       : `${node.portLabel ? `${node.portLabel} · ` : ''}${node.linkSpeedLabel}`}
                   </div>
                 )}
@@ -1126,28 +1129,42 @@ export function TrafficMapView({
 
               {/* Link Metadata */}
               {selectedNode.linkSpeedLabel && (
-                <div className="p-3 rounded-xl border app-border app-input flex items-center justify-between gap-2 text-xs">
-                  <span className="flex items-center gap-1.5 app-text-muted">
-                    {selectedNode.connectionType === 'wifi' ? (
-                      <Wifi className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-                    ) : (
-                      <Cable className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-                    )}
-                    <span>
-                      {selectedNode.kind === 'satellite'
-                        ? selectedNode.connectionType === 'wifi'
-                          ? 'Wi-Fi Backhaul'
-                          : 'Ethernet Backhaul'
-                        : selectedNode.kind === 'router'
-                          ? 'WAN Negotiation'
-                          : selectedNode.connectionType === 'wifi'
-                            ? 'Wi-Fi Link'
-                            : 'Ethernet Link'}
+                <div className="p-3 rounded-xl border app-border app-input space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 app-text-muted">
+                      {selectedNode.connectionType === 'wifi' ? (
+                        <Wifi className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                      ) : (
+                        <Cable className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
+                      )}
+                      <span>
+                        {selectedNode.kind === 'satellite'
+                          ? selectedNode.connectionType === 'wifi'
+                            ? 'Wi-Fi Backhaul'
+                            : 'Ethernet Backhaul'
+                          : selectedNode.kind === 'router'
+                            ? 'WAN Negotiation'
+                            : selectedNode.connectionType === 'wifi'
+                              ? 'Wi-Fi RX / TX'
+                              : 'Connection'}
+                      </span>
                     </span>
-                  </span>
-                  <span className="font-mono font-semibold tabular-nums">
-                    {selectedNode.linkSpeedLabel}
-                  </span>
+                    <span className="font-mono font-semibold tabular-nums">
+                      {selectedNode.kind === 'client' && selectedNode.connectionType === 'ethernet'
+                        ? 'Ethernet'
+                        : selectedNode.linkSpeedLabel}
+                    </span>
+                  </div>
+                  {selectedNode.kind === 'client' &&
+                    selectedNode.connectionType === 'wifi' &&
+                    (selectedNode.portLabel || selectedNode.wifiSignalDbm !== undefined) && (
+                      <div className="flex items-center justify-between text-[11px] app-text-muted font-mono tabular-nums">
+                        <span>{selectedNode.portLabel || 'Wireless'}</span>
+                        {selectedNode.wifiSignalDbm !== undefined && (
+                          <span>Signal {selectedNode.wifiSignalDbm} dBm</span>
+                        )}
+                      </div>
+                    )}
                 </div>
               )}
 

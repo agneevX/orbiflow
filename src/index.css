@@ -137,32 +137,6 @@
     color-scheme: dark;
   }
 
-  html[data-theme="amber"] {
-    --bg-canvas: #11100e;
-    --bg-surface: #1a1815;
-    --bg-sidebar: #161411;
-    --bg-input: #11100e;
-    --bg-hover: rgba(68, 64, 60, 0.45);
-    --border-hairline: #2e2923;
-    --text-primary: #fafaf9;
-    --text-secondary: #e7e5e4;
-    --text-muted: #a8a29e;
-    --accent-rx: #f59e0b;
-    --accent-tx: #2dd4bf;
-    --accent-primary: #f59e0b;
-    --accent-primary-ink: #ffffff;
-    --btn-primary-bg: #b45309;
-    --btn-primary-hover: #d97706;
-    --btn-primary-ink: #ffffff;
-    --btn-warning-bg: #9a3412;
-    --btn-warning-hover: #c2410c;
-    --btn-warning-ink: #ffffff;
-    --tooltip-bg: #292524;
-    --tooltip-border: #44403c;
-    --tooltip-ink: #fafaf9;
-    color-scheme: dark;
-  }
-
   html[data-theme="daylight"] {
     --bg-canvas: #f4f6f9;
     --bg-surface: #ffffff;
@@ -247,8 +221,8 @@
 
 .app-topbar {
   background-color: var(--bg-canvas);
-  background-color: color-mix(in srgb, var(--bg-canvas) 74%, transparent);
-  border-color: color-mix(in srgb, var(--border-hairline) 80%, transparent);
+  background-color: color-mix(in srgb, var(--bg-canvas) 64%, transparent);
+  border-color: color-mix(in srgb, var(--border-hairline) 70%, transparent);
   backdrop-filter: blur(14px) saturate(1.35);
   -webkit-backdrop-filter: blur(14px) saturate(1.35);
 }

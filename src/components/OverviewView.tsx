@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { ArrowDownRight, ArrowUpRight, MonitorSmartphone } from 'lucide-react';
 import type {
   BandwidthUnit,
@@ -13,9 +14,8 @@ import {
   type TimeWindowAnalysis,
 } from '../lib/timeWindowUtils';
 import { ThroughputChart } from './ThroughputChart';
-import { ClientFlowDiagram } from './ClientFlowDiagram';
+import { ClientFlowDiagram, type FlowScopeTab } from './ClientFlowDiagram';
 import {
-  computeWindowPeaks,
   formatBandwidth,
   formatBytes,
   hasTangibleTraffic,
@@ -48,16 +48,12 @@ export function OverviewView({
   onViewAllFlows,
   onOpenHosts,
 }: OverviewViewProps) {
+  const [flowsTab, setFlowsTab] = useState<FlowScopeTab>('internet');
+
   const isLongWindow = timeWindow === '1h' || timeWindow === '6h' || timeWindow === '24h';
   const activeAnalysis =
     windowAvailability[timeWindow] ||
     analyzeTimeWindow(timeWindow, snapshot.history, snapshot.rollupHistory);
-
-  const windowPeaks = computeWindowPeaks(activeAnalysis.points, {
-    rxBps: snapshot.kpis.rxBps,
-    txBps: snapshot.kpis.txBps,
-    routerLoadPct: 0,
-  });
 
   const onlineClientsCount = snapshot.hosts.length;
   const activeClientsCount = snapshot.kpis.activeHosts;
@@ -72,6 +68,7 @@ export function OverviewView({
       { service: string; category: string; bps: number; bytes: number; flows: number }
     >();
     for (const l of snapshot.clientLinks) {
+      if (l.scope === 'lan' || l.category === 'Local Network') continue;
       const cur = map.get(l.service) || {
         service: l.service,
         category: l.category,
@@ -108,14 +105,6 @@ export function OverviewView({
           >
             {formatBandwidth(snapshot.kpis.rxBps, unit)}
           </div>
-          <div className="flex items-center justify-between gap-2 text-[11px] app-text-muted tabular-nums">
-            <span data-testid="kpi-download-peak">
-              {timeWindow} peak:{' '}
-              <span className="font-medium app-text-secondary">
-                {formatBandwidth(windowPeaks.peakRxBps, unit)}
-              </span>
-            </span>
-          </div>
         </div>
 
         <div className="app-surface border rounded-2xl px-4 py-2.5 sm:px-4 sm:py-3 flex flex-col justify-between gap-1">
@@ -128,14 +117,6 @@ export function OverviewView({
             className="font-display text-lg sm:text-xl font-semibold tracking-tight leading-snug tabular-nums"
           >
             {formatBandwidth(snapshot.kpis.txBps, unit)}
-          </div>
-          <div className="flex items-center justify-between gap-2 text-[11px] app-text-muted tabular-nums">
-            <span data-testid="kpi-upload-peak">
-              {timeWindow} peak:{' '}
-              <span className="font-medium app-text-secondary">
-                {formatBandwidth(windowPeaks.peakTxBps, unit)}
-              </span>
-            </span>
           </div>
         </div>
 
@@ -234,6 +215,8 @@ export function OverviewView({
         </div>
         <ThroughputChart
           analysis={activeAnalysis}
+          fullHistory={snapshot.history}
+          fullRollupHistory={snapshot.rollupHistory}
           unit={unit}
           timeFormat={timeFormat}
           theme={theme}
@@ -244,25 +227,56 @@ export function OverviewView({
 
       {/* Device to Destination Flow Diagram */}
       <section className="app-surface border rounded-2xl p-4 sm:p-5">
-        <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-2.5">
           <div>
             <h2 className="font-display text-sm font-semibold">Flows</h2>
             <p className="text-xs app-text-muted mt-0.5">
-              Live traffic paths from local devices to internet services
+              {flowsTab === 'internet'
+                ? 'Live internet traffic paths from top active local devices'
+                : 'Live local network traffic between devices on your LAN'}
             </p>
           </div>
-          <button
-            type="button"
-            data-testid="inspect-connections-btn"
-            onClick={onViewAllFlows}
-            className="text-xs font-medium text-sky-500 hover:text-sky-400 transition-colors whitespace-nowrap"
-          >
-            Inspect connections
-          </button>
+          <div className="flex items-center gap-3">
+            <div
+              role="tablist"
+              aria-label="Traffic flow scope"
+              className="inline-flex items-center h-8 app-input border rounded-xl p-0.5"
+            >
+              {(['internet', 'lan'] as FlowScopeTab[]).map((tab) => {
+                const active = flowsTab === tab;
+                return (
+                  <button
+                    key={tab}
+                    type="button"
+                    role="tab"
+                    data-testid={`flows-tab-${tab}`}
+                    aria-selected={active}
+                    onClick={() => setFlowsTab(tab)}
+                    className={`px-3 h-full rounded-lg text-xs font-medium transition-colors ${
+                      active
+                        ? 'app-surface font-semibold'
+                        : 'app-text-muted hover:opacity-80'
+                    }`}
+                  >
+                    {tab === 'internet' ? 'Internet' : 'LAN'}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              data-testid="inspect-connections-btn"
+              onClick={onViewAllFlows}
+              className="text-xs font-medium text-sky-500 hover:text-sky-400 transition-colors whitespace-nowrap"
+            >
+              Inspect connections
+            </button>
+          </div>
         </div>
 
         <ClientFlowDiagram
           links={snapshot.clientLinks}
+          scope={flowsTab}
           unit={unit}
           theme={theme}
           onSelectFilter={onSelectFilter}

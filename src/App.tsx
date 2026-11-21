@@ -89,6 +89,7 @@ export default function App() {
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('5m');
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
+  const latestSnapshotRef = useRef<DashboardSnapshot | null>(null);
 
   const initialTheme = useMemo(() => loadInitialThemeState(), []);
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialTheme.mode);
@@ -101,8 +102,12 @@ export default function App() {
     return saved === 'MB/s' ? 'MB/s' : 'Mbps';
   });
 
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('orbiflow:sidebarCollapsed') === 'true';
+  });
+
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
-  const [wsConnected, setWsConnected] = useState(false);
   const [selectedFlow, setSelectedFlow] = useState<EnrichedFlow | null>(null);
 
   useEffect(() => {
@@ -154,7 +159,15 @@ export default function App() {
   }, [unit]);
 
   useEffect(() => {
+    localStorage.setItem('orbiflow:sidebarCollapsed', String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
     pausedRef.current = paused;
+    if (!paused && latestSnapshotRef.current) {
+      setSnapshot(latestSnapshotRef.current);
+      setNowTick(Date.now());
+    }
   }, [paused]);
 
   useEffect(() => {
@@ -165,7 +178,10 @@ export default function App() {
     fetch('/api/state')
       .then((res) => (res.ok ? res.json() : null))
       .then((data: DashboardSnapshot | null) => {
-        if (active && data) setSnapshot(data);
+        if (active && data) {
+          latestSnapshotRef.current = data;
+          setSnapshot(data);
+        }
       })
       .catch(() => {});
 
@@ -175,18 +191,21 @@ export default function App() {
       const url = `${proto}//${window.location.host}/ws/dashboard`;
       ws = new WebSocket(url);
 
-      ws.onopen = () => {
-        if (active) setWsConnected(true);
-      };
-
       ws.onmessage = (evt) => {
         if (!active) return;
         try {
           const msg = JSON.parse(evt.data);
           if (msg.type === 'traffic:init') {
-            setSnapshot(msg.data);
-          } else if (msg.type === 'traffic:tick' && !pausedRef.current) {
-            setSnapshot(msg.data);
+            latestSnapshotRef.current = msg.data;
+            if (!pausedRef.current) {
+              setSnapshot(msg.data);
+            }
+          } else if (msg.type === 'traffic:tick') {
+            // Always retain the latest background-collected snapshot even when UI display is paused
+            latestSnapshotRef.current = msg.data;
+            if (!pausedRef.current) {
+              setSnapshot(msg.data);
+            }
           }
         } catch {
           // Ignore invalid JSON frame
@@ -195,7 +214,6 @@ export default function App() {
 
       ws.onclose = () => {
         if (!active) return;
-        setWsConnected(false);
         retryTimer = setTimeout(connect, 2000);
       };
 
@@ -213,6 +231,11 @@ export default function App() {
     };
   }, []);
 
+  const applyUserSnapshot = (next: DashboardSnapshot) => {
+    latestSnapshotRef.current = next;
+    setSnapshot(next);
+  };
+
   const handleToggleSimulator = async (enabled: boolean) => {
     const res = await fetch('/api/simulator', {
       method: 'POST',
@@ -221,7 +244,7 @@ export default function App() {
     });
     if (res.ok) {
       const data = await res.json();
-      if (data.snapshot) setSnapshot(data.snapshot);
+      if (data.snapshot) applyUserSnapshot(data.snapshot);
     }
   };
 
@@ -233,6 +256,9 @@ export default function App() {
     });
     if (res.ok && snapshot) {
       const data = await res.json();
+      if (latestSnapshotRef.current) {
+        latestSnapshotRef.current = { ...latestSnapshotRef.current, rules: data.rules };
+      }
       setSnapshot({ ...snapshot, rules: data.rules });
     }
   };
@@ -246,8 +272,15 @@ export default function App() {
     if (res.ok && snapshot) {
       const data = await res.json();
       if (data.snapshot) {
-        setSnapshot(data.snapshot);
+        applyUserSnapshot(data.snapshot);
       } else {
+        if (latestSnapshotRef.current) {
+          latestSnapshotRef.current = {
+            ...latestSnapshotRef.current,
+            serverConfig: data.serverConfig,
+            serverStats: data.serverStats,
+          };
+        }
         setSnapshot({
           ...snapshot,
           serverConfig: data.serverConfig,
@@ -285,6 +318,12 @@ export default function App() {
     });
     if (res.ok && snapshot) {
       const data = await res.json();
+      if (latestSnapshotRef.current) {
+        latestSnapshotRef.current = {
+          ...latestSnapshotRef.current,
+          notifications: data.notifications,
+        };
+      }
       setSnapshot({ ...snapshot, notifications: data.notifications });
     }
   };
@@ -305,6 +344,14 @@ export default function App() {
 
   const handleAcknowledgeAlert = async (id: string) => {
     await fetch(`/api/alerts/${encodeURIComponent(id)}/ack`, { method: 'POST' });
+    if (latestSnapshotRef.current) {
+      latestSnapshotRef.current = {
+        ...latestSnapshotRef.current,
+        alerts: latestSnapshotRef.current.alerts.map((a) =>
+          a.id === id ? { ...a, acknowledged: true } : a
+        ),
+      };
+    }
     if (snapshot) {
       setSnapshot({
         ...snapshot,
@@ -315,6 +362,9 @@ export default function App() {
 
   const handleClearAlerts = async () => {
     await fetch('/api/alerts/clear', { method: 'POST' });
+    if (latestSnapshotRef.current) {
+      latestSnapshotRef.current = { ...latestSnapshotRef.current, alerts: [] };
+    }
     if (snapshot) {
       setSnapshot({ ...snapshot, alerts: [] });
     }
@@ -332,7 +382,7 @@ export default function App() {
     });
     const data = await res.json();
     if (data.snapshot) {
-      setSnapshot(data.snapshot);
+      applyUserSnapshot(data.snapshot);
     }
   };
 
@@ -342,7 +392,7 @@ export default function App() {
     });
     const data = await res.json();
     if (data.snapshot) {
-      setSnapshot(data.snapshot);
+      applyUserSnapshot(data.snapshot);
     }
   };
 
@@ -365,7 +415,7 @@ export default function App() {
     });
     const data = await res.json().catch(() => ({ ok: false, error: 'Invalid server response' }));
     if (res.ok && data.snapshot) {
-      setSnapshot(data.snapshot);
+      applyUserSnapshot(data.snapshot);
       return { ok: true };
     }
     return { ok: false, error: data.error || 'Failed to save satellite' };
@@ -377,7 +427,7 @@ export default function App() {
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.snapshot) {
-      setSnapshot(data.snapshot);
+      applyUserSnapshot(data.snapshot);
     }
   };
 
@@ -451,7 +501,6 @@ export default function App() {
           setActiveTab(tab);
         }}
         probe={snapshot.probe}
-        wsConnected={wsConnected}
         unackAlerts={unackAlerts}
         themeMode={themeMode}
         effectiveIsDark={effectiveIsDark}
@@ -460,11 +509,9 @@ export default function App() {
         onChangeActiveTheme={handleChangeActiveTheme}
         unit={unit}
         onChangeUnit={setUnit}
-        timeFormat={activeTimeFormat}
-        onChangeTimeFormat={(tf) => {
-          void handleSaveSettings({ timeFormat: tf });
-        }}
         onToggleSimulator={handleToggleSimulator}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
       />
