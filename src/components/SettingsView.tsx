@@ -8,6 +8,7 @@ import {
   FileCog,
   FolderOpen,
   KeyRound,
+  MonitorSmartphone,
   RefreshCw,
 } from 'lucide-react';
 import type { PersistenceMode, ServerConfig, ServerStats } from '../types/telemetry';
@@ -45,6 +46,9 @@ export function SettingsView({
     serverConfig.persistenceMode
   );
   const [cacheDir, setCacheDir] = useState(serverConfig.cacheDir || '/config/cache');
+  const [inferDeviceNames, setInferDeviceNames] = useState(
+    serverConfig.inferDeviceNames !== false
+  );
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
 
@@ -52,6 +56,7 @@ export function SettingsView({
     setProbeToken(serverConfig.probeToken || '');
     setPersistenceMode(serverConfig.persistenceMode);
     setCacheDir(serverConfig.cacheDir || '/config/cache');
+    setInferDeviceNames(serverConfig.inferDeviceNames !== false);
   }, [serverConfig]);
 
   const handleGenerateToken = () => {
@@ -78,6 +83,7 @@ export function SettingsView({
         probeToken: probeToken.trim() || serverConfig.probeToken,
         persistenceMode,
         cacheDir: cacheDir.trim() || '/config/cache',
+        inferDeviceNames,
       });
       setSavedNotice('Settings saved to configuration file');
       setTimeout(() => setSavedNotice(''), 2500);
@@ -292,6 +298,38 @@ export function SettingsView({
           <span>Snapshots recorded: {serverStats.persistedSnapshots}</span>
           <span>Disk usage: {formatBytes(serverStats.diskLogSizeBytes)}</span>
         </div>
+      </section>
+
+      {/* Device Naming */}
+      <section className="app-surface border rounded-2xl p-5 space-y-3">
+        <div>
+          <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+            <MonitorSmartphone className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+            <span>Device Naming</span>
+          </h2>
+          <p className="text-xs app-text-muted mt-1">
+            Control how unnamed local devices (such as devices using Private Wi-Fi MAC addresses)
+            are labeled when no custom alias, LAN DNS, or DHCP hostname is found.
+          </p>
+        </div>
+
+        <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
+          <input
+            type="checkbox"
+            data-testid="infer-device-names-toggle"
+            checked={inferDeviceNames}
+            onChange={(e) => setInferDeviceNames(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
+          />
+          <div>
+            <div className="text-xs font-semibold">Inferred Device Names</div>
+            <div className="text-xs app-text-muted mt-0.5">
+              Infer device types (for example, Apple Device, Gaming Device, or Smart Home / IoT)
+              from active traffic patterns. Turn this off to show raw IP addresses for unnamed
+              devices instead.
+            </div>
+          </div>
+        </label>
       </section>
 
       <div className="flex items-center justify-between gap-4">

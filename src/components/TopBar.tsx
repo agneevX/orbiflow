@@ -36,7 +36,7 @@ export function TopBar({
   const showPauseButton = PAUSABLE_TABS.has(activeTab);
 
   return (
-    <header className="sticky top-0 z-30 h-16 app-canvas border-b app-border px-4 sm:px-6 flex items-center justify-between gap-4">
+    <header className="sticky top-0 z-30 h-16 app-topbar border-b px-4 sm:px-6 flex items-center justify-between gap-4">
       <div className="flex items-center gap-3 min-w-0">
         <button
           type="button"

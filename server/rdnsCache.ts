@@ -18,12 +18,12 @@ export class RdnsCache {
   private config: RdnsConfig;
   private hits = 0;
   private misses = 0;
-  private readonly maxEntries = 2000;
-  private readonly maxConcurrent = 4;
+  private readonly maxEntries = 4000;
+  private readonly maxConcurrent = 12;
 
   constructor(initial?: Partial<RdnsConfig>) {
     this.config = {
-      enabled: initial?.enabled ?? false,
+      enabled: initial?.enabled ?? true,
       ttlSec: initial?.ttlSec ?? 3600,
       skipPrivate: initial?.skipPrivate ?? true,
     };
@@ -58,7 +58,7 @@ export class RdnsCache {
 
   /**
    * Synchronous lookup against the in-memory cache; schedules background PTR lookup
-   * only when rDNS is enabled and the IP is not already cached or in flight.
+   * when rDNS is enabled and the IP is not already cached or in flight.
    */
   public lookup(ip: string, now = Date.now()): string | null {
     if (!ip) return null;
@@ -94,7 +94,7 @@ export class RdnsCache {
         this.setEntry(ip, hostname);
       })
       .catch(() => {
-        // Negative-cache failed/NXDOMAIN lookups so we don't keep hitting DNS
+        // Short negative cache so failed/NXDOMAIN lookups don't hammer DNS
         this.setEntry(ip, null);
       })
       .finally(() => {
@@ -107,9 +107,10 @@ export class RdnsCache {
       const oldestKey = this.cache.keys().next().value;
       if (oldestKey) this.cache.delete(oldestKey);
     }
+    const effectiveTtlSec = hostname ? this.config.ttlSec : Math.min(300, this.config.ttlSec);
     this.cache.set(ip, {
       hostname,
-      expiresAt: now + this.config.ttlSec * 1000,
+      expiresAt: now + effectiveTtlSec * 1000,
     });
   }
 }

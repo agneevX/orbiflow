@@ -388,4 +388,270 @@ test('NotificationDispatcher sends formatted payloads to ntfy and Telegram and v
   assert.equal(calls.length, 2);
 });
 
+test('TrafficMonitorEngine drops closing flows, categorizes via rDNS, and excludes idle 0 B/s flows from active summaries', () => {
+  const engine = new TrafficMonitorEngine();
+  const rdnsMap: Record<string, string> = {
+    '198.51.100.10': 'rr2---sn-example.googlevideo.com',
+    '198.51.100.20': 'idle-node.example.com',
+  };
+  const rdnsLookup = (ip: string) => rdnsMap[ip] ?? null;
+
+  const t0 = 1_720_000_000_000;
+  engine.ingest(
+    {
+      probeId: 'router-eth0',
+      timestamp: t0,
+      source: 'live',
+      iface: { iface: 'eth0', rxBytes: 1_000, txBytes: 500 },
+      arp: [
+        { ip: '192.168.1.42', mac: 'aa:bb:cc:dd:ee:42', device: 'br0', hostname: 'apple-tv' },
+        { ip: '192.168.1.84', mac: 'aa:bb:cc:dd:ee:84', device: 'br0', hostname: 'idle-sensor' },
+      ],
+      flows: [
+        {
+          proto: 'tcp',
+          state: 'ESTABLISHED',
+          src: '192.168.1.42',
+          dst: '198.51.100.10',
+          sport: 50001,
+          dport: 443,
+          txBytes: 1_000,
+          rxBytes: 10_000,
+        },
+        {
+          proto: 'tcp',
+          state: 'ESTABLISHED',
+          src: '192.168.1.84',
+          dst: '198.51.100.20',
+          sport: 50002,
+          dport: 443,
+          txBytes: 500,
+          rxBytes: 500,
+        },
+        {
+          proto: 'tcp',
+          state: 'TIME_WAIT',
+          src: '192.168.1.42',
+          dst: '151.101.65.140',
+          sport: 50003,
+          dport: 443,
+          txBytes: 2_000,
+          rxBytes: 8_000,
+        },
+      ],
+    },
+    rdnsLookup
+  );
+
+  // 1 second later: apple-tv downloads 1 MB/s from YouTube, idle-sensor transfers 0 bytes, TIME_WAIT still present
+  const { dashboard } = engine.ingest(
+    {
+      probeId: 'router-eth0',
+      timestamp: t0 + 1_000,
+      source: 'live',
+      iface: { iface: 'eth0', rxBytes: 1_001_000, txBytes: 50_500 },
+      arp: [
+        { ip: '192.168.1.42', mac: 'aa:bb:cc:dd:ee:42', device: 'br0', hostname: 'apple-tv' },
+        { ip: '192.168.1.84', mac: 'aa:bb:cc:dd:ee:84', device: 'br0', hostname: 'idle-sensor' },
+      ],
+      flows: [
+        {
+          proto: 'tcp',
+          state: 'ESTABLISHED',
+          src: '192.168.1.42',
+          dst: '198.51.100.10',
+          sport: 50001,
+          dport: 443,
+          txBytes: 51_000,
+          rxBytes: 1_010_000,
+        },
+        {
+          proto: 'tcp',
+          state: 'ESTABLISHED',
+          src: '192.168.1.84',
+          dst: '198.51.100.20',
+          sport: 50002,
+          dport: 443,
+          txBytes: 500,
+          rxBytes: 500,
+        },
+        {
+          proto: 'tcp',
+          state: 'TIME_WAIT',
+          src: '192.168.1.42',
+          dst: '151.101.65.140',
+          sport: 50003,
+          dport: 443,
+          txBytes: 2_000,
+          rxBytes: 8_000,
+        },
+      ],
+    },
+    rdnsLookup
+  );
+
+  // TIME_WAIT must be dropped completely
+  assert.equal(dashboard.flows.some((f) => f.dstIp === '151.101.65.140'), false);
+  assert.equal(dashboard.flows.every((f) => f.state === 'ESTABLISHED'), true);
+
+  // Active YouTube flow is categorized via rDNS
+  const ytFlow = dashboard.flows.find((f) => f.dstIp === '198.51.100.10');
+  assert.ok(ytFlow);
+  assert.equal(ytFlow.dstService, 'YouTube');
+  assert.equal(ytFlow.dstCategory, 'Streaming');
+  assert.equal(ytFlow.dstHost, 'rr2---sn-example.googlevideo.com');
+
+  // Idle 0 B/s flow is excluded from KPI activeFlows, clientLinks, and remotes
+  assert.equal(dashboard.kpis.activeFlows, 1);
+  assert.equal(dashboard.kpis.activeHosts, 1);
+  assert.equal(dashboard.clientLinks.length, 1);
+  assert.equal(dashboard.clientLinks[0].category, 'Streaming');
+  assert.equal(dashboard.remotes.length, 1);
+  assert.equal(dashboard.remotes[0].ip, '198.51.100.10');
+  assert.equal(dashboard.remotes[0].category, 'Streaming');
+
+  // CSV export uses Category column instead of State
+  const csv = exportFlowsToCsv(dashboard.flows);
+  assert.ok(csv.startsWith('Protocol,Application,Category,'));
+  assert.ok(!csv.split('\n')[0].includes('State'));
+  assert.ok(csv.includes('Streaming'));
+});
+
+test('TrafficMonitorEngine throttles topServices updates, toggles inferDeviceNames live, and preserves slow-polled system metrics', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_730_000_000_000;
+
+  // Tick 1: includes system metrics, unnamed device hits Apple APNs -> inferred name & Apple service
+  engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 1_000, txBytes: 500 },
+    arp: [{ ip: '192.168.1.91', mac: 'da:a1:19:4c:82:10', device: 'br0' }],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.91',
+        dst: '17.57.144.84',
+        sport: 50000,
+        dport: 5223,
+        txBytes: 10_000,
+        rxBytes: 50_000,
+      },
+    ],
+    system: {
+      hostname: 'my-router',
+      kernel: '6.6',
+      arch: 'armv7l',
+      uptimeSec: 9999,
+      load1m: 0.42,
+      memUsedPct: 33.5,
+      conntrackCount: 120,
+      conntrackMax: 32768,
+    },
+  });
+
+  // Tick 2 (+3s): omits system metrics, switches traffic to Netflix — topServices should stay throttled for 15s
+  const { dashboard: d2 } = engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0 + 3_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 101_000, txBytes: 10_500 },
+    arp: [{ ip: '192.168.1.91', mac: 'da:a1:19:4c:82:10', device: 'br0' }],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.91',
+        dst: '23.246.18.145',
+        sport: 50001,
+        dport: 443,
+        txBytes: 10_000,
+        rxBytes: 500_000,
+      },
+    ],
+  });
+
+  // System metrics from Tick 1 are preserved when omitted on fast tick
+  assert.equal(d2.probe.hostname, 'my-router');
+  assert.equal(d2.probe.uptimeSec, 9999);
+  assert.equal(d2.probe.load1m, 0.42);
+  assert.equal(d2.probe.memUsedPct, 33.5);
+
+  // Top services stays cached ('Apple') at t0 + 3s (under 15s refresh window)
+  const h2 = d2.hosts.find((h) => h.ip === '192.168.1.91');
+  assert.ok(h2);
+  assert.deepEqual(h2.topServices, ['Apple']);
+
+  // Tick 3 (+16s): topServices refreshes to include Netflix
+  const { dashboard: d3 } = engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0 + 16_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 601_000, txBytes: 20_500 },
+    arp: [{ ip: '192.168.1.91', mac: 'da:a1:19:4c:82:10', device: 'br0' }],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.91',
+        dst: '23.246.18.145',
+        sport: 50001,
+        dport: 443,
+        txBytes: 20_000,
+        rxBytes: 1_000_000,
+      },
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.91',
+        dst: '17.57.144.84',
+        sport: 50000,
+        dport: 5223,
+        txBytes: 12_000,
+        rxBytes: 60_000,
+      },
+    ],
+  });
+
+  const h3 = d3.hosts.find((h) => h.ip === '192.168.1.91');
+  assert.ok(h3);
+  assert.equal(h3.hostname, 'Apple Device (.91)');
+  assert.equal(h3.nameSource, 'fingerprint');
+  assert.deepEqual(h3.topServices, ['Netflix', 'Apple']);
+
+  // Disabling inferDeviceNames immediately updates snapshot host & flow names to raw IP
+  engine.updateServerConfig({ inferDeviceNames: false });
+  const snapDisabled = engine.getSnapshot();
+  const hDisabled = snapDisabled.hosts.find((h) => h.ip === '192.168.1.91');
+  assert.equal(hDisabled?.hostname, '192.168.1.91');
+  assert.equal(hDisabled?.nameSource, 'ip');
+
+  // Re-enabling restores inferred name immediately
+  engine.updateServerConfig({ inferDeviceNames: true });
+  const snapReenabled = engine.getSnapshot();
+  const hReenabled = snapReenabled.hosts.find((h) => h.ip === '192.168.1.91');
+  assert.equal(hReenabled?.hostname, 'Apple Device (.91)');
+  assert.equal(hReenabled?.nameSource, 'fingerprint');
+});
+
+test('generatePythonProbe includes daemonize, logging options, and slow-polled system interval without urllib/argparse', () => {
+  const py = generatePythonProbe({
+    wsUrl: 'ws://192.168.1.10:3000/ws/ingest',
+    httpUrl: 'http://192.168.1.10:3000/api/ingest',
+    token: 'of_test',
+    iface: 'eth0',
+    intervalSec: 3,
+    probeId: 'router-eth0',
+  });
+  assert.ok(py.includes('INTERVAL_SEC = 3'));
+  assert.ok(py.includes('SYS_INTERVAL_SEC = 30'));
+  assert.ok(py.includes('--daemonize'));
+  assert.ok(py.includes('def daemonize_process('));
+  assert.ok(py.includes('--log-level'));
+  assert.ok(py.includes('--log-file'));
+  assert.ok(!py.includes('import argparse'));
+  assert.ok(!py.includes('import urllib'));
+});
 

@@ -240,11 +240,15 @@ export default function App() {
     });
     if (res.ok && snapshot) {
       const data = await res.json();
-      setSnapshot({
-        ...snapshot,
-        serverConfig: data.serverConfig,
-        serverStats: data.serverStats,
-      });
+      if (data.snapshot) {
+        setSnapshot(data.snapshot);
+      } else {
+        setSnapshot({
+          ...snapshot,
+          serverConfig: data.serverConfig,
+          serverStats: data.serverStats,
+        });
+      }
     }
   };
 
@@ -330,7 +334,7 @@ export default function App() {
 
   useEffect(() => {
     if (paused) return;
-    const id = setInterval(() => setNowTick(Date.now()), 5000);
+    const id = setInterval(() => setNowTick(Date.now()), 3000);
     return () => clearInterval(id);
   }, [paused]);
 

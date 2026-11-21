@@ -1,8 +1,24 @@
-import { useState } from 'react';
-import { ArrowRight, Check, Pencil, RotateCcw, ShieldAlert, X } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import {
+  ArrowDown,
+  ArrowRight,
+  ArrowUp,
+  ArrowUpDown,
+  Check,
+  Pencil,
+  RotateCcw,
+  Search,
+  ShieldAlert,
+  X,
+} from 'lucide-react';
 import type { BandwidthUnit, DeviceNameSource, HostSummary } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
-import { formatBandwidth, formatBytes } from '../lib/formatters';
+import {
+  compareIpv4,
+  formatBandwidth,
+  formatBytes,
+  hasTangibleTraffic,
+} from '../lib/formatters';
 import { TechTerm } from './TechTerm';
 
 interface HostsViewProps {
@@ -13,6 +29,9 @@ interface HostsViewProps {
   onSaveAlias: (alias: { key: string; matchBy: 'mac' | 'ip'; name: string }) => Promise<void>;
   onDeleteAlias: (key: string) => Promise<void>;
 }
+
+type HostSortKey = 'totalBytes' | 'rxBps' | 'txBps' | 'activeFlows' | 'hostname' | 'ip';
+type HostTypeFilter = 'ALL' | 'NAMED' | 'INFERRED' | 'IP_ONLY' | 'PRIVATE_MAC';
 
 const SOURCE_META: Record<DeviceNameSource, { label: string; tip: string }> = {
   alias: {
@@ -29,11 +48,11 @@ const SOURCE_META: Record<DeviceNameSource, { label: string; tip: string }> = {
   },
   fingerprint: {
     label: 'Inferred',
-    tip: 'No DHCP or DNS name was found (common with Private Wi-Fi MACs). Device type was inferred from its live traffic destinations. Click the rename icon to label it permanently.',
+    tip: 'No DHCP or DNS name was found (common with Private Wi-Fi MACs). Device type was inferred from its live traffic destinations. You can disable inferred names in Settings or click the rename icon.',
   },
   ip: {
     label: 'IP Only',
-    tip: 'No hostname resolved yet from LAN DNS, DHCP, or traffic patterns. Click the rename icon to label this device.',
+    tip: 'No hostname resolved from LAN DNS or DHCP. Click the rename icon to assign a permanent custom name.',
   },
 };
 
@@ -50,7 +69,84 @@ export function HostsView({
   const [matchBy, setMatchBy] = useState<'mac' | 'ip'>('mac');
   const [saving, setSaving] = useState(false);
 
-  const randomizedCount = hosts.filter((h) => h.isRandomizedMac).length;
+  const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState<HostTypeFilter>('ALL');
+  const [showIdle, setShowIdle] = useState(false);
+  // Default to Total Data descending so rows remain calm and do not jump every poll tick
+  const [sortKey, setSortKey] = useState<HostSortKey>('totalBytes');
+  const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
+
+  const activeHostCount = useMemo(
+    () => hosts.filter((h) => hasTangibleTraffic(h.rxBps, h.txBps)).length,
+    [hosts]
+  );
+  const idleCount = Math.max(0, hosts.length - activeHostCount);
+  const randomizedCount = useMemo(
+    () =>
+      hosts.filter(
+        (h) => (showIdle || hasTangibleTraffic(h.rxBps, h.txBps)) && h.isRandomizedMac
+      ).length,
+    [hosts, showIdle]
+  );
+
+  const toggleSort = (key: HostSortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortKey(key);
+      setSortDir(key === 'hostname' || key === 'ip' ? 'asc' : 'desc');
+    }
+  };
+
+  const renderSortIcon = (key: HostSortKey) => {
+    if (sortKey !== key) {
+      return <ArrowUpDown className="h-3 w-3 opacity-45 shrink-0" aria-hidden="true" />;
+    }
+    return sortDir === 'desc' ? (
+      <ArrowDown className="h-3 w-3 text-sky-500 shrink-0" aria-hidden="true" />
+    ) : (
+      <ArrowUp className="h-3 w-3 text-sky-500 shrink-0" aria-hidden="true" />
+    );
+  };
+
+  const filteredHosts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const list = hosts.filter((h) => {
+      if (!showIdle && !hasTangibleTraffic(h.rxBps, h.txBps)) return false;
+
+      if (typeFilter === 'NAMED') {
+        if (h.nameSource !== 'alias' && h.nameSource !== 'lan-dns' && h.nameSource !== 'dhcp') {
+          return false;
+        }
+      } else if (typeFilter === 'INFERRED') {
+        if (h.nameSource !== 'fingerprint') return false;
+      } else if (typeFilter === 'IP_ONLY') {
+        if (h.nameSource !== 'ip') return false;
+      } else if (typeFilter === 'PRIVATE_MAC') {
+        if (!h.isRandomizedMac) return false;
+      }
+
+      if (!q) return true;
+      const services = (h.topServices?.length ? h.topServices : h.topApps).join(' ');
+      const haystack = `${h.hostname} ${h.ip} ${h.mac} ${h.vendor} ${services} ${h.ptrHostname || ''}`.toLowerCase();
+      return haystack.includes(q);
+    });
+
+    const dir = sortDir === 'desc' ? -1 : 1;
+    return [...list].sort((a, b) => {
+      let cmp = 0;
+      if (sortKey === 'hostname') {
+        cmp = a.hostname.localeCompare(b.hostname, undefined, { sensitivity: 'base' });
+      } else if (sortKey === 'ip') {
+        cmp = compareIpv4(a.ip, b.ip);
+      } else {
+        cmp = a[sortKey] - b[sortKey];
+      }
+      if (cmp !== 0) return cmp * dir;
+      // Deterministic IP tie-breaker prevents rows with identical rates from shuffling
+      return compareIpv4(a.ip, b.ip);
+    });
+  }, [hosts, search, typeFilter, showIdle, sortKey, sortDir]);
 
   const startEdit = (host: HostSummary) => {
     setEditingIp(host.ip);
@@ -82,47 +178,109 @@ export function HostsView({
 
   return (
     <div className="space-y-4">
-      <div className="app-surface border rounded-2xl overflow-hidden">
-        <div className="px-5 py-4 border-b app-border flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="font-display text-sm font-semibold">
-              Discovered Local Devices ({hosts.length})
-            </h2>
-            <p className="text-xs app-text-muted mt-0.5">
-              Resolved via{' '}
-              <TechTerm
-                label="LAN DNS (PTR)"
-                tip="Queries your local DNS server or custom router dnsmasq for private IP reverse lookups, independent of external WAN rDNS."
-              />
-              , router{' '}
-              <TechTerm
-                label="ARP / DHCP"
-                tip="Combines /proc/net/arp neighbor entries with custom dnsmasq leases, static dhcp-host records, and /etc/hosts."
-              />
-              , and passive traffic hints for nameless devices
-            </p>
-          </div>
+      {/* Search, Filter & Activity Controls */}
+      <div className="app-surface border rounded-2xl p-4 flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 min-w-[220px]">
+          <Search
+            className="h-4 w-4 app-text-muted absolute left-3 top-1/2 -translate-y-1/2"
+            aria-hidden="true"
+          />
+          <input
+            type="text"
+            data-testid="hosts-search-input"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter by device name, IP, MAC, vendor, or service..."
+            aria-label="Filter devices"
+            className="w-full app-input border rounded-xl pl-9 pr-3 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label htmlFor="hosts-type-filter" className="text-xs app-text-muted whitespace-nowrap">
+            Filter
+          </label>
+          <select
+            id="hosts-type-filter"
+            data-testid="hosts-filter-select"
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as HostTypeFilter)}
+            className="app-input border rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+          >
+            <option value="ALL">All Devices</option>
+            <option value="NAMED">Named (Custom / DNS / DHCP)</option>
+            <option value="INFERRED">Inferred Names</option>
+            <option value="IP_ONLY">IP Only</option>
+            <option value="PRIVATE_MAC">Private MAC</option>
+          </select>
+        </div>
+
+        <label className="inline-flex items-center gap-1.5 text-xs app-text-muted cursor-pointer whitespace-nowrap select-none">
+          <input
+            type="checkbox"
+            data-testid="show-idle-hosts-toggle"
+            checked={showIdle}
+            onChange={(e) => setShowIdle(e.target.checked)}
+            className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
+          />
+          <span>Show idle{idleCount > 0 ? ` (${idleCount})` : ''}</span>
+        </label>
+
+        <div className="flex items-center gap-3 ml-auto">
           {randomizedCount > 0 && (
-            <div className="flex items-center gap-1.5 text-xs text-amber-500">
+            <div className="hidden sm:flex items-center gap-1.5 text-xs text-amber-500 whitespace-nowrap">
               <ShieldAlert className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               <TechTerm
-                label={`${randomizedCount} Private MAC ${randomizedCount === 1 ? 'device' : 'devices'}`}
-                tip="Devices using IEEE 802.3 locally administered (randomized) MAC addresses (iOS Private Wi-Fi Address, Android Randomized MAC, Windows). Per-network randomized MACs usually stay consistent on your home SSID so pinning a custom name by MAC works across IP renewals."
+                label={`${randomizedCount} Private MAC`}
+                tip="Devices using IEEE 802.3 locally administered (randomized) MAC addresses. Pinning a custom name by MAC works across IP renewals on your home Wi-Fi."
               />
             </div>
           )}
+          <div className="text-xs font-mono app-text-muted tabular-nums whitespace-nowrap">
+            {filteredHosts.length} / {showIdle ? hosts.length : activeHostCount}{' '}
+            {showIdle ? 'devices' : 'active'}
+          </div>
         </div>
+      </div>
 
+      {/* Fixed-Layout Stable Devices Table */}
+      <div className="app-surface border rounded-2xl overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="w-full min-w-[980px] table-fixed text-left border-collapse">
+            <colgroup>
+              <col className="w-[23%]" />
+              <col className="w-[12%]" />
+              <col className="w-[15%]" />
+              <col className="w-[17%]" />
+              <col className="w-[6%]" />
+              <col className="w-[8%]" />
+              <col className="w-[8%]" />
+              <col className="w-[6%]" />
+              <col className="w-[5%]" />
+            </colgroup>
             <thead>
               <tr className="border-b app-border text-[11px] font-medium app-text-muted app-sidebar">
-                <th className="py-2.5 px-3">Device Name / Type</th>
                 <th className="py-2.5 px-3">
-                  <TechTerm
-                    label="IP Address"
-                    tip="The private IPv4 address assigned to this device on your local home network."
-                  />
+                  <button
+                    type="button"
+                    data-testid="sort-hosts-hostname"
+                    onClick={() => toggleSort('hostname')}
+                    className="inline-flex items-center gap-1 hover:opacity-80 whitespace-nowrap"
+                  >
+                    <span>Device Name / Type</span>
+                    {renderSortIcon('hostname')}
+                  </button>
+                </th>
+                <th className="py-2.5 px-3">
+                  <button
+                    type="button"
+                    data-testid="sort-hosts-ip"
+                    onClick={() => toggleSort('ip')}
+                    className="inline-flex items-center gap-1 hover:opacity-80 whitespace-nowrap"
+                  >
+                    <span>IP Address</span>
+                    {renderSortIcon('ip')}
+                  </button>
                 </th>
                 <th className="py-2.5 px-3">
                   <TechTerm
@@ -131,29 +289,91 @@ export function HostsView({
                   />
                 </th>
                 <th className="py-2.5 px-3">Top Services</th>
-                <th className="py-2.5 px-3 text-right">Conns</th>
-                <th className="py-2.5 px-3 text-right">Download</th>
-                <th className="py-2.5 px-3 text-right">Upload</th>
-                <th className="py-2.5 px-3 text-right">Total</th>
-                <th className="py-2.5 px-3 text-right">Action</th>
+                <th className="py-2.5 px-2 text-right">
+                  <button
+                    type="button"
+                    data-testid="sort-hosts-flows"
+                    onClick={() => toggleSort('activeFlows')}
+                    className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
+                  >
+                    <span>Conns</span>
+                    {renderSortIcon('activeFlows')}
+                  </button>
+                </th>
+                <th className="py-2.5 px-2 text-right">
+                  <button
+                    type="button"
+                    data-testid="sort-hosts-rx"
+                    onClick={() => toggleSort('rxBps')}
+                    className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
+                  >
+                    <span>Download</span>
+                    {renderSortIcon('rxBps')}
+                  </button>
+                </th>
+                <th className="py-2.5 px-2 text-right">
+                  <button
+                    type="button"
+                    data-testid="sort-hosts-tx"
+                    onClick={() => toggleSort('txBps')}
+                    className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
+                  >
+                    <span>Upload</span>
+                    {renderSortIcon('txBps')}
+                  </button>
+                </th>
+                <th className="py-2.5 px-2 text-right">
+                  <button
+                    type="button"
+                    data-testid="sort-hosts-total"
+                    onClick={() => toggleSort('totalBytes')}
+                    className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
+                  >
+                    <span>Total</span>
+                    {renderSortIcon('totalBytes')}
+                  </button>
+                </th>
+                <th className="py-2.5 px-3 text-right">Flows</th>
               </tr>
             </thead>
             <tbody className="divide-y app-border text-xs">
-              {hosts.length === 0 ? (
+              {filteredHosts.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-10 text-center app-text-muted">
-                    No local devices reported by agent yet.
+                  <td colSpan={9} className="py-10 text-center app-text-muted space-y-2">
+                    <div>
+                      {!showIdle && idleCount > 0 && !search && typeFilter === 'ALL'
+                        ? `No devices with active traffic right now (${idleCount} idle devices hidden).`
+                        : 'No devices match the current filters.'}
+                    </div>
+                    {!showIdle && idleCount > 0 && !search && typeFilter === 'ALL' && (
+                      <button
+                        type="button"
+                        onClick={() => setShowIdle(true)}
+                        className="px-3.5 py-1.5 rounded-xl border app-border app-surface app-row-hover text-xs font-medium transition-colors"
+                      >
+                        Show {idleCount} Idle Devices
+                      </button>
+                    )}
                   </td>
                 </tr>
               ) : (
-                hosts.map((host) => {
+                filteredHosts.map((host) => {
                   const isEditing = editingIp === host.ip;
                   const sourceMeta = SOURCE_META[host.nameSource] || SOURCE_META.ip;
                   const hasValidMac = host.mac && host.mac !== '00:00:00:00:00:00';
+                  const serviceList =
+                    host.topServices && host.topServices.length > 0
+                      ? host.topServices
+                      : host.topApps;
+                  const serviceText = serviceList.length > 0 ? serviceList.join(', ') : 'Idle';
 
                   return (
-                    <tr key={host.ip} className="app-row-hover transition-colors">
-                      <td className="py-3 px-3 min-w-[180px]">
+                    <tr
+                      key={host.ip}
+                      data-testid={`host-row-${host.ip}`}
+                      className={`app-row-hover transition-colors ${isEditing ? '' : 'h-[64px]'}`}
+                    >
+                      <td className="py-2.5 px-3 align-middle overflow-hidden">
                         {isEditing ? (
                           <div className="space-y-1.5" data-testid="device-rename-form">
                             <div className="flex items-center gap-1.5">
@@ -172,7 +392,7 @@ export function HostsView({
                                 }}
                                 placeholder="e.g. Alex's iPhone"
                                 autoFocus
-                                className="w-40 app-input border rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-sky-500"
+                                className="w-full min-w-0 app-input border rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-sky-500"
                               />
                               <button
                                 type="button"
@@ -180,7 +400,7 @@ export function HostsView({
                                 disabled={saving}
                                 onClick={() => void commitEdit(host)}
                                 aria-label="Save custom device name"
-                                className="p-1 rounded-lg app-btn-primary"
+                                className="p-1 rounded-lg app-btn-primary shrink-0"
                               >
                                 <Check className="h-3.5 w-3.5" />
                               </button>
@@ -188,13 +408,13 @@ export function HostsView({
                                 type="button"
                                 onClick={cancelEdit}
                                 aria-label="Cancel rename"
-                                className="p-1 rounded-lg border app-border app-row-hover app-text-muted"
+                                className="p-1 rounded-lg border app-border app-row-hover app-text-muted shrink-0"
                               >
                                 <X className="h-3.5 w-3.5" />
                               </button>
                             </div>
-                            <div className="flex items-center gap-3 text-[11px] app-text-muted">
-                              <span>Pin by:</span>
+                            <div className="flex items-center gap-2.5 text-[11px] app-text-muted flex-wrap">
+                              <span>Pin:</span>
                               {hasValidMac && (
                                 <label className="inline-flex items-center gap-1 cursor-pointer">
                                   <input
@@ -233,82 +453,94 @@ export function HostsView({
                             </div>
                           </div>
                         ) : (
-                          <div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-medium">{host.hostname}</span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1 min-w-0">
+                              <span className="font-medium truncate" title={host.hostname}>
+                                {host.hostname}
+                              </span>
                               <button
                                 type="button"
                                 data-testid={`rename-host-${host.ip}`}
                                 onClick={() => startEdit(host)}
                                 aria-label={`Rename ${host.hostname}`}
                                 title="Assign custom device name (saved in /config/config.json)"
-                                className="p-1 rounded-lg app-text-muted hover:text-sky-500 transition-colors"
+                                className="p-1 rounded-lg app-text-muted hover:text-sky-500 transition-colors shrink-0"
                               >
                                 <Pencil className="h-3 w-3" aria-hidden="true" />
                               </button>
                             </div>
-                            <div className="text-[11px] app-text-muted flex items-center gap-1.5 flex-wrap">
-                              <span>{host.vendor}</span>
-                              <span aria-hidden="true">·</span>
-                              <TechTerm
-                                label={sourceMeta.label}
-                                tip={
-                                  host.ptrHostname
-                                    ? `${sourceMeta.tip} Full PTR: ${host.ptrHostname}`
-                                    : sourceMeta.tip
-                                }
-                              />
+                            <div className="text-[11px] app-text-muted flex items-center gap-1.5 min-w-0 leading-4">
+                              <span className="truncate" title={host.vendor}>
+                                {host.vendor}
+                              </span>
+                              <span aria-hidden="true" className="shrink-0">
+                                ·
+                              </span>
+                              <span className="shrink-0">
+                                <TechTerm
+                                  label={sourceMeta.label}
+                                  tip={
+                                    host.ptrHostname
+                                      ? `${sourceMeta.tip} Full PTR: ${host.ptrHostname}`
+                                      : sourceMeta.tip
+                                  }
+                                />
+                              </span>
                             </div>
                           </div>
                         )}
                       </td>
-                      <td className="py-3 px-3 font-mono whitespace-nowrap tabular-nums">
+                      <td className="py-2.5 px-3 align-middle font-mono whitespace-nowrap tabular-nums truncate">
                         {host.ip}
                       </td>
-                      <td className="py-3 px-3 font-mono app-text-muted whitespace-nowrap">
-                        <div>{host.mac}</div>
+                      <td className="py-2.5 px-3 align-middle font-mono app-text-muted overflow-hidden">
+                        <div className="truncate" title={host.mac}>
+                          {host.mac}
+                        </div>
                         {host.isRandomizedMac && (
-                          <div className="text-[11px] font-sans text-amber-500 mt-0.5">
+                          <div className="text-[11px] font-sans text-amber-500 leading-4 truncate">
                             <TechTerm
                               label="Private MAC"
-                              tip="IEEE 802.3 locally administered (randomized) MAC address. On iOS/Android home Wi-Fi this address typically stays fixed per SSID, so naming it by MAC persists across DHCP renewals."
+                              tip="IEEE 802.3 locally administered (randomized) MAC address. Pinning a custom name by MAC persists across DHCP renewals on your home Wi-Fi."
                             />
                           </div>
                         )}
                       </td>
                       <td
-                        className="py-3 px-3 app-text-secondary whitespace-nowrap max-w-[170px] truncate"
-                        title={host.topApps.join(' · ')}
+                        className="py-2.5 px-3 align-middle app-text-secondary overflow-hidden"
+                        title={serviceText}
                       >
-                        {host.topApps.length > 0 ? host.topApps.join(' · ') : 'Idle'}
+                        <div className="text-xs leading-snug line-clamp-2 break-words">
+                          {serviceText}
+                        </div>
                       </td>
-                      <td className="py-3 px-3 text-right font-mono tabular-nums">
+                      <td className="py-2.5 px-2 align-middle text-right font-mono tabular-nums whitespace-nowrap">
                         {host.activeFlows}
                       </td>
                       <td
-                        className="py-3 px-3 text-right font-mono whitespace-nowrap tabular-nums"
+                        className="py-2.5 px-2 align-middle text-right font-mono whitespace-nowrap tabular-nums"
                         style={{ color: theme.rxColor }}
                       >
                         {formatBandwidth(host.rxBps, unit)}
                       </td>
                       <td
-                        className="py-3 px-3 text-right font-mono whitespace-nowrap tabular-nums"
+                        className="py-2.5 px-2 align-middle text-right font-mono whitespace-nowrap tabular-nums"
                         style={{ color: theme.txColor }}
                       >
                         {formatBandwidth(host.txBps, unit)}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono whitespace-nowrap tabular-nums">
+                      <td className="py-2.5 px-2 align-middle text-right font-mono whitespace-nowrap tabular-nums">
                         {formatBytes(host.totalBytes)}
                       </td>
-                      <td className="py-3 px-3 text-right whitespace-nowrap">
+                      <td className="py-2.5 px-3 align-middle text-right whitespace-nowrap">
                         <button
                           type="button"
                           onClick={() => onInspectHostFlows(host)}
                           aria-label={`View connections for ${host.hostname}`}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl border app-border app-row-hover transition-colors"
+                          title={`Inspect connections for ${host.hostname}`}
+                          className="inline-flex items-center justify-center h-7 w-7 rounded-lg border app-border app-row-hover app-text-secondary transition-colors"
                         >
-                          Connections
-                          <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                          <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
                         </button>
                       </td>
                     </tr>

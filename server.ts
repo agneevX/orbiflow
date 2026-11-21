@@ -33,12 +33,13 @@ const IS_DEV =
   process.argv.includes('--dev') || !fs.existsSync(path.join(DIST_PATH, 'index.html'));
 
 const DEFAULT_STORAGE_MODE: PersistenceMode = 'memory';
-const DEFAULT_RDNS_ENABLED = false;
+const DEFAULT_RDNS_ENABLED = true;
 const DEFAULT_RDNS_TTL_SEC = 3600;
 const DEFAULT_LAN_DNS_ENABLED = true;
 const DEFAULT_LAN_DNS_SERVER = '';
 const DEFAULT_LAN_DNS_TTL_SEC = 300;
 const DEFAULT_STRIP_LAN_DOMAIN = true;
+const DEFAULT_INFER_DEVICE_NAMES = true;
 
 async function startServer() {
   const app = express();
@@ -68,6 +69,7 @@ async function startServer() {
   let activeProbeToken = '';
   let needsInitialConfigWrite = false;
   let initialSimulatorEnabled = IS_DEV;
+  let initialInferDeviceNames = DEFAULT_INFER_DEVICE_NAMES;
 
   // Load persistent user config from /config/config.json before loading cached traffic history
   const savedUserConfig = storage.loadUserConfig();
@@ -91,8 +93,7 @@ async function startServer() {
       storage.setCacheDir(savedUserConfig.cacheDir);
     }
     rdnsCache.updateConfig({
-      enabled:
-        typeof savedUserConfig.rdnsEnabled === 'boolean' ? savedUserConfig.rdnsEnabled : undefined,
+      enabled: true,
       ttlSec:
         typeof savedUserConfig.rdnsTtlSec === 'number' ? savedUserConfig.rdnsTtlSec : undefined,
       skipPrivate:
@@ -118,6 +119,9 @@ async function startServer() {
           ? savedUserConfig.stripLanDomain
           : undefined,
     });
+    if (typeof savedUserConfig.inferDeviceNames === 'boolean') {
+      initialInferDeviceNames = savedUserConfig.inferDeviceNames;
+    }
     if (savedUserConfig.deviceAliases && typeof savedUserConfig.deviceAliases === 'object') {
       engine.setDeviceAliases(savedUserConfig.deviceAliases);
     }
@@ -147,6 +151,7 @@ async function startServer() {
     lanDnsServer: lanResolver.getConfig().server,
     lanDnsTtlSec: lanResolver.getConfig().ttlSec,
     stripLanDomain: lanResolver.getConfig().stripDomain,
+    inferDeviceNames: initialInferDeviceNames,
   });
 
   // Restore cached traffic history if disk persistence is active
@@ -173,6 +178,7 @@ async function startServer() {
       lanDnsServer: snap.serverConfig.lanDnsServer,
       lanDnsTtlSec: snap.serverConfig.lanDnsTtlSec,
       stripLanDomain: snap.serverConfig.stripLanDomain,
+      inferDeviceNames: snap.serverConfig.inferDeviceNames,
       deviceAliases: engine.getDeviceAliases(),
       notifications: notifier.getConfig(),
       rules: snap.rules,
@@ -192,9 +198,13 @@ async function startServer() {
     for (let m = 0; m < 179; m++) {
       engine.ingest(simulator.nextSnapshot(threeHoursAgo + m * 60_000, 60));
     }
-    const startRecent = now - 150_000;
-    for (let s = 0; s <= 30; s++) {
-      engine.ingest(simulator.nextSnapshot(startRecent + s * 5_000, 5));
+    const startRecent = now - 60 * 3_000;
+    for (let s = 0; s <= 60; s++) {
+      engine.ingest(
+        simulator.nextSnapshot(startRecent + s * 3_000, 3),
+        (ip) => rdnsCache.lookup(ip),
+        (ip) => lanResolver.lookup(ip)
+      );
     }
   }
 
@@ -327,14 +337,14 @@ async function startServer() {
     ws.send(JSON.stringify({ type: 'traffic:init', data: engine.getSnapshot() }));
   });
 
-  // Dev-only simulator cadence
+  // Dev-only simulator cadence (3s live updates)
   const simTimer =
     IS_DEV && simulator
       ? setInterval(() => {
           if (engine.hasActiveLiveProbe()) return;
           if (!engine.isSimulatorEnabled()) return;
-          handleIngestSnapshot(simulator.nextSnapshot(Date.now(), 2));
-        }, 2000)
+          handleIngestSnapshot(simulator.nextSnapshot(Date.now(), 3));
+        }, 3000)
       : null;
 
   app.get('/api/health', (_req, res) => {
@@ -409,17 +419,27 @@ async function startServer() {
     if (body.persistenceMode === 'memory' || body.persistenceMode === 'disk') {
       storage.setMode(body.persistenceMode);
     }
+    const nextInferDeviceNames =
+      typeof body.inferDeviceNames === 'boolean'
+        ? body.inferDeviceNames
+        : engine.getSnapshot().serverConfig.inferDeviceNames;
+
     engine.updateServerConfig({
       probeToken: nextProbeToken,
       persistenceMode: storage.getMode(),
       cacheDir: storage.getConfiguredCacheDir(),
+      inferDeviceNames: nextInferDeviceNames,
     });
     syncStatsAndPersist();
     persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
     const snap = engine.getSnapshot();
     broadcastDashboard({ type: 'traffic:tick', data: snap });
-    res.json({ serverConfig: snap.serverConfig, serverStats: snap.serverStats });
+    res.json({
+      serverConfig: snap.serverConfig,
+      serverStats: snap.serverStats,
+      snapshot: snap,
+    });
   });
 
   app.post('/api/notifications', (req, res) => {

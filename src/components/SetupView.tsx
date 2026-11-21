@@ -22,14 +22,14 @@ const ARTIFACT_META: Array<{
     label: 'Python 3 WebSocket',
     filename: 'orbi_probe.py',
     summary:
-      'Recommended for Linux routers with Python 3 (including Entware python3-light). Uses only core Python modules with built-in WebSocket framing and 5s low-CPU polling.',
+      'Recommended for Linux routers with Python 3 (including Entware python3-light). Polls WAN traffic every 3s, refreshes router uptime/load every 30s, and supports -d (silent background daemon) plus logging flags.',
   },
   {
     id: 'ash',
     label: 'BusyBox Shell (Zero Deps)',
     filename: 'orbi-probe.sh',
     summary:
-      'Runs on minimal BusyBox routers without installing Python. Streams /proc/net/nf_conntrack and interface byte counters via awk & curl every 5s.',
+      'Runs on minimal BusyBox routers without installing Python. Streams active /proc/net/nf_conntrack flows and interface byte counters via awk & curl.',
   },
   {
     id: 'c',
@@ -68,7 +68,7 @@ export function SetupView({ defaultToken = '' }: SetupViewProps) {
   const [serverPort, setServerPort] = useState('3000');
   const [token, setToken] = useState(defaultToken);
   const [iface, setIface] = useState('eth0');
-  const [intervalSec, setIntervalSec] = useState('5');
+  const [intervalSec, setIntervalSec] = useState('3');
   const [activeArtifact, setActiveArtifact] = useState<ArtifactTab>('python');
   const [copied, setCopied] = useState(false);
 
@@ -82,7 +82,7 @@ export function SetupView({ defaultToken = '' }: SetupViewProps) {
       httpUrl: `http://${serverHost}:${serverPort}/api/ingest`,
       token,
       iface,
-      intervalSec: Math.max(1, Number(intervalSec) || 5),
+      intervalSec: Math.max(1, Number(intervalSec) || 3),
       probeId: `router-${iface || 'wan'}`,
     }),
     [serverHost, serverPort, token, iface, intervalSec]
@@ -232,8 +232,13 @@ echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct
 # 3. Install lightweight Python 3 (or use the BusyBox Shell script with zero packages)
 opkg update && opkg install python3-light
 
-# 4. Copy orbi_probe.py to /opt/bin/orbi_probe.py and launch
-chmod +x /opt/bin/orbi_probe.py && /opt/bin/orbi_probe.py &`}
+# 4. Copy orbi_probe.py to /opt/bin/orbi_probe.py and run silently in the background
+chmod +x /opt/bin/orbi_probe.py
+/opt/bin/orbi_probe.py -d --pid-file /var/run/orbi-probe.pid
+
+# Optional: foreground debug logging or background file logging
+# /opt/bin/orbi_probe.py --log-level debug
+# /opt/bin/orbi_probe.py -d --log-file /tmp/orbi-probe.log --sys-interval 30`}
         </pre>
       </section>
 

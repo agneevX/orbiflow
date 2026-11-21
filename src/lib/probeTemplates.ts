@@ -11,14 +11,34 @@ export function generatePythonProbe(cfg: ProbeConfigOptions): string {
   return `#!/usr/bin/env python3
 """
 OrbiFlow Low-CPU Router Traffic Collector
-Requires only Python 3 core modules (works with Entware python3-light) — zero pip packages.
-Polls every ${cfg.intervalSec}s with minimal CPU overhead.
+Requires only Python 3 core modules (works on Entware python3-light) — zero external packages.
+
+Usage:
+  orbi_probe.py [options]
+
+Options:
+  -d, --daemonize           Run silently in the background (no log output unless --log-file is set)
+  --pid-file PATH           Write daemon PID to PATH (removed on clean exit)
+  --log-level LEVEL         Log verbosity: silent, error, info (default), debug
+  -q, --quiet               Disable all log output (same as --log-level silent)
+  -v, --verbose             Enable debug logging (same as --log-level debug)
+  --log-file PATH           Append timestamped logs to PATH
+  -i, --interval SEC        Fast traffic polling interval in seconds (default: ${cfg.intervalSec})
+  --sys-interval SEC        Router uptime/load/memory polling interval in seconds (default: 30)
+  --neigh-interval SEC      ARP/DHCP neighbor refresh interval in seconds (default: 15)
+  --iface NAME              WAN interface name (default: ${cfg.iface})
+  --ws-url URL              Collector WebSocket URL
+  --token TOKEN             Shared router agent token
+  --probe-id ID             Unique probe identifier
+  -h, --help                Show this help text and exit
 """
 import base64
 import json
 import os
+import signal
 import socket
 import struct
+import sys
 import time
 
 WS_URL = "${cfg.wsUrl}"
@@ -26,6 +46,154 @@ AUTH_TOKEN = "${cfg.token}"
 WAN_IFACE = "${cfg.iface}"
 PROBE_ID = "${cfg.probeId}"
 INTERVAL_SEC = ${cfg.intervalSec}
+SYS_INTERVAL_SEC = 30
+NEIGH_INTERVAL_SEC = 15
+
+LOG_LEVELS = {"silent": 0, "error": 1, "info": 2, "debug": 3}
+
+
+class ProbeLogger:
+    def __init__(self, level="info", log_file=None):
+        self.level = LOG_LEVELS.get(level, 2)
+        self.log_file = log_file
+
+    def _emit(self, threshold, tag, msg):
+        if self.level < threshold:
+            return
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        line = f"{ts} [orbi-probe] [{tag}] {msg}"
+        if self.log_file:
+            try:
+                with open(self.log_file, "a") as f:
+                    f.write(line + "\\n")
+            except OSError:
+                pass
+        else:
+            try:
+                sys.stderr.write(line + "\\n")
+                sys.stderr.flush()
+            except OSError:
+                pass
+
+    def error(self, msg):
+        self._emit(1, "ERROR", msg)
+
+    def info(self, msg):
+        self._emit(2, "INFO", msg)
+
+    def debug(self, msg):
+        self._emit(3, "DEBUG", msg)
+
+
+def print_usage():
+    sys.stdout.write(__doc__.strip() + "\\n")
+
+
+def parse_args(argv):
+    cfg = {
+        "ws_url": WS_URL,
+        "token": AUTH_TOKEN,
+        "iface": WAN_IFACE,
+        "probe_id": PROBE_ID,
+        "interval": float(INTERVAL_SEC),
+        "sys_interval": float(SYS_INTERVAL_SEC),
+        "neigh_interval": float(NEIGH_INTERVAL_SEC),
+        "daemonize": False,
+        "pid_file": None,
+        "log_level": None,
+        "log_file": None,
+    }
+    i = 0
+    n = len(argv)
+    while i < n:
+        arg = argv[i]
+
+        def need_val(flag):
+            nonlocal i
+            if i + 1 >= n:
+                sys.stderr.write(f"Missing value for {flag}\\n")
+                sys.exit(2)
+            i += 1
+            return argv[i]
+
+        if arg in ("-h", "--help"):
+            print_usage()
+            sys.exit(0)
+        elif arg in ("-d", "--daemonize"):
+            cfg["daemonize"] = True
+        elif arg in ("-q", "--quiet"):
+            cfg["log_level"] = "silent"
+        elif arg in ("-v", "--verbose"):
+            cfg["log_level"] = "debug"
+        elif arg == "--log-level":
+            lvl = need_val(arg).lower()
+            if lvl not in LOG_LEVELS:
+                sys.stderr.write(f"Invalid --log-level: {lvl} (use silent, error, info, debug)\\n")
+                sys.exit(2)
+            cfg["log_level"] = lvl
+        elif arg == "--log-file":
+            cfg["log_file"] = need_val(arg)
+        elif arg == "--pid-file":
+            cfg["pid_file"] = need_val(arg)
+        elif arg in ("-i", "--interval"):
+            cfg["interval"] = max(1.0, float(need_val(arg)))
+        elif arg == "--sys-interval":
+            cfg["sys_interval"] = max(5.0, float(need_val(arg)))
+        elif arg == "--neigh-interval":
+            cfg["neigh_interval"] = max(5.0, float(need_val(arg)))
+        elif arg == "--iface":
+            cfg["iface"] = need_val(arg)
+        elif arg == "--ws-url":
+            cfg["ws_url"] = need_val(arg)
+        elif arg == "--token":
+            cfg["token"] = need_val(arg)
+        elif arg == "--probe-id":
+            cfg["probe_id"] = need_val(arg)
+        else:
+            sys.stderr.write(f"Unknown option: {arg} (use --help for usage)\\n")
+            sys.exit(2)
+        i += 1
+
+    # When daemonized without --log-file, suppress all log output
+    if cfg["log_level"] is None:
+        if cfg["daemonize"] and not cfg["log_file"]:
+            cfg["log_level"] = "silent"
+        else:
+            cfg["log_level"] = "info"
+    return cfg
+
+
+def daemonize_process(pid_file=None):
+    if not hasattr(os, "fork"):
+        return
+    pid = os.fork()
+    if pid > 0:
+        os._exit(0)
+    os.setsid()
+    pid = os.fork()
+    if pid > 0:
+        os._exit(0)
+    try:
+        os.chdir("/")
+    except OSError:
+        pass
+    os.umask(0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    devnull_fd = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        try:
+            os.dup2(devnull_fd, fd)
+        except OSError:
+            pass
+    if devnull_fd > 2:
+        os.close(devnull_fd)
+    if pid_file:
+        try:
+            with open(pid_file, "w") as f:
+                f.write(f"{os.getpid()}\\n")
+        except OSError:
+            pass
 
 
 def read_text(path):
@@ -101,7 +269,6 @@ def discover_dnsmasq_files():
                 if hp and hp not in hosts_paths:
                     hosts_paths.append(hp)
             elif line.startswith("dhcp-host="):
-                # Parse dhcp-host=<mac>,<ip>,<name> or <mac>,<name>,<ip>
                 tokens = [t.strip() for t in line.split("=", 1)[1].split(",") if t.strip()]
                 ip_val = None
                 host_val = None
@@ -153,25 +320,48 @@ def read_arp_table(leases):
                     "device": dev,
                     "hostname": leases.get(ip, ""),
                 }
-    # Merge live DHCP leases even if ARP entry is temporarily stale
     return list(entries_by_ip.values())
 
 
-def read_conntrack_lines(limit=350):
+SKIP_STATES = (
+    "TIME_WAIT",
+    "CLOSE_WAIT",
+    "FIN_WAIT",
+    "CLOSE ",
+    "SYN_SENT",
+    "SYN_RECV",
+    "[UNREPLIED]",
+)
+
+
+def read_conntrack_lines(limit=500):
     lines = []
     for path in ("/proc/net/nf_conntrack", "/proc/net/ip_conntrack"):
         if os.path.exists(path):
             with open(path, "r") as f:
                 for line in f:
-                    if "bytes=" in line and "bytes=0 " not in line:
-                        lines.append(line.strip())
-                        if len(lines) >= limit:
-                            break
+                    if "bytes=" not in line or "bytes=0 " in line:
+                        continue
+                    if any(s in line for s in SKIP_STATES):
+                        continue
+                    lines.append(line.strip())
+                    if len(lines) >= limit:
+                        break
             break
     return lines
 
 
-def read_system_metrics(flow_count):
+def read_static_host_info():
+    u = os.uname()
+    return {
+        "hostname": socket.gethostname(),
+        "kernel": u.release,
+        "arch": u.machine,
+        "conntrackMax": read_int("/proc/sys/net/netfilter/nf_conntrack_max") or 32768,
+    }
+
+
+def read_system_metrics(flow_count, static_info):
     uptime_raw = read_text("/proc/uptime").split()
     uptime_sec = int(float(uptime_raw[0])) if uptime_raw else 0
     load_raw = read_text("/proc/loadavg").split()
@@ -185,14 +375,14 @@ def read_system_metrics(flow_count):
             avail_kb = max(avail_kb, int(line.split()[1]))
     mem_pct = round(((total_kb - avail_kb) / total_kb) * 100, 1) if total_kb else 0.0
     return {
-        "hostname": socket.gethostname(),
-        "kernel": os.uname().release,
-        "arch": os.uname().machine,
+        "hostname": static_info["hostname"],
+        "kernel": static_info["kernel"],
+        "arch": static_info["arch"],
         "uptimeSec": uptime_sec,
         "load1m": load_1m,
         "memUsedPct": mem_pct,
         "conntrackCount": flow_count,
-        "conntrackMax": read_int("/proc/sys/net/netfilter/nf_conntrack_max") or 32768,
+        "conntrackMax": static_info["conntrackMax"],
     }
 
 
@@ -310,36 +500,91 @@ class MiniWebSocket:
 
 
 def main():
-    ensure_conntrack_acct()
-    ws = MiniWebSocket(WS_URL, AUTH_TOKEN)
-    while True:
+    cfg = parse_args(sys.argv[1:])
+    if cfg["daemonize"]:
+        daemonize_process(cfg["pid_file"])
+    elif cfg["pid_file"]:
         try:
-            if ws.sock is None:
-                ws.connect()
-                ws.send_json({"type": "probe:hello", "probeId": PROBE_ID, "iface": WAN_IFACE})
+            with open(cfg["pid_file"], "w") as f:
+                f.write(f"{os.getpid()}\\n")
+        except OSError:
+            pass
 
-            leases = read_dhcp_leases()
-            arp = read_arp_table(leases)
-            conntrack_lines = read_conntrack_lines()
-            payload = {
-                "type": "probe:snapshot",
-                "data": {
-                    "probeId": PROBE_ID,
-                    "timestamp": int(time.time() * 1000),
+    logger = ProbeLogger(level=cfg["log_level"], log_file=cfg["log_file"])
+    running = True
+
+    def handle_stop(_signum, _frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, handle_stop)
+    signal.signal(signal.SIGINT, handle_stop)
+
+    ensure_conntrack_acct()
+    static_info = read_static_host_info()
+    ws = MiniWebSocket(cfg["ws_url"], cfg["token"])
+    leases = {}
+    arp = []
+    last_neigh_refresh = 0.0
+    last_sys_refresh = 0.0
+
+    logger.info(
+        f"Starting probe={cfg['probe_id']} iface={cfg['iface']} "
+        f"interval={cfg['interval']}s sys_interval={cfg['sys_interval']}s target={cfg['ws_url']}"
+    )
+
+    try:
+        while running:
+            try:
+                if ws.sock is None:
+                    ws.connect()
+                    ws.send_json({
+                        "type": "probe:hello",
+                        "probeId": cfg["probe_id"],
+                        "iface": cfg["iface"],
+                    })
+                    logger.info(f"Connected to {cfg['ws_url']}")
+
+                now_ts = time.time()
+                if now_ts - last_neigh_refresh >= cfg["neigh_interval"]:
+                    leases = read_dhcp_leases()
+                    arp = read_arp_table(leases)
+                    last_neigh_refresh = now_ts
+                    logger.debug(f"Refreshed {len(arp)} ARP neighbors / {len(leases)} DHCP leases")
+
+                conntrack_lines = read_conntrack_lines()
+                data = {
+                    "probeId": cfg["probe_id"],
+                    "timestamp": int(now_ts * 1000),
                     "source": "live",
-                    "iface": read_iface_counters(WAN_IFACE),
+                    "iface": read_iface_counters(cfg["iface"]),
                     "arp": arp,
                     "flows": [],
                     "rawConntrackLines": conntrack_lines,
-                    "system": read_system_metrics(len(conntrack_lines)),
-                },
-            }
-            ws.send_json(payload)
-            time.sleep(INTERVAL_SEC)
-        except Exception as exc:
-            print(f"[orbi-probe] reconnecting after error: {exc}")
-            ws.close()
-            time.sleep(5)
+                }
+
+                if now_ts - last_sys_refresh >= cfg["sys_interval"]:
+                    data["system"] = read_system_metrics(len(conntrack_lines), static_info)
+                    last_sys_refresh = now_ts
+                    logger.debug(
+                        f"System metrics: load={data['system']['load1m']} mem={data['system']['memUsedPct']}%"
+                    )
+
+                ws.send_json({"type": "probe:snapshot", "data": data})
+                logger.debug(f"Sent snapshot: flows={len(conntrack_lines)}")
+                time.sleep(cfg["interval"])
+            except Exception as exc:
+                logger.error(f"Reconnecting after error: {exc}")
+                ws.close()
+                time.sleep(3)
+    finally:
+        ws.close()
+        if cfg["pid_file"]:
+            try:
+                os.remove(cfg["pid_file"])
+            except OSError:
+                pass
+        logger.info("Probe stopped")
 
 
 if __name__ == "__main__":
@@ -350,32 +595,41 @@ if __name__ == "__main__":
 export function generateBusyBoxAshProbe(cfg: ProbeConfigOptions): string {
   return `#!/bin/sh
 # OrbiFlow Zero-Dependency BusyBox Shell Collector
-# Polls every ${cfg.intervalSec}s with minimal router CPU usage.
+# Polls WAN traffic every ${cfg.intervalSec}s and router uptime/load every ~30s.
 
 SERVER_HTTP_URL="${cfg.httpUrl}"
 AUTH_TOKEN="${cfg.token}"
 WAN_IFACE="${cfg.iface}"
 PROBE_ID="${cfg.probeId}"
 INTERVAL_SEC=${cfg.intervalSec}
+SYS_EVERY=10
 
 echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null || true
+
+HOSTNAME=$(hostname 2>/dev/null || echo router-gateway)
+KERNEL=$(uname -r)
+ARCH=$(uname -m)
+CT_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 32768)
+TICK=0
 
 while true; do
   RX_BYTES=$(cat /sys/class/net/$WAN_IFACE/statistics/rx_bytes 2>/dev/null || echo 0)
   TX_BYTES=$(cat /sys/class/net/$WAN_IFACE/statistics/tx_bytes 2>/dev/null || echo 0)
-  UPTIME=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
-  LOAD1M=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
-  HOSTNAME=$(hostname 2>/dev/null || echo router-gateway)
-  KERNEL=$(uname -r)
-  ARCH=$(uname -m)
+
+  SYS_JSON=""
+  if [ $((TICK % SYS_EVERY)) -eq 0 ]; then
+    UPTIME=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+    LOAD1M=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
+    SYS_JSON="\\"system\\":{\\"hostname\\":\\"$HOSTNAME\\",\\"kernel\\":\\"$KERNEL\\",\\"arch\\":\\"$ARCH\\",\\"uptimeSec\\":$UPTIME,\\"load1m\\":$LOAD1M,\\"memUsedPct\\":34,\\"conntrackCount\\":0,\\"conntrackMax\\":$CT_MAX},"
+  fi
+  TICK=$((TICK + 1))
 
   JSON_PAYLOAD=$(awk -v probe="$PROBE_ID" -v iface="$WAN_IFACE" \\
-    -v rxb="$RX_BYTES" -v txb="$TX_BYTES" \\
-    -v up="$UPTIME" -v load="$LOAD1M" -v host="$HOSTNAME" -v kern="$KERNEL" -v arch="$ARCH" '
+    -v rxb="$RX_BYTES" -v txb="$TX_BYTES" -v sys="$SYS_JSON" '
     BEGIN {
       printf "{\\"probeId\\":\\"%s\\",\\"source\\":\\"live\\",", probe;
       printf "\\"iface\\":{\\"iface\\":\\"%s\\",\\"rxBytes\\":%s,\\"txBytes\\":%s},", iface, rxb, txb;
-      printf "\\"system\\":{\\"hostname\\":\\"%s\\",\\"kernel\\":\\"%s\\",\\"arch\\":\\"%s\\",\\"uptimeSec\\":%s,\\"load1m\\":%s,\\"memUsedPct\\":34,\\"conntrackCount\\":0,\\"conntrackMax\\":32768},", host, kern, arch, up, load;
+      if (sys != "") printf "%s", sys;
       printf "\\"arp\\":[";
       arp_first = 1;
     }
@@ -386,14 +640,14 @@ while true; do
         arp_first = 0;
       }
     }
-    FILENAME == "/proc/net/nf_conntrack" && /bytes=/ {
+    FILENAME == "/proc/net/nf_conntrack" && /bytes=/ && !/TIME_WAIT|CLOSE_WAIT|FIN_WAIT|SYN_SENT|SYN_RECV|UNREPLIED/ {
       if (ct_count == 0) printf "],\\"rawConntrackLines\\":[";
       else printf ",";
       gsub(/\\\\/, "\\\\\\\\");
       gsub(/"/, "\\\\\\"");
       printf "\\"%s\\"", $0;
       ct_count++;
-      if (ct_count >= 250) nextfile;
+      if (ct_count >= 400) nextfile;
     }
     END {
       if (ct_count == 0) printf "],\\"rawConntrackLines\\":[";
@@ -590,13 +844,15 @@ PIDFILE=/var/run/orbi-probe.pid
 start() {
   echo "Starting OrbiFlow WAN monitor agent..."
   echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null || true
-  start-stop-daemon -S -b -m -p "$PIDFILE" -x /opt/bin/python3 -- "$PROG"
+  /opt/bin/python3 "$PROG" -d --pid-file "$PIDFILE"
 }
 
 stop() {
   echo "Stopping OrbiFlow WAN monitor agent..."
-  start-stop-daemon -K -p "$PIDFILE"
-  rm -f "$PIDFILE"
+  if [ -f "$PIDFILE" ]; then
+    kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    rm -f "$PIDFILE"
+  fi
 }
 `;
 }

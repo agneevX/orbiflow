@@ -99,6 +99,20 @@ test('resolveHostIdentity prioritizes alias > LAN DNS PTR > DHCP > fingerprint >
   });
   assert.equal(aliased.nameSource, 'alias');
   assert.equal(aliased.hostname, "Alex's iPhone");
+
+  // 4. Disabling inferDeviceNames falls back to raw IP & generic Private MAC vendor
+  const noInfer = resolveHostIdentity({
+    ip,
+    mac,
+    deviceHint: 'Apple Device',
+    aliases: {},
+    stripDomain: true,
+    inferDeviceNames: false,
+  });
+  assert.equal(noInfer.nameSource, 'ip');
+  assert.equal(noInfer.hostname, ip);
+  assert.equal(noInfer.vendor, 'Private / Randomized MAC');
+  assert.equal(noInfer.deviceHint, 'Apple Device');
 });
 
 test('LanResolver only resolves private IPs and parses custom DNS server lists', () => {

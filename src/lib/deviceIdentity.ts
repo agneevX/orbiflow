@@ -242,6 +242,7 @@ export interface ResolveHostIdentityInput {
   deviceHint?: string | null;
   aliases: Record<string, DeviceAlias>;
   stripDomain: boolean;
+  inferDeviceNames?: boolean;
 }
 
 export interface ResolvedHostIdentity {
@@ -258,6 +259,7 @@ export interface ResolvedHostIdentity {
 export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHostIdentity {
   const normMac = normalizeMac(input.mac);
   const { vendor: baseVendor, isRandomized } = lookupMacVendor(normMac, input.providedVendor);
+  const allowInferred = input.inferDeviceNames !== false;
   const deviceHint = input.deviceHint || undefined;
 
   const macAliasKey = normMac !== ZERO_MAC ? `mac:${normMac}` : null;
@@ -276,7 +278,7 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
       : undefined;
 
   const vendor =
-    isRandomized && deviceHint
+    allowInferred && isRandomized && deviceHint
       ? `${deviceHint} · Private MAC`
       : baseVendor;
 
@@ -314,7 +316,7 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
     };
   }
 
-  if (deviceHint) {
+  if (allowInferred && deviceHint) {
     const lastOctet = input.ip.split('.').pop() || input.ip;
     return {
       hostname: `${deviceHint} (.${lastOctet})`,
@@ -330,5 +332,6 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
     vendor,
     nameSource: 'ip',
     isRandomizedMac: isRandomized,
+    deviceHint,
   };
 }

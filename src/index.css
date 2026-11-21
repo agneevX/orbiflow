@@ -245,6 +245,14 @@
   color: var(--text-primary);
 }
 
+.app-topbar {
+  background-color: var(--bg-canvas);
+  background-color: color-mix(in srgb, var(--bg-canvas) 74%, transparent);
+  border-color: color-mix(in srgb, var(--border-hairline) 80%, transparent);
+  backdrop-filter: blur(14px) saturate(1.35);
+  -webkit-backdrop-filter: blur(14px) saturate(1.35);
+}
+
 .app-surface {
   background-color: var(--bg-surface);
   border-color: var(--border-hairline);

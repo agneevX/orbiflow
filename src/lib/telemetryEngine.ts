@@ -20,7 +20,10 @@ import type {
 } from '../types/telemetry';
 import {
   classifyApplication,
+  condenseServiceLabel,
   describeRemoteIp,
+  hasTangibleTraffic,
+  isActiveConnectionState,
   isPrivateIp,
   normalizeProtocol,
   normalizeState,
@@ -241,14 +244,18 @@ export class TrafficMonitorEngine {
     probeToken: '',
     persistenceMode: 'memory',
     cacheDir: '/config/cache',
-    rdnsEnabled: false,
+    rdnsEnabled: true,
     rdnsTtlSec: 3600,
     rdnsSkipPrivate: true,
     lanDnsEnabled: true,
     lanDnsServer: '',
     lanDnsTtlSec: 300,
     stripLanDomain: true,
+    inferDeviceNames: true,
   };
+
+  private hostTopServicesCache = new Map<string, { services: string[]; updatedAt: number }>();
+  private readonly topServicesRefreshMs = 15_000;
 
   private serverStats: ServerStats = {
     configPath: '/config/config.json',
@@ -365,6 +372,8 @@ export class TrafficMonitorEngine {
   }
 
   public updateServerConfig(cfg: Partial<ServerConfig>, stats?: Partial<ServerStats>): void {
+    const prevInfer = this.serverConfig.inferDeviceNames;
+    const prevStrip = this.serverConfig.stripLanDomain;
     this.serverConfig = { ...this.serverConfig, ...cfg };
     if (stats) {
       this.serverStats = { ...this.serverStats, ...stats };
@@ -374,6 +383,12 @@ export class TrafficMonitorEngine {
       serverConfig: { ...this.serverConfig },
       serverStats: { ...this.serverStats },
     };
+    if (
+      prevInfer !== this.serverConfig.inferDeviceNames ||
+      prevStrip !== this.serverConfig.stripLanDomain
+    ) {
+      this.reapplyAliasesToLatestSnapshot();
+    }
   }
 
   public setServerStats(stats: Partial<ServerStats>): void {
@@ -577,6 +592,7 @@ export class TrafficMonitorEngine {
         deviceHint: h.deviceHint,
         aliases: this.deviceAliases,
         stripDomain: this.serverConfig.stripLanDomain,
+        inferDeviceNames: this.serverConfig.inferDeviceNames,
       });
       hostNameByIp.set(h.ip, identity.hostname);
       return {
@@ -669,7 +685,9 @@ export class TrafficMonitorEngine {
       uptimeSec: snapshot.system?.uptimeSec ?? this.probeStatus.uptimeSec,
       load1m: snapshot.system?.load1m ?? this.probeStatus.load1m,
       memUsedPct: snapshot.system?.memUsedPct ?? this.probeStatus.memUsedPct,
-      conntrackCount: snapshot.system?.conntrackCount ?? snapshot.flows.length,
+      conntrackCount:
+        snapshot.system?.conntrackCount ??
+        (snapshot.rawConntrackLines?.length || snapshot.flows.length || this.probeStatus.conntrackCount),
       conntrackMax: snapshot.system?.conntrackMax ?? this.probeStatus.conntrackMax,
       lastHeartbeat: now,
     };
@@ -710,6 +728,8 @@ export class TrafficMonitorEngine {
 
     for (const raw of rawFlows) {
       const proto = normalizeProtocol(raw.proto);
+      const state = normalizeState(raw.state, proto);
+      const assured = raw.assured ?? true;
       const id = raw.id || `${proto}:${raw.src}:${raw.sport}->${raw.dst}:${raw.dport}`;
       seenIds.add(id);
 
@@ -722,16 +742,25 @@ export class TrafficMonitorEngine {
       const flowTxBps = prev ? Math.round(txDelta) : 0;
       const flowRxBps = prev ? Math.round(rxDelta) : 0;
 
+      // Skip closing or unestablished sessions (TIME_WAIT, FIN_WAIT, CLOSE_WAIT, SYN_SENT, CLOSE, unassured UDP)
+      if (!isActiveConnectionState(state, proto, assured)) {
+        continue;
+      }
+
+      const isTangible = hasTangibleTraffic(flowRxBps, flowTxBps);
+      // Only spend external rDNS lookups on tangible active flows or newly observed flows
+      const shouldResolveExternal = isTangible || !prev;
+
       const arp = arpByIp.get(raw.src) || arpByIp.get(raw.dst);
       const srcIsPrivate = isPrivateIp(raw.src);
       const dstIsPrivate = isPrivateIp(raw.dst);
 
       const srcPtr = srcIsPrivate
         ? (lanRdnsLookup ? lanRdnsLookup(raw.src) : null)
-        : (rdnsLookup ? rdnsLookup(raw.src) : null);
+        : (shouldResolveExternal && rdnsLookup ? rdnsLookup(raw.src) : null);
       const dstCachedRdns = dstIsPrivate
         ? (lanRdnsLookup ? lanRdnsLookup(raw.dst) : null)
-        : (rdnsLookup ? rdnsLookup(raw.dst) : null);
+        : (shouldResolveExternal && rdnsLookup ? rdnsLookup(raw.dst) : null);
 
       const meaningfulArpHost =
         arp && isMeaningfulHostname(arp.hostname, raw.src) ? arp.hostname : undefined;
@@ -745,8 +774,9 @@ export class TrafficMonitorEngine {
             providedVendor: arp?.vendor,
             aliases: this.deviceAliases,
             stripDomain: this.serverConfig.stripLanDomain,
+            inferDeviceNames: this.serverConfig.inferDeviceNames,
           }).hostname
-        : describeRemoteIp(raw.src, srcPtr).label;
+        : describeRemoteIp(raw.src, srcPtr, proto, raw.sport).label;
 
       const dstArp = arpByIp.get(raw.dst);
       const meaningfulDstArp =
@@ -761,16 +791,18 @@ export class TrafficMonitorEngine {
               providedVendor: dstArp?.vendor,
               aliases: this.deviceAliases,
               stripDomain: this.serverConfig.stripLanDomain,
+              inferDeviceNames: this.serverConfig.inferDeviceNames,
             }).hostname,
             service: 'Local Network',
+            category: 'Local Network' as const,
           }
-        : describeRemoteIp(raw.dst, dstCachedRdns);
+        : describeRemoteIp(raw.dst, dstCachedRdns, proto, raw.dport);
 
       const flow: EnrichedFlow = {
         id,
         proto,
         app: classifyApplication(proto, raw.sport, raw.dport),
-        state: normalizeState(raw.state, proto),
+        state,
         ttl: raw.ttl ?? 120,
         srcIp: raw.src,
         srcHost,
@@ -779,6 +811,7 @@ export class TrafficMonitorEngine {
         dstIp: raw.dst,
         dstHost: remoteInfo.label,
         dstService: remoteInfo.service,
+        dstCategory: remoteInfo.category,
         dport: raw.dport,
         txBytes: raw.txBytes,
         rxBytes: raw.rxBytes,
@@ -786,7 +819,7 @@ export class TrafficMonitorEngine {
         txBps: flowTxBps,
         rxBps: flowRxBps,
         totalBps: flowTxBps + flowRxBps,
-        assured: raw.assured ?? true,
+        assured,
         firstSeen: prev ? prev.firstSeen : now,
         lastSeen: now,
       };
@@ -804,7 +837,7 @@ export class TrafficMonitorEngine {
       enrichedFlows.push(flow);
     }
 
-    // Expire stale flows after 30s (supports 5s low-CPU polling comfortably)
+    // Expire stale flows after 30s
     for (const [key, rec] of this.flowRecords.entries()) {
       if (!seenIds.has(key) && now - rec.lastSeen > 30_000) {
         this.flowRecords.delete(key);
@@ -816,11 +849,13 @@ export class TrafficMonitorEngine {
       return b.totalBytes - a.totalBytes;
     });
 
+    const tangibleFlows = enrichedFlows.filter((f) => hasTangibleTraffic(f.rxBps, f.txBps));
+
     const point: TrafficPoint = {
       timestamp: now,
       rxBps: Math.round(rxBps),
       txBps: Math.round(txBps),
-      activeFlows: enrichedFlows.length,
+      activeFlows: tangibleFlows.length,
     };
     this.recordHistoryPoint(point);
 
@@ -829,6 +864,7 @@ export class TrafficMonitorEngine {
       string,
       HostSummary & {
         appCounts: Map<string, number>;
+        serviceCounts: Map<string, number>;
         dhcpHostname?: string;
         providedVendor?: string;
         observedFlows: Array<{ dstService: string; dstHost?: string; app: string; dport: number }>;
@@ -853,8 +889,10 @@ export class TrafficMonitorEngine {
         rxBps: 0,
         txBps: 0,
         topApps: [],
+        topServices: [],
         lastSeen: now,
         appCounts: new Map(),
+        serviceCounts: new Map(),
         observedFlows: [],
       });
     }
@@ -887,8 +925,10 @@ export class TrafficMonitorEngine {
             rxBps: 0,
             txBps: 0,
             topApps: [],
+            topServices: [],
             lastSeen: now,
             appCounts: new Map(),
+            serviceCounts: new Map(),
             observedFlows: [],
           };
           hostMap.set(lanIp, host);
@@ -900,6 +940,11 @@ export class TrafficMonitorEngine {
         host.rxBps += f.rxBps;
         host.txBps += f.txBps;
         host.appCounts.set(f.app, (host.appCounts.get(f.app) || 0) + f.totalBytes);
+        const shortSvc = condenseServiceLabel(f.dstService, f.app);
+        const weight = hasTangibleTraffic(f.rxBps, f.txBps)
+          ? Math.max(f.totalBytes, f.totalBps * 10)
+          : Math.max(1, Math.round(f.totalBytes * 0.1));
+        host.serviceCounts.set(shortSvc, (host.serviceCounts.get(shortSvc) || 0) + weight);
         host.observedFlows.push({
           dstService: f.dstService,
           dstHost: f.dstHost,
@@ -908,42 +953,45 @@ export class TrafficMonitorEngine {
         });
       }
 
-      const pKey = f.app;
-      const existingProto = protoMap.get(pKey) || {
-        app: f.app,
-        proto: f.proto,
-        bytes: 0,
-        bps: 0,
-        flowCount: 0,
-        sharePct: 0,
-      };
-      existingProto.bytes += f.totalBytes;
-      existingProto.bps += f.totalBps;
-      existingProto.flowCount += 1;
-      protoMap.set(pKey, existingProto);
+      if (hasTangibleTraffic(f.rxBps, f.txBps)) {
+        const pKey = f.app;
+        const existingProto = protoMap.get(pKey) || {
+          app: f.app,
+          proto: f.proto,
+          bytes: 0,
+          bps: 0,
+          flowCount: 0,
+          sharePct: 0,
+        };
+        existingProto.bytes += f.totalBytes;
+        existingProto.bps += f.totalBps;
+        existingProto.flowCount += 1;
+        protoMap.set(pKey, existingProto);
 
-      const remoteIp = !isPrivateIp(f.dstIp) ? f.dstIp : !isPrivateIp(f.srcIp) ? f.srcIp : null;
-      if (remoteIp) {
-        const cached = rdnsLookup ? rdnsLookup(remoteIp) : null;
-        const desc = describeRemoteIp(remoteIp, cached);
-        let rem = remoteMap.get(remoteIp);
-        if (!rem) {
-          rem = {
-            ip: remoteIp,
-            label: desc.label,
-            service: desc.service,
-            ports: [],
-            portSet: new Set<number>(),
-            bytes: 0,
-            bps: 0,
-            flowCount: 0,
-          };
-          remoteMap.set(remoteIp, rem);
+        const remoteIp = !isPrivateIp(f.dstIp) ? f.dstIp : !isPrivateIp(f.srcIp) ? f.srcIp : null;
+        if (remoteIp) {
+          const cached = rdnsLookup ? rdnsLookup(remoteIp) : null;
+          const desc = describeRemoteIp(remoteIp, cached, f.proto, f.dport);
+          let rem = remoteMap.get(remoteIp);
+          if (!rem) {
+            rem = {
+              ip: remoteIp,
+              label: desc.label,
+              service: desc.service,
+              category: desc.category,
+              ports: [],
+              portSet: new Set<number>(),
+              bytes: 0,
+              bps: 0,
+              flowCount: 0,
+            };
+            remoteMap.set(remoteIp, rem);
+          }
+          rem.portSet.add(f.dport);
+          rem.bytes += f.totalBytes;
+          rem.bps += f.totalBps;
+          rem.flowCount += 1;
         }
-        rem.portSet.add(f.dport);
-        rem.bytes += f.totalBytes;
-        rem.bps += f.totalBps;
-        rem.flowCount += 1;
       }
     }
 
@@ -952,7 +1000,7 @@ export class TrafficMonitorEngine {
     let randomizedMacCount = 0;
 
     const hosts: HostSummary[] = Array.from(hostMap.values())
-      .map(({ appCounts, dhcpHostname, providedVendor, observedFlows, ...rest }) => {
+      .map(({ appCounts, serviceCounts, dhcpHostname, providedVendor, observedFlows, ...rest }) => {
         const ptrHostname = lanRdnsLookup ? lanRdnsLookup(rest.ip) : null;
         const deviceHint = fingerprintDeviceHint(observedFlows);
         const identity = resolveHostIdentity({
@@ -964,6 +1012,7 @@ export class TrafficMonitorEngine {
           deviceHint,
           aliases: this.deviceAliases,
           stripDomain: this.serverConfig.stripLanDomain,
+          inferDeviceNames: this.serverConfig.inferDeviceNames,
         });
 
         if (identity.isRandomizedMac) {
@@ -976,6 +1025,24 @@ export class TrafficMonitorEngine {
           .slice(0, 3)
           .map(([app]) => app);
 
+        const freshServices = Array.from(serviceCounts.entries())
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .slice(0, 4)
+          .map(([svc]) => svc);
+
+        const cachedSvc = this.hostTopServicesCache.get(rest.ip);
+        let stableTopServices: string[];
+        if (
+          !cachedSvc ||
+          (cachedSvc.services.length === 0 && freshServices.length > 0) ||
+          now - cachedSvc.updatedAt >= this.topServicesRefreshMs
+        ) {
+          stableTopServices = freshServices;
+          this.hostTopServicesCache.set(rest.ip, { services: freshServices, updatedAt: now });
+        } else {
+          stableTopServices = cachedSvc.services;
+        }
+
         return {
           ...rest,
           hostname: identity.hostname,
@@ -987,17 +1054,18 @@ export class TrafficMonitorEngine {
           aliasKey: identity.aliasKey,
           aliasMatchBy: identity.aliasMatchBy,
           topApps: sortedApps,
+          topServices: stableTopServices,
         };
       })
       .sort((a, b) => b.rxBps + b.txBps - (a.rxBps + a.txBps) || b.totalBytes - a.totalBytes);
 
-    // Back-populate resolved hostnames into flows & client-destination links so all views match
+    // Back-populate resolved hostnames into flows & tangible client-destination links so all views match
     for (const f of enrichedFlows) {
       const lanIp = isPrivateIp(f.srcIp) ? f.srcIp : isPrivateIp(f.dstIp) ? f.dstIp : null;
       if (isPrivateIp(f.srcIp) && resolvedNameByIp.has(f.srcIp)) {
         f.srcHost = resolvedNameByIp.get(f.srcIp)!;
       }
-      if (lanIp) {
+      if (lanIp && hasTangibleTraffic(f.rxBps, f.txBps)) {
         const clientName = resolvedNameByIp.get(lanIp) || f.srcHost;
         const serviceName = f.dstService;
         const linkKey = `${lanIp}=>${serviceName}`;
@@ -1005,6 +1073,7 @@ export class TrafficMonitorEngine {
           clientIp: lanIp,
           clientName,
           service: serviceName,
+          category: f.dstCategory,
           rxBps: 0,
           txBps: 0,
           totalBps: 0,
@@ -1047,7 +1116,7 @@ export class TrafficMonitorEngine {
       rxBps,
       txBps,
       hosts,
-      enrichedFlows.length,
+      tangibleFlows.length,
       snapshot.system?.load1m ?? this.probeStatus.load1m,
       snapshot.system?.memUsedPct ?? this.probeStatus.memUsedPct
     );
@@ -1060,8 +1129,8 @@ export class TrafficMonitorEngine {
         combinedBps: Math.round(rxBps + txBps),
         totalRxBytes: snapshot.iface.rxBytes,
         totalTxBytes: snapshot.iface.txBytes,
-        activeFlows: enrichedFlows.length,
-        activeHosts: hosts.filter((h) => h.activeFlows > 0).length,
+        activeFlows: tangibleFlows.length,
+        activeHosts: hosts.filter((h) => hasTangibleTraffic(h.rxBps, h.txBps)).length,
         peakRxBps: Math.round(this.peakRxBps),
         peakTxBps: Math.round(this.peakTxBps),
       },
@@ -1232,7 +1301,7 @@ export function exportFlowsToCsv(flows: EnrichedFlow[]): string {
   const headers = [
     'Protocol',
     'Application',
-    'State',
+    'Category',
     'Source IP',
     'Source Host',
     'Source Port',
@@ -1257,7 +1326,7 @@ export function exportFlowsToCsv(flows: EnrichedFlow[]): string {
     [
       f.proto,
       f.app,
-      f.state,
+      f.dstCategory,
       f.srcIp,
       f.srcHost,
       f.sport,

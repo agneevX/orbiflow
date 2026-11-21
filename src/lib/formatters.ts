@@ -1,4 +1,29 @@
-import type { BandwidthUnit, ConntrackState, TransportProtocol } from '../types/telemetry';
+import type {
+  BandwidthUnit,
+  ConntrackState,
+  DestinationCategory,
+  TransportProtocol,
+} from '../types/telemetry';
+
+/**
+ * Minimum combined throughput (bytes/sec) considered tangible live traffic.
+ * 128 B/s ≈ 1 Kbps — anything below this displays as 0 Kbps (idle socket).
+ */
+export const MIN_TANGIBLE_BPS = 128;
+
+export const ALL_DESTINATION_CATEGORIES: DestinationCategory[] = [
+  'Streaming',
+  'Social & Messaging',
+  'Gaming',
+  'Cloud & Hosting',
+  'CDN & Web',
+  'Communication',
+  'Apple & Devices',
+  'DNS & Infrastructure',
+  'File & Downloads',
+  'Local Network',
+  'Other',
+];
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -112,6 +137,29 @@ export function normalizeState(raw: string | undefined, proto: TransportProtocol
   return valid.includes(upper as ConntrackState) ? (upper as ConntrackState) : 'STATELESS';
 }
 
+/**
+ * Returns true when a conntrack session is actively established:
+ * - TCP must be ESTABLISHED (filters out TIME_WAIT, FIN_WAIT, CLOSE_WAIT, SYN_SENT, CLOSE).
+ * - UDP/ICMP/OTHER are stateless in nf_conntrack and considered active when not closing and assured.
+ */
+export function isActiveConnectionState(
+  state: ConntrackState,
+  proto: TransportProtocol,
+  assured = true
+): boolean {
+  if (proto === 'TCP') {
+    return state === 'ESTABLISHED';
+  }
+  return (state === 'ESTABLISHED' || state === 'STATELESS') && assured;
+}
+
+/**
+ * Returns true when combined throughput meets or exceeds tangible live traffic threshold.
+ */
+export function hasTangibleTraffic(rxBps: number, txBps: number): boolean {
+  return rxBps + txBps >= MIN_TANGIBLE_BPS;
+}
+
 const PORT_APP_MAP: Record<string, string> = {
   'TCP:443': 'HTTPS / TLS',
   'UDP:443': 'QUIC / HTTP3',
@@ -152,56 +200,312 @@ export function classifyApplication(proto: TransportProtocol, sport: number, dpo
   return `${proto} / ${dport}`;
 }
 
-const KNOWN_REMOTE_PREFIXES: Array<{ prefix: string; label: string; service: string }> = [
-  { prefix: '1.1.1.', label: 'one.one.one.one', service: 'Cloudflare' },
-  { prefix: '1.0.0.', label: '1.0.0.1', service: 'Cloudflare' },
-  { prefix: '8.8.8.', label: 'dns.google', service: 'Google DNS' },
-  { prefix: '8.8.4.', label: 'dns.google', service: 'Google DNS' },
-  { prefix: '142.250.', label: 'youtube.com / 1e100.net', service: 'YouTube / Google' },
-  { prefix: '172.217.', label: 'google.com / 1e100.net', service: 'Google' },
-  { prefix: '17.253.', label: 'edge.icloud.com', service: 'Apple' },
-  { prefix: '17.57.', label: 'push.apple.com', service: 'Apple' },
-  { prefix: '52.94.', label: 's3.amazonaws.com', service: 'AWS Cloud' },
-  { prefix: '54.239.', label: 'cloudfront.net', service: 'AWS CloudFront' },
-  { prefix: '104.16.', label: 'cloudflare.com', service: 'Cloudflare' },
-  { prefix: '172.64.', label: 'cloudflare-edge.net', service: 'Cloudflare' },
-  { prefix: '140.82.', label: 'github.com', service: 'GitHub' },
-  { prefix: '185.199.', label: 'objects.githubusercontent.com', service: 'GitHub' },
-  { prefix: '151.101.', label: 'fastly.net', service: 'Fastly CDN' },
-  { prefix: '23.246.', label: 'nflxvideo.net', service: 'Netflix' },
-  { prefix: '45.57.', label: 'nflxso.net', service: 'Netflix' },
-  { prefix: '162.159.', label: 'discord.gg / cloudflare', service: 'Discord' },
-  { prefix: '155.133.', label: 'valve.net (Steam)', service: 'Valve / Steam' },
-  { prefix: '13.107.', label: 'msedge.net', service: 'Microsoft' },
-  { prefix: '20.190.', label: 'login.microsoftonline.com', service: 'Microsoft' },
+interface RemoteMatchRule {
+  patterns: string[];
+  service: string;
+  category: DestinationCategory;
+}
+
+const RDNS_CATEGORY_RULES: RemoteMatchRule[] = [
+  // Streaming
+  { patterns: ['nflxvideo', 'nflxso', 'nflximg', 'netflix'], service: 'Netflix', category: 'Streaming' },
+  { patterns: ['googlevideo', 'youtube', 'ytimg'], service: 'YouTube', category: 'Streaming' },
+  { patterns: ['spotify', 'scdn.co'], service: 'Spotify', category: 'Streaming' },
+  { patterns: ['twitch.tv', 'ttvnw.net', 'jtvnw.net'], service: 'Twitch', category: 'Streaming' },
+  { patterns: ['disney', 'dssott', 'bamgrid'], service: 'Disney+', category: 'Streaming' },
+  { patterns: ['hulu', 'hulustream'], service: 'Hulu', category: 'Streaming' },
+  { patterns: ['plex.tv', 'plex.direct'], service: 'Plex', category: 'Streaming' },
+  { patterns: ['vimeo', 'vimeocdn'], service: 'Vimeo', category: 'Streaming' },
+  { patterns: ['roku.com'], service: 'Roku', category: 'Streaming' },
+  { patterns: ['hbomax', 'max.com', 'warnermediacdn'], service: 'Max / HBO', category: 'Streaming' },
+  { patterns: ['peacocktv'], service: 'Peacock', category: 'Streaming' },
+
+  // Social & Messaging
+  { patterns: ['discord'], service: 'Discord', category: 'Social & Messaging' },
+  { patterns: ['whatsapp'], service: 'WhatsApp', category: 'Social & Messaging' },
+  { patterns: ['instagram', 'cdninstagram'], service: 'Instagram', category: 'Social & Messaging' },
+  { patterns: ['facebook', 'fbcdn', 'fbsbx', 'meta.com'], service: 'Meta / Facebook', category: 'Social & Messaging' },
+  { patterns: ['tiktok', 'byteoversea', 'ibytedtos', 'musical.ly'], service: 'TikTok', category: 'Social & Messaging' },
+  { patterns: ['reddit', 'redd.it'], service: 'Reddit', category: 'Social & Messaging' },
+  { patterns: ['twitter', 'twimg', 'x.com'], service: 'X / Twitter', category: 'Social & Messaging' },
+  { patterns: ['telegram'], service: 'Telegram', category: 'Social & Messaging' },
+  { patterns: ['signal.org'], service: 'Signal', category: 'Social & Messaging' },
+  { patterns: ['slack.com', 'slack-edge'], service: 'Slack', category: 'Social & Messaging' },
+  { patterns: ['linkedin', 'licdn'], service: 'LinkedIn', category: 'Social & Messaging' },
+  { patterns: ['snapchat', 'sc-cdn'], service: 'Snapchat', category: 'Social & Messaging' },
+
+  // Gaming
+  { patterns: ['steampowered', 'steamcontent', 'steamstatic', 'valve.net'], service: 'Valve / Steam', category: 'Gaming' },
+  { patterns: ['xboxlive', 'xbox.com'], service: 'Xbox Live', category: 'Gaming' },
+  { patterns: ['playstation', 'sonyentertainmentnetwork'], service: 'PlayStation', category: 'Gaming' },
+  { patterns: ['nintendo'], service: 'Nintendo', category: 'Gaming' },
+  { patterns: ['epicgames', 'unrealengine'], service: 'Epic Games', category: 'Gaming' },
+  { patterns: ['riotgames', 'pvp.net'], service: 'Riot Games', category: 'Gaming' },
+  { patterns: ['blizzard', 'battle.net'], service: 'Battle.net', category: 'Gaming' },
+  { patterns: ['roblox'], service: 'Roblox', category: 'Gaming' },
+
+  // Communication
+  { patterns: ['zoom.us', 'zoomgov'], service: 'Zoom', category: 'Communication' },
+  { patterns: ['teams.microsoft', 'skype'], service: 'Microsoft Teams', category: 'Communication' },
+  { patterns: ['meet.google'], service: 'Google Meet', category: 'Communication' },
+
+  // DNS & Infrastructure
+  { patterns: ['dns.google'], service: 'Google DNS', category: 'DNS & Infrastructure' },
+  { patterns: ['one.one.one.one', '1dot1dot1dot1'], service: 'Cloudflare DNS', category: 'DNS & Infrastructure' },
+  { patterns: ['quad9.net'], service: 'Quad9 DNS', category: 'DNS & Infrastructure' },
+  { patterns: ['opendns.com'], service: 'OpenDNS', category: 'DNS & Infrastructure' },
+  { patterns: ['tailscale'], service: 'Tailscale', category: 'DNS & Infrastructure' },
+  { patterns: ['mullvad', 'nordvpn', 'protonvpn'], service: 'VPN', category: 'DNS & Infrastructure' },
+
+  // File & Downloads
+  { patterns: ['dropbox'], service: 'Dropbox', category: 'File & Downloads' },
+  { patterns: ['backblaze', 'backblazeb2'], service: 'Backblaze', category: 'File & Downloads' },
+  { patterns: ['onedrive', 'livefilestore', 'sharepoint'], service: 'OneDrive', category: 'File & Downloads' },
+  { patterns: ['s3.amazonaws', 's3-'], service: 'AWS S3', category: 'File & Downloads' },
+
+  // Cloud & Hosting
+  { patterns: ['github', 'githubusercontent'], service: 'GitHub', category: 'Cloud & Hosting' },
+  { patterns: ['gitlab'], service: 'GitLab', category: 'Cloud & Hosting' },
+  { patterns: ['docker.com', 'docker.io'], service: 'Docker Hub', category: 'Cloud & Hosting' },
+  { patterns: ['googleusercontent'], service: 'Google Cloud', category: 'Cloud & Hosting' },
+  { patterns: ['amazonaws'], service: 'AWS Cloud', category: 'Cloud & Hosting' },
+  { patterns: ['azure', 'cloudapp.net', 'windows.net'], service: 'Microsoft Azure', category: 'Cloud & Hosting' },
+  { patterns: ['digitalocean'], service: 'DigitalOcean', category: 'Cloud & Hosting' },
+  { patterns: ['hetzner', 'your-server.de'], service: 'Hetzner', category: 'Cloud & Hosting' },
+  { patterns: ['ovh.net', 'ovh.ca', 'ovh.us'], service: 'OVHcloud', category: 'Cloud & Hosting' },
+  { patterns: ['linode', 'linodeusercontent'], service: 'Linode', category: 'Cloud & Hosting' },
+  { patterns: ['vultr'], service: 'Vultr', category: 'Cloud & Hosting' },
+  { patterns: ['oraclecloud'], service: 'Oracle Cloud', category: 'Cloud & Hosting' },
+  { patterns: ['vercel'], service: 'Vercel', category: 'Cloud & Hosting' },
+  { patterns: ['fly.dev', 'fly.io'], service: 'Fly.io', category: 'Cloud & Hosting' },
+
+  // CDN & Web
+  { patterns: ['cloudfront.net'], service: 'AWS CloudFront', category: 'CDN & Web' },
+  { patterns: ['cloudflare'], service: 'Cloudflare', category: 'CDN & Web' },
+  { patterns: ['fastly'], service: 'Fastly CDN', category: 'CDN & Web' },
+  { patterns: ['akamai', 'akamaitechnologies', 'akamaiedge'], service: 'Akamai CDN', category: 'CDN & Web' },
+  { patterns: ['edgecast', 'verizondigitalmedia'], service: 'Edgecast CDN', category: 'CDN & Web' },
+  { patterns: ['bunnycdn', 'b-cdn.net'], service: 'Bunny CDN', category: 'CDN & Web' },
+
+  // Apple & Devices / Ecosystem Services
+  { patterns: ['apple.com', 'icloud.com', 'aaplimg.com', 'mzstatic.com', 'cdn-apple'], service: 'Apple', category: 'Apple & Devices' },
+  { patterns: ['1e100.net', 'google.com', 'googleapis', 'gstatic'], service: 'Google', category: 'Apple & Devices' },
+  { patterns: ['microsoft', 'msedge', 'office.com', 'office365', 'live.com', 'msn.com'], service: 'Microsoft', category: 'Apple & Devices' },
+  { patterns: ['ecobee'], service: 'Ecobee IoT', category: 'Apple & Devices' },
+  { patterns: ['ring.com'], service: 'Ring IoT', category: 'Apple & Devices' },
+  { patterns: ['sonos'], service: 'Sonos', category: 'Apple & Devices' },
+  { patterns: ['samsung'], service: 'Samsung', category: 'Apple & Devices' },
 ];
 
-export function describeRemoteIp(ip: string, cachedRdns?: string | null): { label: string; service: string } {
+const KNOWN_REMOTE_PREFIXES: Array<{
+  prefix: string;
+  label: string;
+  service: string;
+  category: DestinationCategory;
+}> = [
+  { prefix: '1.1.1.', label: 'one.one.one.one', service: 'Cloudflare DNS', category: 'DNS & Infrastructure' },
+  { prefix: '1.0.0.', label: '1dot1dot1dot1.cloudflare-dns.com', service: 'Cloudflare DNS', category: 'DNS & Infrastructure' },
+  { prefix: '8.8.8.', label: 'dns.google', service: 'Google DNS', category: 'DNS & Infrastructure' },
+  { prefix: '8.8.4.', label: 'dns.google', service: 'Google DNS', category: 'DNS & Infrastructure' },
+  { prefix: '9.9.9.', label: 'dns9.quad9.net', service: 'Quad9 DNS', category: 'DNS & Infrastructure' },
+  { prefix: '208.67.', label: 'resolver.opendns.com', service: 'OpenDNS', category: 'DNS & Infrastructure' },
+  { prefix: '142.250.', label: '1e100.net', service: 'YouTube / Google', category: 'Streaming' },
+  { prefix: '142.251.', label: '1e100.net', service: 'Google', category: 'Apple & Devices' },
+  { prefix: '172.217.', label: '1e100.net', service: 'Google', category: 'Apple & Devices' },
+  { prefix: '216.58.', label: '1e100.net', service: 'Google', category: 'Apple & Devices' },
+  { prefix: '17.253.', label: 'edge.icloud.com', service: 'Apple', category: 'Apple & Devices' },
+  { prefix: '17.57.', label: 'push.apple.com', service: 'Apple', category: 'Apple & Devices' },
+  { prefix: '17.', label: 'apple.com', service: 'Apple', category: 'Apple & Devices' },
+  { prefix: '52.94.', label: 's3.amazonaws.com', service: 'AWS S3', category: 'File & Downloads' },
+  { prefix: '54.239.', label: 'cloudfront.net', service: 'AWS CloudFront', category: 'CDN & Web' },
+  { prefix: '104.16.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '104.18.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '172.64.', label: 'cloudflare-edge.net', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '172.67.', label: 'cloudflare-edge.net', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '140.82.', label: 'github.com', service: 'GitHub', category: 'Cloud & Hosting' },
+  { prefix: '185.199.', label: 'objects.githubusercontent.com', service: 'GitHub', category: 'Cloud & Hosting' },
+  { prefix: '151.101.', label: 'fastly.net', service: 'Fastly CDN', category: 'CDN & Web' },
+  { prefix: '23.246.', label: 'nflxvideo.net', service: 'Netflix', category: 'Streaming' },
+  { prefix: '45.57.', label: 'nflxso.net', service: 'Netflix', category: 'Streaming' },
+  { prefix: '162.159.', label: 'discord.gg', service: 'Discord', category: 'Social & Messaging' },
+  { prefix: '31.13.', label: 'fbcdn.net', service: 'Meta / Facebook', category: 'Social & Messaging' },
+  { prefix: '157.240.', label: 'fbcdn.net', service: 'Meta / Facebook', category: 'Social & Messaging' },
+  { prefix: '155.133.', label: 'valve.net', service: 'Valve / Steam', category: 'Gaming' },
+  { prefix: '162.254.', label: 'valve.net', service: 'Valve / Steam', category: 'Gaming' },
+  { prefix: '13.107.', label: 'msedge.net', service: 'Microsoft', category: 'Apple & Devices' },
+  { prefix: '20.190.', label: 'login.microsoftonline.com', service: 'Microsoft', category: 'Apple & Devices' },
+  { prefix: '170.114.', label: 'zoom.us', service: 'Zoom', category: 'Communication' },
+];
+
+const MULTI_PART_TLDS = new Set([
+  'co.uk',
+  'org.uk',
+  'gov.uk',
+  'com.au',
+  'net.au',
+  'co.jp',
+  'ne.jp',
+  'com.br',
+  'co.nz',
+  'co.in',
+  'com.sg',
+  'com.cn',
+]);
+
+function extractRootDomain(hostname: string): string {
+  const clean = hostname.trim().toLowerCase().replace(/\.+$/, '');
+  const parts = clean.split('.').filter(Boolean);
+  if (parts.length <= 2) return clean;
+  const lastTwo = parts.slice(-2).join('.');
+  if (MULTI_PART_TLDS.has(lastTwo) && parts.length >= 3) {
+    return parts.slice(-3).join('.');
+  }
+  return lastTwo;
+}
+
+export function inferCategoryFromPort(
+  proto: TransportProtocol,
+  dport: number
+): DestinationCategory {
+  if (dport === 53 || dport === 853 || dport === 123 || dport === 51820 || dport === 1194) {
+    return 'DNS & Infrastructure';
+  }
+  if (dport === 32400) return 'Streaming';
+  if (dport === 3478 || dport === 19302 || (proto === 'UDP' && dport >= 50000 && dport <= 50099)) {
+    return 'Communication';
+  }
+  if (dport === 27015) return 'Gaming';
+  if (dport === 51413 || (dport >= 6881 && dport <= 6889)) return 'File & Downloads';
+  if (dport === 5223 || dport === 5228 || dport === 1883 || dport === 8883) {
+    return 'Apple & Devices';
+  }
+  if (dport === 22) return 'Cloud & Hosting';
+  return 'Other';
+}
+
+export function describeRemoteIp(
+  ip: string,
+  cachedRdns?: string | null,
+  proto?: TransportProtocol,
+  dport?: number
+): { label: string; service: string; category: DestinationCategory } {
   if (cachedRdns) {
-    const lower = cachedRdns.toLowerCase();
-    let service = 'External Host';
-    if (lower.includes('netflix') || lower.includes('nflx')) service = 'Netflix';
-    else if (lower.includes('apple') || lower.includes('icloud')) service = 'Apple';
-    else if (lower.includes('youtube') || lower.includes('googlevideo')) service = 'YouTube / Google';
-    else if (lower.includes('google') || lower.includes('1e100')) service = 'Google';
-    else if (lower.includes('amazonaws') || lower.includes('cloudfront')) service = 'AWS Cloud';
-    else if (lower.includes('cloudflare')) service = 'Cloudflare';
-    else if (lower.includes('github')) service = 'GitHub';
-    else if (lower.includes('steam') || lower.includes('valve')) service = 'Valve / Steam';
-    else if (lower.includes('discord')) service = 'Discord';
-    else if (lower.includes('microsoft') || lower.includes('msedge')) service = 'Microsoft';
-    else if (lower.includes('fastly')) service = 'Fastly CDN';
-    else {
-      const parts = lower.split('.').filter(Boolean);
-      service = parts.length >= 2 ? parts.slice(-2).join('.') : cachedRdns;
+    const cleanHost = cachedRdns.trim().replace(/\.+$/, '');
+    const lower = cleanHost.toLowerCase();
+
+    for (const rule of RDNS_CATEGORY_RULES) {
+      if (rule.patterns.some((p) => lower.includes(p))) {
+        return { label: cleanHost, service: rule.service, category: rule.category };
+      }
     }
-    return { label: cachedRdns, service };
+
+    const rootDomain = extractRootDomain(cleanHost);
+    let category: DestinationCategory = 'CDN & Web';
+    if (/(?:ec2|vps|cloud|compute|host|server|colo|dedi|static|node)/i.test(lower)) {
+      category = 'Cloud & Hosting';
+    } else if (/(?:dns|ns\d|resolver|ntp|vpn|wg|relay)/i.test(lower)) {
+      category = 'DNS & Infrastructure';
+    } else if (/(?:stream|video|media|audio|live)/i.test(lower)) {
+      category = 'Streaming';
+    } else if (/(?:game|lobby|match|arena)/i.test(lower)) {
+      category = 'Gaming';
+    } else if (proto && typeof dport === 'number') {
+      const portCat = inferCategoryFromPort(proto, dport);
+      if (portCat !== 'Other') category = portCat;
+    }
+
+    return { label: cleanHost, service: rootDomain || cleanHost, category };
   }
 
   for (const entry of KNOWN_REMOTE_PREFIXES) {
     if (ip.startsWith(entry.prefix)) {
-      return { label: entry.label, service: entry.service };
+      return { label: entry.label, service: entry.service, category: entry.category };
     }
   }
-  return { label: ip, service: 'External IP' };
+
+  const fallbackCategory =
+    proto && typeof dport === 'number' ? inferCategoryFromPort(proto, dport) : 'Other';
+  return { label: ip, service: 'External IP', category: fallbackCategory };
 }
+
+const SERVICE_SHORT_LABELS: Record<string, string> = {
+  'Valve / Steam': 'Steam',
+  'Meta / Facebook': 'Meta',
+  'AWS CloudFront': 'CloudFront',
+  'Microsoft Azure': 'Azure',
+  'Microsoft Teams': 'Teams',
+  'YouTube / Google': 'YouTube',
+  'Cloudflare DNS': 'CF DNS',
+  'Google Cloud': 'GCP',
+  'AWS Cloud': 'AWS',
+  'X / Twitter': 'X',
+  'Max / HBO': 'Max',
+  'Fastly CDN': 'Fastly',
+  'Akamai CDN': 'Akamai',
+  'Edgecast CDN': 'Edgecast',
+  'Bunny CDN': 'Bunny',
+  'Ecobee IoT': 'Ecobee',
+  'Ring IoT': 'Ring',
+  'Docker Hub': 'Docker',
+  'Oracle Cloud': 'Oracle',
+  'DigitalOcean': 'DO',
+};
+
+const APP_SHORT_LABELS: Record<string, string> = {
+  'HTTPS / TLS': 'HTTPS',
+  'QUIC / HTTP3': 'QUIC',
+  'DNS over TCP': 'DNS',
+  'DNS over TLS': 'DoT',
+  'WireGuard VPN': 'WireGuard',
+  'Google Meet / WebRTC': 'WebRTC',
+  'STUN / WebRTC': 'WebRTC',
+  'Google Push': 'Google Push',
+  'Apple APNs': 'APNs',
+  'Steam / Source': 'Steam',
+  'Steam Client': 'Steam',
+  'BitTorrent uTP': 'BitTorrent',
+  'ICMP Ping': 'ICMP',
+  'SMTP Submission': 'SMTP',
+  'Plex Media': 'Plex',
+  'Web Proxy / Alt': 'Web',
+  'VoIP / RTP': 'VoIP',
+};
+
+/**
+ * Produces a concise service/protocol label suitable for compact wrapped lists in the Devices table.
+ */
+export function condenseServiceLabel(service: string, app: string): string {
+  const trimmedService = (service || '').trim();
+  if (
+    trimmedService &&
+    trimmedService !== 'External IP' &&
+    trimmedService !== 'Local Network'
+  ) {
+    if (SERVICE_SHORT_LABELS[trimmedService]) {
+      return SERVICE_SHORT_LABELS[trimmedService];
+    }
+    return trimmedService.length > 18 ? `${trimmedService.slice(0, 17)}…` : trimmedService;
+  }
+
+  const trimmedApp = (app || '').trim();
+  if (APP_SHORT_LABELS[trimmedApp]) {
+    return APP_SHORT_LABELS[trimmedApp];
+  }
+  return trimmedApp || 'Other';
+}
+
+/**
+ * Compares two IPv4 addresses numerically for stable sorting and tie-breaking.
+ */
+export function compareIpv4(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  if (pa.length === 4 && pb.length === 4 && !pa.some(Number.isNaN) && !pb.some(Number.isNaN)) {
+    for (let i = 0; i < 4; i++) {
+      if (pa[i] !== pb[i]) return pa[i] - pb[i];
+    }
+    return 0;
+  }
+  return a.localeCompare(b);
+}
+

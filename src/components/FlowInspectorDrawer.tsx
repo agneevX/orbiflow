@@ -107,10 +107,15 @@ export function FlowInspectorDrawer({
             </dd>
           </div>
           <div className="py-2.5 flex justify-between gap-4">
-            <dt className="app-text-muted">Service / Hostname</dt>
+            <dt className="app-text-muted">Service / Category</dt>
             <dd className="text-right app-text-secondary">
-              {flow.dstService}
-              {flow.dstHost && flow.dstHost !== flow.dstIp ? ` (${flow.dstHost})` : ''}
+              {flow.dstService} · {flow.dstCategory}
+            </dd>
+          </div>
+          <div className="py-2.5 flex justify-between gap-4">
+            <dt className="app-text-muted">Reverse DNS</dt>
+            <dd className="font-mono text-right app-text-secondary break-all">
+              {flow.dstHost && flow.dstHost !== flow.dstIp ? flow.dstHost : 'No PTR record'}
             </dd>
           </div>
           <div className="py-2.5 flex justify-between gap-4">

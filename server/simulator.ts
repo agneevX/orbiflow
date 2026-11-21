@@ -265,6 +265,16 @@ const FLOW_TEMPLATES: Array<{
     rxWeight: 128,
     txWeight: 128,
   },
+  {
+    proto: 'tcp',
+    state: 'ESTABLISHED',
+    src: '192.168.1.84',
+    dst: '34.117.59.81',
+    sport: 44199,
+    dport: 443,
+    rxWeight: 0,
+    txWeight: 0,
+  },
 ];
 
 export class OrbiProbeSimulator {
@@ -283,7 +293,7 @@ export class OrbiProbeSimulator {
     }));
   }
 
-  public nextSnapshot(timestamp = Date.now(), stepSeconds = 1): ProbeSnapshot {
+  public nextSnapshot(timestamp = Date.now(), stepSeconds = 3): ProbeSnapshot {
     this.tickCount += 1;
     const wave =
       0.78 + 0.36 * Math.sin(this.tickCount * 0.17) + 0.14 * Math.cos(this.tickCount * 0.43);
@@ -321,6 +331,8 @@ export class OrbiProbeSimulator {
     this.ifaceRxBytes += tickRx;
     this.ifaceTxBytes += tickTx;
 
+    const includeSystem = this.tickCount === 1 || this.tickCount % 10 === 0;
+
     return {
       probeId: 'router-dev-sim',
       timestamp,
@@ -334,16 +346,20 @@ export class OrbiProbeSimulator {
       },
       arp: LAN_DEVICES,
       flows: rawFlows,
-      system: {
-        hostname: 'router-gateway',
-        kernel: 'Linux 6.6',
-        arch: 'linux',
-        uptimeSec: 1_248_900 + this.tickCount * stepSeconds,
-        load1m: Number((0.28 + 0.1 * Math.abs(Math.sin(this.tickCount * 0.1))).toFixed(2)),
-        memUsedPct: 36.2,
-        conntrackCount: rawFlows.length + 142,
-        conntrackMax: 32768,
-      },
+      ...(includeSystem
+        ? {
+            system: {
+              hostname: 'router-gateway',
+              kernel: 'Linux 6.6',
+              arch: 'linux',
+              uptimeSec: 1_248_900 + this.tickCount * stepSeconds,
+              load1m: Number((0.28 + 0.1 * Math.abs(Math.sin(this.tickCount * 0.1))).toFixed(2)),
+              memUsedPct: 36.2,
+              conntrackCount: rawFlows.length + 142,
+              conntrackMax: 32768,
+            },
+          }
+        : {}),
     };
   }
 }

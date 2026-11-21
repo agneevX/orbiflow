@@ -13,7 +13,7 @@ import {
 } from '../lib/timeWindowUtils';
 import { ThroughputChart } from './ThroughputChart';
 import { ClientFlowDiagram } from './ClientFlowDiagram';
-import { formatBandwidth, formatBytes } from '../lib/formatters';
+import { formatBandwidth, formatBytes, hasTangibleTraffic } from '../lib/formatters';
 
 interface OverviewViewProps {
   snapshot: DashboardSnapshot;
@@ -43,11 +43,22 @@ export function OverviewView({
     windowAvailability[timeWindow] ||
     analyzeTimeWindow(timeWindow, snapshot.history, snapshot.rollupHistory);
 
-  const topHosts = snapshot.hosts.slice(0, 5);
+  const topHosts = snapshot.hosts
+    .filter((h) => hasTangibleTraffic(h.rxBps, h.txBps))
+    .slice(0, 5);
   const topServices = (() => {
-    const map = new Map<string, { service: string; bps: number; bytes: number; flows: number }>();
+    const map = new Map<
+      string,
+      { service: string; category: string; bps: number; bytes: number; flows: number }
+    >();
     for (const l of snapshot.clientLinks) {
-      const cur = map.get(l.service) || { service: l.service, bps: 0, bytes: 0, flows: 0 };
+      const cur = map.get(l.service) || {
+        service: l.service,
+        category: l.category,
+        bps: 0,
+        bytes: 0,
+        flows: 0,
+      };
       cur.bps += l.totalBps;
       cur.bytes += l.totalBytes;
       cur.flows += l.flowCount;
@@ -213,7 +224,7 @@ export function OverviewView({
             onClick={onViewAllFlows}
             className="text-xs font-medium text-sky-500 hover:text-sky-400 transition-colors whitespace-nowrap"
           >
-            Inspect all {snapshot.flows.length} connections →
+            Inspect all {snapshot.kpis.activeFlows} active connections →
           </button>
         </div>
 
@@ -292,8 +303,8 @@ export function OverviewView({
                 >
                   <div className="min-w-0">
                     <div className="text-sm font-medium truncate">{srv.service}</div>
-                    <div className="text-xs app-text-muted mt-0.5">
-                      {srv.flows} active connections · {formatBytes(srv.bytes)}
+                    <div className="text-xs app-text-muted mt-0.5 truncate">
+                      {srv.category} · {srv.flows} active connections · {formatBytes(srv.bytes)}
                     </div>
                   </div>
                   <div className="font-mono text-xs font-medium tabular-nums shrink-0">

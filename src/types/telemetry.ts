@@ -16,6 +16,19 @@ export type ConntrackState =
   | 'CLOSE'
   | 'STATELESS';
 
+export type DestinationCategory =
+  | 'Streaming'
+  | 'Social & Messaging'
+  | 'Gaming'
+  | 'Cloud & Hosting'
+  | 'CDN & Web'
+  | 'Communication'
+  | 'Apple & Devices'
+  | 'DNS & Infrastructure'
+  | 'File & Downloads'
+  | 'Local Network'
+  | 'Other';
+
 export interface RawConntrackFlow {
   id?: string;
   proto: string;
@@ -86,6 +99,7 @@ export interface EnrichedFlow {
   dstIp: string;
   dstHost?: string;
   dstService: string;
+  dstCategory: DestinationCategory;
   dport: number;
   txBytes: number;
   rxBytes: number;
@@ -131,6 +145,7 @@ export interface HostSummary {
   rxBps: number;
   txBps: number;
   topApps: string[];
+  topServices: string[];
   lastSeen: number;
 }
 
@@ -147,6 +162,7 @@ export interface RemoteEndpointSummary {
   ip: string;
   label: string;
   service: string;
+  category: DestinationCategory;
   ports: number[];
   bytes: number;
   bps: number;
@@ -157,6 +173,7 @@ export interface ClientDestinationLink {
   clientIp: string;
   clientName: string;
   service: string;
+  category: DestinationCategory;
   rxBps: number;
   txBps: number;
   totalBps: number;
@@ -241,6 +258,7 @@ export interface ServerConfig {
   lanDnsServer: string;
   lanDnsTtlSec: number;
   stripLanDomain: boolean;
+  inferDeviceNames: boolean;
 }
 
 export interface ServerStats {

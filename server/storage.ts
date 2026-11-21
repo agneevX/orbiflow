@@ -31,6 +31,7 @@ export interface PersistedUserConfig {
   lanDnsServer?: string;
   lanDnsTtlSec?: number;
   stripLanDomain?: boolean;
+  inferDeviceNames?: boolean;
   deviceAliases?: Record<string, DeviceAlias>;
   notifications?: NotificationConfig;
   rules?: AlertRule[];
