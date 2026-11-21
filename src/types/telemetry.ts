@@ -200,6 +200,8 @@ export interface EnrichedFlow {
   assured: boolean;
   firstSeen: number;
   lastSeen: number;
+  ended?: boolean;
+  endedAt?: number;
 }
 
 export interface TrafficPoint {

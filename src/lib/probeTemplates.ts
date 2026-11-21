@@ -416,6 +416,8 @@ def discover_dnsmasq_files(custom_lease_path=""):
 
 def read_dhcp_leases(custom_lease_path=""):
     leases = {}
+    active_clients = {}
+    now_epoch = int(time.time())
     lease_paths, hosts_paths, static_hosts = discover_dnsmasq_files(custom_lease_path)
     for hpath in hosts_paths:
         for line in read_text(hpath).splitlines():
@@ -434,16 +436,26 @@ def read_dhcp_leases(custom_lease_path=""):
                 continue
             parts = clean.split()
             if len(parts) >= 4 and parts[2].count(".") == 3:
-                ip = parts[2]
-                host = parts[3]
+                expiry_str, mac_str, ip, host = parts[0], parts[1], parts[2], parts[3]
                 if host != "*" and host != ip:
                     leases[ip] = host
+                try:
+                    expiry = int(expiry_str)
+                except ValueError:
+                    expiry = 0
+                if (expiry == 0 or expiry > now_epoch) and mac_str.count(":") == 5:
+                    active_clients[ip] = {
+                        "ip": ip,
+                        "mac": mac_str.lower(),
+                        "device": "br0",
+                        "hostname": "" if host in ("*", ip) else host,
+                    }
             elif len(parts) >= 2 and parts[0].count(".") == 3 and not parts[0].startswith("127."):
                 leases[parts[0]] = parts[1]
-    return leases
+    return leases, active_clients
 
 
-def read_arp_table(leases):
+def read_arp_table(leases, active_dhcp_clients=None):
     entries_by_ip = {}
     content = read_text("/proc/net/arp")
     for line in content.splitlines()[1:]:
@@ -457,7 +469,104 @@ def read_arp_table(leases):
                     "device": dev,
                     "hostname": leases.get(ip, ""),
                 }
+    # Merge active DHCP leases so idle connected devices stay visible even if kernel ARP aged out
+    if active_dhcp_clients:
+        for ip, info in active_dhcp_clients.items():
+            if ip not in entries_by_ip:
+                entries_by_ip[ip] = {
+                    "ip": ip,
+                    "mac": info["mac"],
+                    "device": info.get("device", "br0"),
+                    "hostname": leases.get(ip, info.get("hostname", "")),
+                }
     return list(entries_by_ip.values())
+
+
+def read_router_wifi_clients():
+    clients = {}
+    try:
+        import subprocess
+        ifaces = sorted(os.listdir("/sys/class/net"))
+    except Exception:
+        return []
+
+    wifi_ifaces = [
+        n for n in ifaces
+        if os.path.isdir(f"/sys/class/net/{n}/wireless") or n.startswith("ath") or n.startswith("wlan")
+    ]
+    for wif in wifi_ifaces:
+        try:
+            out = subprocess.check_output(
+                ["wlanconfig", wif, "list", "sta"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            for raw in out.splitlines():
+                parts = raw.split()
+                if len(parts) >= 6 and parts[0].count(":") == 5:
+                    mac = parts[0].lower()
+                    tx_m = int(parts[3].rstrip("Mm")) if parts[3].rstrip("Mm").isdigit() else 0
+                    rx_m = int(parts[4].rstrip("Mm")) if parts[4].rstrip("Mm").isdigit() else 0
+                    rssi = int(parts[5]) if parts[5].lstrip("-").isdigit() else 0
+                    clients[mac] = {
+                        "mac": mac,
+                        "connectionType": "wifi",
+                        "portOrRadio": wif,
+                        "linkSpeedMbps": max(tx_m, rx_m),
+                        "signalDbm": (-95 + rssi) if rssi > 0 else rssi,
+                        "rxBytes": 0,
+                        "txBytes": 0,
+                        "rxBps": 0,
+                        "txBps": 0,
+                    }
+            continue
+        except Exception:
+            pass
+
+        try:
+            out = subprocess.check_output(
+                ["iw", "dev", wif, "station", "dump"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            cur_mac = None
+            for raw in out.splitlines():
+                line = raw.strip()
+                if line.startswith("Station "):
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1].count(":") == 5:
+                        cur_mac = parts[1].lower()
+                        clients[cur_mac] = {
+                            "mac": cur_mac,
+                            "connectionType": "wifi",
+                            "portOrRadio": wif,
+                            "linkSpeedMbps": 0,
+                            "rxBytes": 0,
+                            "txBytes": 0,
+                            "rxBps": 0,
+                            "txBps": 0,
+                        }
+                elif cur_mac and line.startswith("rx bytes:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val.isdigit():
+                        clients[cur_mac]["rxBytes"] = int(val)
+                elif cur_mac and line.startswith("tx bytes:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val.isdigit():
+                        clients[cur_mac]["txBytes"] = int(val)
+                elif cur_mac and line.startswith("signal:"):
+                    tok = line.split(":", 1)[1].strip().split()[0]
+                    if tok.lstrip("-").isdigit():
+                        clients[cur_mac]["signalDbm"] = int(tok)
+                elif cur_mac and line.startswith("tx bitrate:"):
+                    tok = line.split(":", 1)[1].strip().split()[0]
+                    try:
+                        clients[cur_mac]["linkSpeedMbps"] = int(round(float(tok)))
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+    return list(clients.values())
 
 
 SKIP_STATES = (
@@ -662,6 +771,7 @@ def main():
     ws = MiniWebSocket(cfg["ws_url"], cfg["token"])
     leases = {}
     arp = []
+    router_clients = []
     last_neigh_refresh = 0.0
     last_sys_refresh = 0.0
 
@@ -684,10 +794,13 @@ def main():
 
                 now_ts = time.time()
                 if now_ts - last_neigh_refresh >= cfg["neigh_interval"]:
-                    leases = read_dhcp_leases(cfg["dhcp_leases"])
-                    arp = read_arp_table(leases)
+                    leases, active_dhcp = read_dhcp_leases(cfg["dhcp_leases"])
+                    arp = read_arp_table(leases, active_dhcp)
+                    router_clients = read_router_wifi_clients()
                     last_neigh_refresh = now_ts
-                    logger.debug(f"Refreshed {len(arp)} ARP neighbors / {len(leases)} DHCP leases")
+                    logger.debug(
+                        f"Refreshed {len(arp)} ARP/DHCP devices, {len(router_clients)} Wi-Fi clients"
+                    )
 
                 conntrack_lines = read_conntrack_lines()
                 data = {
@@ -696,6 +809,7 @@ def main():
                     "source": "live",
                     "iface": read_iface_counters(cfg["iface"]),
                     "ports": read_router_ports(cfg["iface"]),
+                    "routerClients": router_clients,
                     "arp": arp,
                     "flows": [],
                     "rawConntrackLines": conntrack_lines,

@@ -132,15 +132,21 @@ export function FlowInspectorDrawer({
               />
             </dt>
             <dd className="font-mono app-text-secondary">
-              {flow.state} ·{' '}
-              <TechTerm
-                label={flow.assured ? 'ASSURED' : 'UNASSURED'}
-                tip={
-                  flow.assured
-                    ? 'Bidirectional traffic has been confirmed by the router.'
-                    : 'Only one-way traffic has been seen so far.'
-                }
-              />
+              {flow.ended ? (
+                <span>Ended (was {flow.state})</span>
+              ) : (
+                <>
+                  {flow.state} ·{' '}
+                  <TechTerm
+                    label={flow.assured ? 'ASSURED' : 'UNASSURED'}
+                    tip={
+                      flow.assured
+                        ? 'Bidirectional traffic has been confirmed by the router.'
+                        : 'Only one-way traffic has been seen so far.'
+                    }
+                  />
+                </>
+              )}
             </dd>
           </div>
           <div className="py-2.5 flex justify-between gap-4">

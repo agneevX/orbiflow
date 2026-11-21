@@ -92,13 +92,20 @@ export function AlertsView({
     text: string;
   } | null>(null);
 
+  const rulesSignature = JSON.stringify(rules);
+  const notifSignature = JSON.stringify(notifications);
+
   useEffect(() => {
     setDraftRules(rules);
-  }, [rules]);
+    // Only resync local draft when server-side rule values actually change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rulesSignature]);
 
   useEffect(() => {
     setDraftNotif(notifications);
-  }, [notifications]);
+    // Only resync local draft when server-side notification settings actually change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notifSignature]);
 
   const handleToggleRule = (id: string) => {
     setDraftRules((prev) =>

@@ -48,11 +48,20 @@ import {
 interface FlowTrackRecord {
   firstSeen: number;
   lastSeen: number;
+  endedAt?: number;
   prevTxBytes: number;
   prevRxBytes: number;
   txBps: number;
   rxBps: number;
   flow: EnrichedFlow;
+}
+
+interface KnownHostRecord {
+  ip: string;
+  mac: string;
+  dhcpHostname?: string;
+  providedVendor?: string;
+  lastSeen: number;
 }
 
 export type RdnsLookupFn = (ip: string) => string | null;
@@ -235,6 +244,10 @@ export class TrafficMonitorEngine {
   private bucketSamples: TrafficPoint[] = [];
 
   private flowRecords = new Map<string, FlowTrackRecord>();
+  private readonly endedFlowRetentionMs = 10 * 60_000; // Keep ended flows visible for 10m
+  private readonly maxRetainedEndedFlows = 500;
+  private knownHostsCache = new Map<string, KnownHostRecord>();
+  private readonly hostPresenceTtlMs = 15 * 60_000; // Keep connected hosts stable across brief ARP aging
   private lastIface: InterfaceCounters | null = null;
   private lastTimestamp = 0;
   private peakRxBps = 0;
@@ -876,15 +889,14 @@ export class TrafficMonitorEngine {
           ? parseProcConntrackLines(snapshot.rawConntrackLines)
           : [];
 
-    const seenIds = new Set<string>();
-    const enrichedFlows: EnrichedFlow[] = [];
+    const seenActiveIds = new Set<string>();
+    const activeEnrichedFlows: EnrichedFlow[] = [];
 
     for (const raw of rawFlows) {
       const proto = normalizeProtocol(raw.proto);
       const state = normalizeState(raw.state, proto);
       const assured = raw.assured ?? true;
       const id = raw.id || `${proto}:${raw.src}:${raw.sport}->${raw.dst}:${raw.dport}`;
-      seenIds.add(id);
 
       const prev = this.flowRecords.get(id);
       const txDelta =
@@ -895,10 +907,31 @@ export class TrafficMonitorEngine {
       const flowTxBps = prev ? Math.round(txDelta) : 0;
       const flowRxBps = prev ? Math.round(rxDelta) : 0;
 
-      // Skip closing or unestablished sessions (TIME_WAIT, FIN_WAIT, CLOSE_WAIT, SYN_SENT, CLOSE, unassured UDP)
+      // Drop brand-new closing/unestablished sessions, but if a previously tracked live flow
+      // transitions to TIME_WAIT / FIN_WAIT / CLOSE_WAIT / CLOSE, mark it ended so it stays readable
       if (!isActiveConnectionState(state, proto, assured)) {
+        if (prev && !prev.endedAt) {
+          const finalTx = Math.max(prev.flow.txBytes, raw.txBytes);
+          const finalRx = Math.max(prev.flow.rxBytes, raw.rxBytes);
+          prev.endedAt = now;
+          prev.txBps = 0;
+          prev.rxBps = 0;
+          prev.flow = {
+            ...prev.flow,
+            txBytes: finalTx,
+            rxBytes: finalRx,
+            totalBytes: finalTx + finalRx,
+            txBps: 0,
+            rxBps: 0,
+            totalBps: 0,
+            ended: true,
+            endedAt: now,
+          };
+        }
         continue;
       }
+
+      seenActiveIds.add(id);
 
       const isTangible = hasTangibleTraffic(flowRxBps, flowTxBps);
       // Only spend external rDNS lookups on tangible active flows or newly observed flows
@@ -975,11 +1008,13 @@ export class TrafficMonitorEngine {
         assured,
         firstSeen: prev ? prev.firstSeen : now,
         lastSeen: now,
+        ended: false,
       };
 
       this.flowRecords.set(id, {
         firstSeen: flow.firstSeen,
         lastSeen: now,
+        endedAt: undefined,
         prevTxBytes: raw.txBytes,
         prevRxBytes: raw.rxBytes,
         txBps: flowTxBps,
@@ -987,22 +1022,53 @@ export class TrafficMonitorEngine {
         flow,
       });
 
-      enrichedFlows.push(flow);
+      activeEnrichedFlows.push(flow);
     }
 
-    // Expire stale flows after 30s
+    // Mark previously active flows that disappeared as ended and retain them for 10m
+    const retainedEndedFlows: EnrichedFlow[] = [];
     for (const [key, rec] of this.flowRecords.entries()) {
-      if (!seenIds.has(key) && now - rec.lastSeen > 30_000) {
+      if (seenActiveIds.has(key)) continue;
+
+      if (!rec.endedAt) {
+        rec.endedAt = now;
+        rec.txBps = 0;
+        rec.rxBps = 0;
+        rec.flow = {
+          ...rec.flow,
+          txBps: 0,
+          rxBps: 0,
+          totalBps: 0,
+          ended: true,
+          endedAt: now,
+        };
+      }
+
+      if (now - rec.endedAt > this.endedFlowRetentionMs) {
         this.flowRecords.delete(key);
+        continue;
+      }
+
+      retainedEndedFlows.push(rec.flow);
+    }
+
+    // Cap retained ended flows by keeping the most recently ended ones
+    if (retainedEndedFlows.length > this.maxRetainedEndedFlows) {
+      retainedEndedFlows.sort((a, b) => (b.endedAt || b.lastSeen) - (a.endedAt || a.lastSeen));
+      const dropped = retainedEndedFlows.splice(this.maxRetainedEndedFlows);
+      for (const d of dropped) {
+        this.flowRecords.delete(d.id);
       }
     }
 
-    enrichedFlows.sort((a, b) => {
+    activeEnrichedFlows.sort((a, b) => {
       if (b.totalBps !== a.totalBps) return b.totalBps - a.totalBps;
       return b.totalBytes - a.totalBytes;
     });
+    retainedEndedFlows.sort((a, b) => (b.endedAt || b.lastSeen) - (a.endedAt || a.lastSeen));
 
-    const tangibleFlows = enrichedFlows.filter((f) => hasTangibleTraffic(f.rxBps, f.txBps));
+    const enrichedFlows: EnrichedFlow[] = [...activeEnrichedFlows, ...retainedEndedFlows];
+    const tangibleFlows = activeEnrichedFlows.filter((f) => hasTangibleTraffic(f.rxBps, f.txBps));
 
     const routerLoadPct = computePerceivedRouterLoadPct({
       load1m: this.probeStatus.load1m,
@@ -1032,17 +1098,73 @@ export class TrafficMonitorEngine {
       }
     >();
 
+    // Refresh connected host presence cache from ARP + router/satellite client tables
+    const attachedMacs = new Set<string>();
+    const allSatellites = this.buildTopologyTelemetry().satellites;
+    for (const rc of this.routerClients) {
+      const m = normalizeMac(rc.mac);
+      if (m && m !== '00:00:00:00:00:00') attachedMacs.add(m);
+    }
+    for (const sat of allSatellites) {
+      if (!sat.connected) continue;
+      for (const sc of sat.clients || []) {
+        const m = normalizeMac(sc.mac);
+        if (m && m !== '00:00:00:00:00:00') attachedMacs.add(m);
+      }
+    }
+
     for (const entry of snapshot.arp || []) {
       const normMac = normalizeMac(entry.mac);
-      hostMap.set(entry.ip, {
+      const prevKnown = this.knownHostsCache.get(entry.ip);
+      const dhcpHost = isMeaningfulHostname(entry.hostname, entry.ip)
+        ? entry.hostname
+        : prevKnown?.dhcpHostname;
+      const providedVendor = entry.vendor || prevKnown?.providedVendor;
+      this.knownHostsCache.set(entry.ip, {
         ip: entry.ip,
-        mac: normMac,
-        hostname: entry.ip,
-        vendor: entry.vendor || 'LAN Device',
+        mac: normMac && normMac !== '00:00:00:00:00:00' ? normMac : prevKnown?.mac || normMac,
+        dhcpHostname: dhcpHost,
+        providedVendor,
+        lastSeen: now,
+      });
+    }
+
+    // Refresh lastSeen for any cached host currently associated on router or satellite Wi-Fi/LAN
+    // and ensure satellite/router clients with known IPs are also seeded
+    for (const known of this.knownHostsCache.values()) {
+      if (known.mac && attachedMacs.has(known.mac)) {
+        known.lastSeen = now;
+      }
+    }
+    for (const sc of [
+      ...this.routerClients,
+      ...allSatellites.filter((s) => s.connected).flatMap((s) => s.clients || []),
+    ]) {
+      if (sc.ip && isPrivateIp(sc.ip) && !this.knownHostsCache.has(sc.ip)) {
+        const normMac = normalizeMac(sc.mac);
+        this.knownHostsCache.set(sc.ip, {
+          ip: sc.ip,
+          mac: normMac,
+          lastSeen: now,
+        });
+      }
+    }
+
+    // Seed hostMap from all currently connected / recently seen LAN devices (not only active traffic)
+    for (const [ip, known] of this.knownHostsCache.entries()) {
+      if (now - known.lastSeen > this.hostPresenceTtlMs) {
+        this.knownHostsCache.delete(ip);
+        continue;
+      }
+      hostMap.set(ip, {
+        ip,
+        mac: known.mac,
+        hostname: ip,
+        vendor: known.providedVendor || 'LAN Device',
         nameSource: 'ip',
         isRandomizedMac: false,
-        dhcpHostname: isMeaningfulHostname(entry.hostname, entry.ip) ? entry.hostname : undefined,
-        providedVendor: entry.vendor,
+        dhcpHostname: known.dhcpHostname,
+        providedVendor: known.providedVendor,
         activeFlows: 0,
         rxBytes: 0,
         txBytes: 0,
@@ -1051,7 +1173,7 @@ export class TrafficMonitorEngine {
         txBps: 0,
         topApps: [],
         topServices: [],
-        lastSeen: now,
+        lastSeen: known.lastSeen,
         appCounts: new Map(),
         serviceCounts: new Map(),
         observedFlows: [],
@@ -1064,12 +1186,23 @@ export class TrafficMonitorEngine {
 
     let totalFlowBytes = 0;
 
-    for (const f of enrichedFlows) {
+    // Only aggregate LIVE (non-ended) flows into host stats, protocols, remotes, and clientLinks
+    for (const f of activeEnrichedFlows) {
       totalFlowBytes += f.totalBytes;
 
       const lanIp = isPrivateIp(f.srcIp) ? f.srcIp : isPrivateIp(f.dstIp) ? f.dstIp : null;
 
       if (lanIp) {
+        const existingKnown = this.knownHostsCache.get(lanIp);
+        if (existingKnown) {
+          existingKnown.lastSeen = now;
+        } else {
+          this.knownHostsCache.set(lanIp, {
+            ip: lanIp,
+            mac: normalizeMac(f.srcMac),
+            lastSeen: now,
+          });
+        }
         let host = hostMap.get(lanIp);
         if (!host) {
           host = {
@@ -1220,13 +1353,14 @@ export class TrafficMonitorEngine {
       })
       .sort((a, b) => b.rxBps + b.txBps - (a.rxBps + a.txBps) || b.totalBytes - a.totalBytes);
 
-    // Back-populate resolved hostnames into flows & tangible client-destination links so all views match
+    // Back-populate resolved hostnames into all flows (including retained ended flows)
+    // and build live tangible client-destination links only from non-ended flows
     for (const f of enrichedFlows) {
       const lanIp = isPrivateIp(f.srcIp) ? f.srcIp : isPrivateIp(f.dstIp) ? f.dstIp : null;
       if (isPrivateIp(f.srcIp) && resolvedNameByIp.has(f.srcIp)) {
         f.srcHost = resolvedNameByIp.get(f.srcIp)!;
       }
-      if (lanIp && hasTangibleTraffic(f.rxBps, f.txBps)) {
+      if (!f.ended && lanIp && hasTangibleTraffic(f.rxBps, f.txBps)) {
         const clientName = resolvedNameByIp.get(lanIp) || f.srcHost;
         const serviceName = f.dstService;
         const linkKey = `${lanIp}=>${serviceName}`;

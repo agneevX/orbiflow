@@ -97,7 +97,7 @@ export function HostsView({
 
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<HostTypeFilter>('ALL');
-  const [showIdle, setShowIdle] = useState(false);
+  const [showIdle, setShowIdle] = useState(true);
   // Default to Total Data descending so rows remain calm and do not jump every poll tick
   const [sortKey, setSortKey] = useState<HostSortKey>('totalBytes');
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');

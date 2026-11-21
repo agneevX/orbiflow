@@ -8,7 +8,7 @@ import {
   parseSatelliteSshOutput,
   toPublicSatelliteConfig,
 } from './topology';
-import { validateSatelliteInput } from '../../server/satellitePoller';
+import { convertProbeToTelemetry, validateSatelliteInput } from '../../server/satellitePoller';
 import { DEFAULT_TABLE_PREFERENCES } from './tablePreferences';
 import type { DashboardSnapshot, HostSummary, SatelliteConfig } from '../types/telemetry';
 
@@ -383,4 +383,180 @@ test('validateSatelliteInput enforces strict host, port, username, and interface
     validateSatelliteInput({ name: 'Bad', host: '192.168.1.3', port: 22, username: 'root;id' }).ok,
     false
   );
+});
+
+test('convertProbeToTelemetry detects Wi-Fi backhaul via gateway MAC + brif and excludes main-AP MACs', () => {
+  const cfg: SatelliteConfig = {
+    id: 'sat-wifi',
+    name: 'Upstairs Orbi',
+    host: '192.168.1.3',
+    port: 22,
+    username: 'root',
+    authMethod: 'password',
+    pollIntervalSec: 5,
+    enabled: true,
+  };
+
+  const sampleWifiBackhaul = [
+    '===META===',
+    'HOST=RBS50-Upstairs',
+    'UPTIME=54000.00 100000.00',
+    '===ROUTE===',
+    'default via 192.168.1.1 dev br0',
+    'IP address       HW type     Flags       HW address            Mask     Device',
+    '192.168.1.1      0x1         0x2         c0:ff:ee:00:00:01     *        br0',
+    '192.168.1.52     0x1         0x2         b4:fb:e4:12:77:09     *        br0',
+    '192.168.1.67     0x1         0x2         7c:d9:5c:31:aa:02     *        br0',
+    '===BRIF===',
+    'eth0|0x1',
+    'ath0|0x2',
+    'ath1|0x3',
+    'ath2|0x4',
+    '===IFACES===',
+    'eth0|up|1000|full|900000|400000|0|aa:00:00:00:00:01',
+    'ath0|up|0|unknown|10000|5000|1|aa:00:00:00:00:02',
+    'ath1|up|0|unknown|300000|100000|1|aa:00:00:00:00:03',
+    'ath2|up|0|unknown|5000000|1200000|1|aa:00:00:00:00:04',
+    '===SWCONFIG===',
+    'Port 0:',
+    '  link: port:0 link:up speed:1000baseT full-duplex',
+    'Port 1:',
+    '  link: port:1 link:down',
+    'Port 2:',
+    '  link: port:2 link:up speed:1000baseT full-duplex',
+    '  RxGoodByte : 900000',
+    '  TxByte     : 400000',
+    '===SWITCH_FDB===',
+    '===BRCTL===',
+    '  4   c0:ff:ee:00:00:01   no   0.10',
+    '  4   11:11:11:11:11:11   no   0.20',
+    '  4   22:22:22:22:22:22   no   0.30',
+    '  1   b4:fb:e4:12:77:09   no   0.40',
+    '  3   7c:d9:5c:31:aa:02   no   0.50',
+    '===WIFI_INFO===',
+    'ath0      IEEE 802.11ng  ESSID:"HomeWiFi"',
+    '          Mode:Master  Frequency:2.437 GHz  Access Point: AA:00:00:00:00:02',
+    'ath1      IEEE 802.11ac  ESSID:"HomeWiFi"',
+    '          Mode:Master  Frequency:5.18 GHz  Access Point: AA:00:00:00:00:03',
+    'ath2      IEEE 802.11ac  ESSID:"ORBI_BH"',
+    '          Mode:Managed  Frequency:5.745 GHz  Access Point: C0:FF:EE:00:00:02',
+    '          Bit Rate:866.7 Mb/s',
+    '===WIFI===',
+    'WIFI_IF=ath1',
+    'ADDR               AID CHAN TXRATE RXRATE RSSI MINRSSI MAXRSSI IDLE',
+    '7c:d9:5c:31:aa:02    1   36   866M   780M   40      32      44    0',
+    'WIFI_IF=ath2',
+    'ADDR               AID CHAN TXRATE RXRATE RSSI MINRSSI MAXRSSI IDLE',
+    'c0:ff:ee:00:00:02    1  149   866M   866M   45      40      48    0',
+  ].join('\n');
+
+  const { telemetry } = convertProbeToTelemetry(cfg, sampleWifiBackhaul, null, 1_700_000_000_000);
+
+  assert.equal(telemetry.backhaulType, 'wifi');
+  assert.equal(telemetry.backhaulIface, 'ath2');
+  assert.equal(telemetry.backhaulSpeedMbps, 867);
+  assert.equal(telemetry.rxBytes, 5_000_000);
+  assert.equal(telemetry.txBytes, 1_200_000);
+
+  // Switch ports only (eth0 trunk not duplicated), all marked LAN (none falsely marked backhaul)
+  assert.equal(telemetry.ports.length, 2);
+  assert.equal(telemetry.ports.every((p) => p.role === 'lan'), true);
+
+  // Clients must ONLY include the satellite's own Wi-Fi client (7c:d9...) and wired LAN client (b4:fb...)
+  // Main-AP devices on bridge port 4 (11:11..., 22:22...), gateway MAC, and backhaul BSSID MUST be excluded!
+  const clientMacs = telemetry.clients.map((c) => c.mac).sort();
+  assert.deepEqual(clientMacs, ['7c:d9:5c:31:aa:02', 'b4:fb:e4:12:77:09']);
+  const wifiClient = telemetry.clients.find((c) => c.mac === '7c:d9:5c:31:aa:02');
+  assert.equal(wifiClient?.connectionType, 'wifi');
+  assert.equal(wifiClient?.portOrRadio, '5 GHz (ath1)');
+  const wiredClient = telemetry.clients.find((c) => c.mac === 'b4:fb:e4:12:77:09');
+  assert.equal(wiredClient?.connectionType, 'ethernet');
+  assert.equal(wiredClient?.linkSpeedMbps, 1000);
+});
+
+test('convertProbeToTelemetry detects Ethernet backhaul via switch FDB and excludes uplink port MACs', () => {
+  const cfg: SatelliteConfig = {
+    id: 'sat-eth',
+    name: 'Office Orbi',
+    host: '192.168.1.4',
+    port: 22,
+    username: 'root',
+    authMethod: 'password',
+    pollIntervalSec: 5,
+    enabled: true,
+  };
+
+  const sampleEthBackhaul = [
+    '===META===',
+    'HOST=RBS50-Office',
+    'UPTIME=12000.00 20000.00',
+    '===ROUTE===',
+    'default via 192.168.1.1 dev br0',
+    '192.168.1.1      0x1         0x2         c0:ff:ee:00:00:01     *        br0',
+    '===BRIF===',
+    'eth0|0x1',
+    'ath1|0x2',
+    '===IFACES===',
+    'eth0|up|1000|full|2000000|800000|0|bb:00:00:00:00:01',
+    'ath1|up|0|unknown|100000|50000|1|bb:00:00:00:00:02',
+    '===SWCONFIG===',
+    'Port 0:',
+    '  link: port:0 link:up speed:1000baseT full-duplex',
+    'Port 1:',
+    '  link: port:1 link:down',
+    'Port 2:',
+    '  link: port:2 link:up speed:1000baseT full-duplex',
+    '  RxGoodByte : 2500000',
+    '  TxByte     : 900000',
+    'Port 3:',
+    '  link: port:3 link:up speed:1000baseT full-duplex',
+    '  RxGoodByte : 300000',
+    '  TxByte     : 100000',
+    '===SWITCH_FDB===',
+    'Port 2: MAC c0:ff:ee:00:00:01',
+    'Port 2: MAC 33:33:33:33:33:33',
+    'Port 3: MAC 44:44:44:44:44:44',
+    '===BRCTL===',
+    '  1   c0:ff:ee:00:00:01   no   0.10',
+    '  1   33:33:33:33:33:33   no   0.20',
+    '  1   44:44:44:44:44:44   no   0.30',
+    '===WIFI_INFO===',
+    'ath1      IEEE 802.11ac  ESSID:"HomeWiFi"',
+    '          Mode:Master  Frequency:5.18 GHz',
+    '===WIFI===',
+    'WIFI_IF=ath1',
+  ].join('\n');
+
+  const { telemetry } = convertProbeToTelemetry(cfg, sampleEthBackhaul, null, 1_700_000_000_000);
+
+  assert.equal(telemetry.backhaulType, 'ethernet');
+  assert.equal(telemetry.backhaulIface, 'port2');
+  assert.equal(telemetry.backhaulSpeedMbps, 1000);
+  assert.equal(telemetry.ports.find((p) => p.id === 'port2')?.role, 'backhaul');
+  assert.equal(telemetry.ports.find((p) => p.id === 'port3')?.role, 'lan');
+
+  // Only Port 3 downstream client is included; Port 2 uplink main-AP client (33:33...) is excluded!
+  assert.deepEqual(
+    telemetry.clients.map((c) => c.mac),
+    ['44:44:44:44:44:44']
+  );
+  assert.equal(telemetry.clients[0].portOrRadio, 'LAN 3');
+});
+
+test('buildTopologyGraph does not assign fake 1 GbE Ethernet labels to direct clients with unknown link metadata', () => {
+  const snap = makeSnapshot();
+  snap.hosts.push(
+    makeHost({
+      ip: '192.168.1.99',
+      mac: 'de:ad:be:ef:00:99',
+      hostname: 'iPhone 16',
+      rxBps: 250_000,
+      txBps: 40_000,
+    })
+  );
+  const graph = buildTopologyGraph(snap);
+  const phoneNode = graph.nodes.find((n) => n.id === 'client:192.168.1.99');
+  assert.ok(phoneNode);
+  assert.equal(phoneNode.connectionType, undefined);
+  assert.equal(phoneNode.linkSpeedLabel, undefined);
 });

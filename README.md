@@ -12,7 +12,7 @@ Lightweight, real-time internet traffic monitor and connection inspector for Lin
 - **Auto-Randomized Shared Agent Token**: On first start, the server automatically generates a cryptographically random token (`of_...`) stored in `/config/config.json` to authenticate snapshots from your router agent (`X-Probe-Token`) so untrusted LAN devices cannot spoof traffic data.
 - **Persistent `/config` Volume & Non-Root Container**: Runs as non-root (`PUID:PGID`, fixing `/config` file ownership on startup) and uses only `PUID`, `PGID`, and `TZ` environment variables.
 - **Appearance & Theme System**: Split **Auto / Dark / Light** appearance selector paired with curated dark palettes (*Obsidian Night*, *Catppuccin Mocha*, *Dracula Pro*, *Nord*, *Tokyo Night*) and light palettes (*Daylight Slate*, *Catppuccin Latte*, *Nord Snow*).
-- **Multi-Arch Docker Server Image**: Automated GitHub Actions workflow publishing `linux/amd64`, `linux/arm64`, and `linux/arm/v7` images to GitHub Container Registry (`ghcr.io`).
+- **Multi-Arch Docker Server Image**: Automated GitHub Actions workflow publishing `linux/amd64` and `linux/arm64` images to GitHub Container Registry (`ghcr.io`).
 
 ---
 
@@ -52,8 +52,8 @@ Run the OrbiFlow server as a non-root container with a single persistent `/confi
 
 ```yaml
 services:
-  orbiflow-server:
-    image: ghcr.io/<your-github-username>/orbiflow:latest
+  orbiflow:
+    image: ghcr.io/agneevx/orbiflow:latest
     container_name: orbiflow-server
     restart: unless-stopped
     ports:

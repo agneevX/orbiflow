@@ -901,7 +901,13 @@ export function TrafficMapView({
                   />
 
                   {showPortSpeeds && edge.linkSpeedLabel && (() => {
-                    const labelWidth = Math.max(38, edge.linkSpeedLabel.length * 6.4 + 12);
+                    const isClientEdge = edge.targetId.startsWith('client:');
+                    // For wireless clients, keep edge badge concise ("Wi-Fi") rather than a negotiation rate
+                    const displayLabel =
+                      isClientEdge && edge.connectionType === 'wifi'
+                        ? 'Wi-Fi'
+                        : edge.linkSpeedLabel;
+                    const labelWidth = Math.max(38, displayLabel.length * 6.4 + 12);
                     return (
                       <g transform={`translate(${mid.x}, ${mid.y - 12})`}>
                         <rect
@@ -930,7 +936,7 @@ export function TrafficMapView({
                                 : '#94a3b8'
                           }
                         >
-                          {edge.linkSpeedLabel}
+                          {displayLabel}
                         </text>
                       </g>
                     );
@@ -1051,8 +1057,11 @@ export function TrafficMapView({
 
                 {showPortSpeeds && node.kind !== 'internet' && node.linkSpeedLabel && (
                   <div className="mt-0.5 text-[10px] font-mono app-text-muted whitespace-nowrap">
-                    {node.portLabel ? `${node.portLabel} · ` : ''}
-                    {node.linkSpeedLabel}
+                    {node.kind === 'client' && node.connectionType === 'wifi'
+                      ? node.portLabel
+                        ? `${node.portLabel} · Wi-Fi`
+                        : 'Wi-Fi'
+                      : `${node.portLabel ? `${node.portLabel} · ` : ''}${node.linkSpeedLabel}`}
                   </div>
                 )}
               </button>
@@ -1115,7 +1124,7 @@ export function TrafficMapView({
                 </div>
               </div>
 
-              {/* Link Negotiation Metadata */}
+              {/* Link Metadata */}
               {selectedNode.linkSpeedLabel && (
                 <div className="p-3 rounded-xl border app-border app-input flex items-center justify-between gap-2 text-xs">
                   <span className="flex items-center gap-1.5 app-text-muted">
@@ -1126,10 +1135,14 @@ export function TrafficMapView({
                     )}
                     <span>
                       {selectedNode.kind === 'satellite'
-                        ? 'Backhaul Link'
+                        ? selectedNode.connectionType === 'wifi'
+                          ? 'Wi-Fi Backhaul'
+                          : 'Ethernet Backhaul'
                         : selectedNode.kind === 'router'
                           ? 'WAN Negotiation'
-                          : 'Negotiated Link'}
+                          : selectedNode.connectionType === 'wifi'
+                            ? 'Wi-Fi Link'
+                            : 'Ethernet Link'}
                     </span>
                   </span>
                   <span className="font-mono font-semibold tabular-nums">
@@ -1141,6 +1154,13 @@ export function TrafficMapView({
               {/* Satellite metadata */}
               {selectedNode.satellite && (
                 <div className="space-y-1.5 text-xs app-text-muted">
+                  <div className="flex items-center justify-between">
+                    <span>Backhaul Mode</span>
+                    <span className="font-mono app-text-secondary">
+                      {selectedNode.satellite.backhaulType === 'wifi' ? 'Wi-Fi' : 'Ethernet'} (
+                      {selectedNode.satellite.backhaulIface})
+                    </span>
+                  </div>
                   <div className="flex items-center justify-between">
                     <span>Telemetry Source</span>
                     <span className="font-mono app-text-secondary">

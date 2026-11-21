@@ -108,6 +108,15 @@ export function toPublicSatelliteConfig(cfg: SatelliteConfig): PublicSatelliteCo
 export interface ParsedSatelliteProbe {
   hostname: string;
   uptimeSec: number;
+  gatewayIp?: string;
+  arpEntries: Array<{
+    ip: string;
+    mac: string;
+  }>;
+  bridgeIfaces: Array<{
+    portNum: number;
+    iface: string;
+  }>;
   interfaces: Array<{
     name: string;
     operstate: string;
@@ -116,6 +125,7 @@ export interface ParsedSatelliteProbe {
     rxBytes: number;
     txBytes: number;
     isWireless: boolean;
+    mac?: string;
   }>;
   switchPorts: Array<{
     portNum: number;
@@ -125,19 +135,49 @@ export interface ParsedSatelliteProbe {
     rxBytes: number;
     txBytes: number;
   }>;
+  switchFdb: Array<{
+    portNum: number;
+    mac: string;
+  }>;
   bridgeMacs: Array<{
     portNum: number;
     mac: string;
     isLocal: boolean;
   }>;
+  wifiIfaces: Array<{
+    iface: string;
+    mode: 'master' | 'managed' | 'unknown';
+    bssid?: string;
+    associated: boolean;
+    bitRateMbps: number;
+    freqGhz?: number;
+  }>;
   wifiStations: Array<{
     iface: string;
     mac: string;
     txRateMbps: number;
+    rxRateMbps?: number;
     signalDbm?: number;
     rxBytes: number;
     txBytes: number;
   }>;
+}
+
+function decodeProcRouteGatewayHex(hex: string): string | undefined {
+  const clean = hex.trim().toUpperCase();
+  if (!/^[0-9A-F]{8}$/.test(clean) || clean === '00000000') return undefined;
+  const b0 = parseInt(clean.slice(0, 2), 16);
+  const b1 = parseInt(clean.slice(2, 4), 16);
+  const b2 = parseInt(clean.slice(4, 6), 16);
+  const b3 = parseInt(clean.slice(6, 8), 16);
+  // Most routers (ARM/x86) are little-endian so RFC1918 first octet (192/10/172) is in b3;
+  // fall back to big-endian if b0 looks like a private network and b3 does not.
+  const leLooksPrivate = b3 === 192 || b3 === 10 || b3 === 172;
+  const beLooksPrivate = b0 === 192 || b0 === 10 || b0 === 172;
+  if (beLooksPrivate && !leLooksPrivate) {
+    return `${b0}.${b1}.${b2}.${b3}`;
+  }
+  return `${b3}.${b2}.${b1}.${b0}`;
 }
 
 /**
@@ -149,9 +189,13 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
   const result: ParsedSatelliteProbe = {
     hostname: '',
     uptimeSec: 0,
+    arpEntries: [],
+    bridgeIfaces: [],
     interfaces: [],
     switchPorts: [],
+    switchFdb: [],
     bridgeMacs: [],
+    wifiIfaces: [],
     wifiStations: [],
   };
 
@@ -164,11 +208,20 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
     rxBytes: number;
     txBytes: number;
   } | null = null;
+  let currentWifiInfo: {
+    iface: string;
+    mode: 'master' | 'managed' | 'unknown';
+    bssid?: string;
+    associated: boolean;
+    bitRateMbps: number;
+    freqGhz?: number;
+  } | null = null;
   let currentWifiIface = 'ath0';
   let currentIwStation: {
     iface: string;
     mac: string;
     txRateMbps: number;
+    rxRateMbps?: number;
     signalDbm?: number;
     rxBytes: number;
     txBytes: number;
@@ -178,6 +231,13 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
     if (currentSwitchPort) {
       result.switchPorts.push(currentSwitchPort);
       currentSwitchPort = null;
+    }
+  };
+
+  const flushWifiInfo = () => {
+    if (currentWifiInfo) {
+      result.wifiIfaces.push(currentWifiInfo);
+      currentWifiInfo = null;
     }
   };
 
@@ -194,6 +254,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
 
     if (line.startsWith('===') && line.endsWith('===')) {
       flushSwitchPort();
+      flushWifiInfo();
       flushIwStation();
       section = line.slice(3, -3).trim();
       continue;
@@ -209,8 +270,50 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
       continue;
     }
 
+    if (section === 'ROUTE') {
+      // ip route show default -> "default via 192.168.1.1 dev br0"
+      const viaMatch = line.match(/^default\s+via\s+(\d+\.\d+\.\d+\.\d+)/i);
+      if (viaMatch) {
+        result.gatewayIp = viaMatch[1];
+        continue;
+      }
+      // /proc/net/route -> "br0 00000000 0101A8C0 0003 ..."
+      const procRoute = line.match(/^\S+\s+00000000\s+([0-9A-Fa-f]{8})\s+/);
+      if (procRoute && !result.gatewayIp) {
+        result.gatewayIp = decodeProcRouteGatewayHex(procRoute[1]);
+        continue;
+      }
+      // /proc/net/arp -> "192.168.1.1 0x1 0x2 aa:bb:cc:dd:ee:ff * br0"
+      const arpMatch = line.match(
+        /^(\d+\.\d+\.\d+\.\d+)\s+\S+\s+(\S+)\s+([0-9a-f]{2}(?::[0-9a-f]{2}){5})\b/i
+      );
+      if (arpMatch && arpMatch[2] !== '0x0') {
+        const mac = normalizeMac(arpMatch[3]);
+        if (mac && mac !== '00:00:00:00:00:00') {
+          result.arpEntries.push({ ip: arpMatch[1], mac });
+        }
+      }
+      continue;
+    }
+
+    if (section === 'BRIF') {
+      // Format: iface|port_no (e.g. "eth0|0x1" or "ath2|4")
+      const parts = line.split('|');
+      if (parts.length >= 2) {
+        const iface = parts[0].trim();
+        const rawPort = parts[1].trim().toLowerCase();
+        const portNum = rawPort.startsWith('0x')
+          ? parseInt(rawPort.slice(2), 16)
+          : parseInt(rawPort, 10);
+        if (iface && Number.isFinite(portNum) && portNum > 0) {
+          result.bridgeIfaces.push({ portNum, iface });
+        }
+      }
+      continue;
+    }
+
     if (section === 'IFACES') {
-      // Format: name|operstate|speed|duplex|rx_bytes|tx_bytes|is_wireless
+      // Format: name|operstate|speed|duplex|rx_bytes|tx_bytes|is_wireless[|mac]
       const parts = line.split('|');
       if (parts.length < 6) continue;
       const name = parts[0].trim();
@@ -225,6 +328,11 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
       const txBytes = Math.max(0, parseInt(parts[5] || '0', 10) || 0);
       const isWireless =
         parts[6]?.trim() === '1' || /^(ath|wlan|wl|ra|wifi)\d*/i.test(name);
+      const rawMac = parts[7]?.trim();
+      const mac =
+        rawMac && /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i.test(rawMac)
+          ? normalizeMac(rawMac)
+          : undefined;
 
       result.interfaces.push({
         name,
@@ -234,6 +342,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
         rxBytes,
         txBytes,
         isWireless,
+        mac,
       });
       continue;
     }
@@ -292,6 +401,40 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
       continue;
     }
 
+    if (section === 'SWITCH_FDB') {
+      // Format A (swconfig dump_arl): "Port 2: MAC aa:bb:cc:dd:ee:ff" or "PORT:2 MAC:aa:bb:cc:dd:ee:ff"
+      const arl1 = line.match(/port\s*[:=]?\s*(\d+).*?([0-9a-f]{2}(?:[:-][0-9a-f]{2}){5})/i);
+      if (arl1) {
+        const portNum = parseInt(arl1[1], 10);
+        const mac = normalizeMac(arl1[2].replace(/-/g, ':'));
+        if (Number.isFinite(portNum) && mac) {
+          result.switchFdb.push({ portNum, mac });
+        }
+        continue;
+      }
+      // Format B (ssdk_sh fdb entry show): "[addr]:aa-bb-cc-dd-ee-ff ... [dest_info]:port2"
+      const arl2 = line.match(/([0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}).*?port\s*[:=]?\s*(\d+)/i);
+      if (arl2) {
+        const mac = normalizeMac(arl2[1].replace(/-/g, ':'));
+        const portNum = parseInt(arl2[2], 10);
+        if (Number.isFinite(portNum) && mac) {
+          result.switchFdb.push({ portNum, mac });
+        }
+        continue;
+      }
+      // Format C (QCA ARL bitmask): "MAC: aa:bb:cc:dd:ee:ff PORTMAP: 0x04"
+      const arlMask = line.match(/([0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}).*?portmap\s*[:=]?\s*0x([0-9a-f]+)/i);
+      if (arlMask) {
+        const mac = normalizeMac(arlMask[1].replace(/-/g, ':'));
+        const mask = parseInt(arlMask[2], 16);
+        if (mac && mask > 0 && (mask & (mask - 1)) === 0) {
+          const portNum = Math.round(Math.log2(mask));
+          result.switchFdb.push({ portNum, mac });
+        }
+      }
+      continue;
+    }
+
     if (section === 'BRCTL') {
       // brctl showmacs br0: "  1   b4:fb:e4:12:77:09   no   1.23"
       const m = line.match(/^(\d+)\s+([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s+(yes|no)\b/i);
@@ -303,6 +446,61 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
             mac: normalizeMac(m[2]),
             isLocal,
           });
+        }
+      }
+      continue;
+    }
+
+    if (section === 'WIFI_INFO') {
+      // iwconfig header line: "ath2      IEEE 802.11ac  ESSID:..." (no leading whitespace in rawLine)
+      const iwcfgHeader = rawLine.match(/^([a-zA-Z0-9._-]+)\s+IEEE\s+802\.11/i);
+      if (iwcfgHeader) {
+        flushWifiInfo();
+        currentWifiInfo = {
+          iface: iwcfgHeader[1].trim(),
+          mode: 'unknown',
+          associated: false,
+          bitRateMbps: 0,
+        };
+      }
+      // iw dev header: "Interface wlan0"
+      const iwDevHeader = line.match(/^Interface\s+([a-zA-Z0-9._-]+)/i);
+      if (iwDevHeader) {
+        flushWifiInfo();
+        currentWifiInfo = {
+          iface: iwDevHeader[1].trim(),
+          mode: 'unknown',
+          associated: false,
+          bitRateMbps: 0,
+        };
+        continue;
+      }
+
+      if (currentWifiInfo) {
+        const modeMatch = line.match(/\bMode:(Master|Managed|AP|STA)\b/i) || line.match(/^type\s+(AP|managed)\b/i);
+        if (modeMatch) {
+          const m = modeMatch[1].toLowerCase();
+          currentWifiInfo.mode = m === 'master' || m === 'ap' ? 'master' : 'managed';
+        }
+        const apMatch = line.match(/Access Point:\s*([0-9a-f]{2}(?::[0-9a-f]{2}){5})/i);
+        if (apMatch) {
+          const bssid = normalizeMac(apMatch[1]);
+          if (bssid && bssid !== '00:00:00:00:00:00') {
+            currentWifiInfo.bssid = bssid;
+            currentWifiInfo.associated = true;
+          }
+        } else if (/Access Point:\s*Not-Associated/i.test(line)) {
+          currentWifiInfo.associated = false;
+        }
+        const rateMatch = line.match(/Bit Rate[:=]\s*([\d.]+)\s*(Gb|Mb)\/s/i);
+        if (rateMatch) {
+          const num = parseFloat(rateMatch[1]) || 0;
+          currentWifiInfo.bitRateMbps =
+            rateMatch[2].toLowerCase() === 'gb' ? Math.round(num * 1000) : Math.round(num);
+        }
+        const freqMatch = line.match(/Frequency[:=]\s*([\d.]+)\s*GHz/i);
+        if (freqMatch) {
+          currentWifiInfo.freqGhz = parseFloat(freqMatch[1]) || undefined;
         }
       }
       continue;
@@ -350,6 +548,11 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
           currentIwStation.txRateMbps = Math.round(parseFloat(txRate[1]) || 0);
           continue;
         }
+        const rxRate = line.match(/^rx bitrate:\s*([\d.]+)\s*MBit/i);
+        if (rxRate) {
+          currentIwStation.rxRateMbps = Math.round(parseFloat(rxRate[1]) || 0);
+          continue;
+        }
         continue;
       }
 
@@ -366,6 +569,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
           iface: currentWifiIface,
           mac: normalizeMac(qca[1]),
           txRateMbps: Math.max(txRate, rxRate),
+          rxRateMbps: rxRate,
           signalDbm: rssi > 0 ? -95 + rssi : rssi,
           rxBytes: 0,
           txBytes: 0,
@@ -375,6 +579,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
   }
 
   flushSwitchPort();
+  flushWifiInfo();
   flushIwStation();
   return result;
 }
@@ -432,7 +637,7 @@ export interface TopologyEdge {
   rxBps: number;
   txBps: number;
   active: boolean;
-  connectionType: 'ethernet' | 'wifi';
+  connectionType?: 'ethernet' | 'wifi';
   linkSpeedMbps: number;
   linkSpeedLabel: string;
   portLabel?: string;
@@ -499,6 +704,19 @@ export function buildTopologyGraph(
     hostByIp.set(h.ip, h);
   }
 
+  // Router direct link metadata by MAC / IP (checked first so main-AP Wi-Fi clients aren't stolen by satellites)
+  const routerClientByMac = new Map<string, SatelliteClientLink>();
+  const routerClientByIp = new Map<string, SatelliteClientLink>();
+  const routerWifiMacs = new Set<string>();
+  for (const rc of topology.routerClients || []) {
+    const m = normalizeMac(rc.mac);
+    if (m) {
+      routerClientByMac.set(m, rc);
+      if (rc.connectionType === 'wifi') routerWifiMacs.add(m);
+    }
+    if (rc.ip) routerClientByIp.set(rc.ip, rc);
+  }
+
   // Track which host IPs are assigned to a satellite
   const assignedHostIps = new Set<string>();
   const satHostsMap = new Map<
@@ -513,6 +731,10 @@ export function buildTopologyGraph(
     const entries: Array<{ host: HostSummary; link?: SatelliteClientLink }> = [];
     for (const cLink of sat.clients || []) {
       const m = normalizeMac(cLink.mac);
+      // Never attribute a client that is directly associated to the main router's Wi-Fi radio to a satellite's L2 bridge
+      if (m && routerWifiMacs.has(m) && cLink.connectionType !== 'wifi') {
+        continue;
+      }
       const matched =
         (m ? hostByMac.get(m) : undefined) || (cLink.ip ? hostByIp.get(cLink.ip) : undefined);
       if (matched && !assignedHostIps.has(matched.ip) && !satIpSet.has(matched.ip)) {
@@ -526,15 +748,6 @@ export function buildTopologyGraph(
         compareIpv4(a.host.ip, b.host.ip)
     );
     satHostsMap.set(sat.id, entries);
-  }
-
-  // Router direct link metadata by MAC / IP
-  const routerClientByMac = new Map<string, SatelliteClientLink>();
-  const routerClientByIp = new Map<string, SatelliteClientLink>();
-  for (const rc of topology.routerClients || []) {
-    const m = normalizeMac(rc.mac);
-    if (m) routerClientByMac.set(m, rc);
-    if (rc.ip) routerClientByIp.set(rc.ip, rc);
   }
 
   // Direct router clients = remaining LAN hosts not under a satellite and not a satellite IP itself
@@ -799,14 +1012,20 @@ export function buildTopologyGraph(
           hasColumn3 = true;
           const cy = placed.childYs[idx];
           const clientNodeId = `client:${child.host.ip}`;
-          const connType = child.link?.connectionType || 'wifi';
-          const speedMbps = child.link?.linkSpeedMbps || (connType === 'ethernet' ? 1000 : 0);
+          const connType = child.link?.connectionType;
+          const speedMbps = child.link?.linkSpeedMbps || 0;
+          // Only display Ethernet negotiation rate for verified Ethernet links;
+          // never fabricate "1 GbE" on wireless or unknown clients
           const speedLabel =
-            speedMbps > 0
-              ? formatLinkSpeed(speedMbps, connType, true)
+            connType === 'wifi'
+              ? speedMbps > 0
+                ? formatLinkSpeed(speedMbps, 'wifi', true)
+                : 'Wi-Fi'
               : connType === 'ethernet'
-                ? 'Ethernet'
-                : 'Wi-Fi';
+                ? speedMbps > 0
+                  ? formatLinkSpeed(speedMbps, 'ethernet', true)
+                  : 'Ethernet'
+                : '';
           const clientRx =
             child.host.rxBps > 0 ? child.host.rxBps : child.link?.rxBps || 0;
           const clientTx =
@@ -819,8 +1038,10 @@ export function buildTopologyGraph(
             icon: inferTopologyDeviceIcon(child.host),
             label: child.host.hostname,
             sublabel: child.link?.portOrRadio
-              ? `${child.link.portOrRadio} · ${speedLabel}`
-              : speedLabel,
+              ? speedLabel
+                ? `${child.link.portOrRadio} · ${speedLabel}`
+                : child.link.portOrRadio
+              : speedLabel || undefined,
             ip: child.host.ip,
             mac: child.host.mac,
             vendor: child.host.vendor,
@@ -834,7 +1055,7 @@ export function buildTopologyGraph(
             connected: true,
             connectionType: connType,
             linkSpeedMbps: speedMbps,
-            linkSpeedLabel: speedLabel,
+            linkSpeedLabel: speedLabel || undefined,
             portLabel: child.link?.portOrRadio,
             childCount: 0,
             collapsed: false,
@@ -862,14 +1083,18 @@ export function buildTopologyGraph(
     } else {
       const { host, link } = placed.item.entry;
       const clientNodeId = `client:${host.ip}`;
-      const connType = link?.connectionType || 'ethernet';
-      const speedMbps = link?.linkSpeedMbps || (connType === 'ethernet' ? 1000 : 0);
+      const connType = link?.connectionType;
+      const speedMbps = link?.linkSpeedMbps || 0;
       const speedLabel =
-        speedMbps > 0
-          ? formatLinkSpeed(speedMbps, connType, true)
+        connType === 'wifi'
+          ? speedMbps > 0
+            ? formatLinkSpeed(speedMbps, 'wifi', true)
+            : 'Wi-Fi'
           : connType === 'ethernet'
-            ? 'Ethernet'
-            : 'Wi-Fi';
+            ? speedMbps > 0
+              ? formatLinkSpeed(speedMbps, 'ethernet', true)
+              : 'Ethernet'
+            : '';
       const clientActive = hasTangibleTraffic(host.rxBps, host.txBps);
 
       nodes.push({
@@ -877,7 +1102,11 @@ export function buildTopologyGraph(
         kind: 'client',
         icon: inferTopologyDeviceIcon(host),
         label: host.hostname,
-        sublabel: link?.portOrRadio ? `${link.portOrRadio} · ${speedLabel}` : speedLabel,
+        sublabel: link?.portOrRadio
+          ? speedLabel
+            ? `${link.portOrRadio} · ${speedLabel}`
+            : link.portOrRadio
+          : speedLabel || undefined,
         ip: host.ip,
         mac: host.mac,
         vendor: host.vendor,
@@ -891,7 +1120,7 @@ export function buildTopologyGraph(
         connected: true,
         connectionType: connType,
         linkSpeedMbps: speedMbps,
-        linkSpeedLabel: speedLabel,
+        linkSpeedLabel: speedLabel || undefined,
         portLabel: link?.portOrRadio,
         childCount: 0,
         collapsed: false,

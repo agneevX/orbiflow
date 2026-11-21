@@ -1,6 +1,6 @@
 # Multi-arch server-only build:
 # Build static SPA + server bundle natively on $BUILDPLATFORM for fast, reliable
-# cross-architecture images (linux/amd64, linux/arm64, linux/arm/v7).
+# cross-architecture images (linux/amd64, linux/arm64).
 FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 WORKDIR /app
 

@@ -662,4 +662,84 @@ test('generatePythonProbe includes daemonize, logging options, dhcp-leases, and 
   assert.ok(init.includes('--dhcp-leases "/var/lib/misc/custom.leases"'));
 });
 
+test('TrafficMonitorEngine retains recently ended flows for reading and keeps idle connected hosts visible across ARP misses', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_740_000_000_000;
+
+  // Tick 1: two connected devices (one active transfer, one idle)
+  engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 1_000, txBytes: 500 },
+    arp: [
+      { ip: '192.168.1.20', mac: 'aa:bb:cc:00:00:20', device: 'br0', hostname: 'workstation' },
+      { ip: '192.168.1.30', mac: 'aa:bb:cc:00:00:30', device: 'br0', hostname: 'smart-tv' },
+    ],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.20',
+        dst: '140.82.114.4',
+        sport: 51000,
+        dport: 443,
+        txBytes: 5_000,
+        rxBytes: 20_000,
+      },
+    ],
+  });
+
+  // Tick 2 (+2s): active flow transfers data
+  const tick2 = engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0 + 2_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 501_000, txBytes: 20_500 },
+    arp: [
+      { ip: '192.168.1.20', mac: 'aa:bb:cc:00:00:20', device: 'br0', hostname: 'workstation' },
+      { ip: '192.168.1.30', mac: 'aa:bb:cc:00:00:30', device: 'br0', hostname: 'smart-tv' },
+    ],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.20',
+        dst: '140.82.114.4',
+        sport: 51000,
+        dport: 443,
+        txBytes: 25_000,
+        rxBytes: 520_000,
+      },
+    ],
+  });
+  assert.equal(tick2.dashboard.kpis.activeFlows, 1);
+  assert.equal(tick2.dashboard.flows.length, 1);
+  assert.equal(tick2.dashboard.flows[0].ended, false);
+
+  // Tick 3 (+5s): flow finishes & disappears from conntrack, and smart-tv briefly misses ARP
+  const tick3 = engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0 + 5_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 501_000, txBytes: 20_500 },
+    arp: [
+      { ip: '192.168.1.20', mac: 'aa:bb:cc:00:00:20', device: 'br0', hostname: 'workstation' },
+    ],
+    flows: [],
+  });
+
+  // Ended flow stays in dashboard.flows with ended=true and 0 B/s rate, without inflating live KPIs
+  assert.equal(tick3.dashboard.flows.length, 1);
+  assert.equal(tick3.dashboard.flows[0].ended, true);
+  assert.equal(tick3.dashboard.flows[0].rxBps, 0);
+  assert.equal(tick3.dashboard.flows[0].totalBytes, 545_000);
+  assert.equal(tick3.dashboard.kpis.activeFlows, 0);
+  assert.equal(tick3.dashboard.clientLinks.length, 0);
+
+  // Idle smart-tv remains present in dashboard.hosts across the brief ARP gap
+  assert.equal(tick3.dashboard.hosts.some((h) => h.ip === '192.168.1.30'), true);
+});
+
+
 

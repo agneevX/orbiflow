@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpDown, Columns3, RotateCcw, Search, X } from 'lucide-react';
+import {
+  ArrowUpDown,
+  ChevronLeft,
+  ChevronRight,
+  Columns3,
+  RotateCcw,
+  Search,
+  X,
+} from 'lucide-react';
 import type {
   BandwidthUnit,
   ConnectionsTablePrefs,
@@ -72,8 +80,10 @@ export function FlowsView({
   const [showIdle, setShowIdle] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>('totalBps');
   const [sortAsc, setSortAsc] = useState(false);
+  const [page, setPage] = useState(1);
   const [columnsOpen, setColumnsOpen] = useState(false);
   const columnsRef = useRef<HTMLDivElement>(null);
+  const PAGE_SIZE = 50;
 
   useEffect(() => {
     if (!columnsOpen) return;
@@ -93,16 +103,25 @@ export function FlowsView({
     };
   }, [columnsOpen]);
 
+  useEffect(() => {
+    setPage(1);
+  }, [search, protoFilter, categoryFilter, showIdle]);
+
   const activeCount = useMemo(
-    () => flows.filter((f) => hasTangibleTraffic(f.rxBps, f.txBps)).length,
+    () => flows.filter((f) => !f.ended && hasTangibleTraffic(f.rxBps, f.txBps)).length,
     [flows]
   );
-  const idleCount = Math.max(0, flows.length - activeCount);
+  const endedCount = useMemo(() => flows.filter((f) => Boolean(f.ended)).length, [flows]);
+  const idleCount = useMemo(
+    () => flows.filter((f) => !f.ended && !hasTangibleTraffic(f.rxBps, f.txBps)).length,
+    [flows]
+  );
 
   const filteredFlows = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = flows.filter((f) => {
-      if (!showIdle && !hasTangibleTraffic(f.rxBps, f.txBps)) return false;
+      // Keep active flows AND recently ended flows visible so rows don't vanish before reading
+      if (!showIdle && !f.ended && !hasTangibleTraffic(f.rxBps, f.txBps)) return false;
       if (protoFilter !== 'ALL' && f.proto !== protoFilter) return false;
       if (protoFilter !== 'ICMP' && categoryFilter !== 'ALL' && f.dstCategory !== categoryFilter) {
         return false;
@@ -117,10 +136,23 @@ export function FlowsView({
 
     list.sort((a, b) => {
       const diff = a[sortBy] - b[sortBy];
-      return sortAsc ? diff : -diff;
+      if (diff !== 0) return sortAsc ? diff : -diff;
+      // Tie-breaker: live flows before ended flows, then most recently seen/ended first
+      const aEnded = a.ended ? 1 : 0;
+      const bEnded = b.ended ? 1 : 0;
+      if (aEnded !== bEnded) return aEnded - bEnded;
+      return (b.endedAt || b.lastSeen) - (a.endedAt || a.lastSeen);
     });
     return list;
   }, [flows, search, protoFilter, categoryFilter, showIdle, sortBy, sortAsc]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredFlows.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageStart = (safePage - 1) * PAGE_SIZE;
+  const pagedFlows = useMemo(
+    () => filteredFlows.slice(pageStart, pageStart + PAGE_SIZE),
+    [filteredFlows, pageStart]
+  );
 
   const handleSort = (key: SortKey) => {
     if (sortBy === key) {
@@ -129,12 +161,14 @@ export function FlowsView({
       setSortBy(key);
       setSortAsc(false);
     }
+    setPage(1);
   };
 
   const resetFilters = () => {
     setSearch('');
     setProtoFilter('ALL');
     setCategoryFilter('ALL');
+    setPage(1);
   };
 
   const togglePref = (key: keyof ConnectionsTablePrefs) => {
@@ -162,7 +196,7 @@ export function FlowsView({
     Object.keys(DEFAULT_CONNECTIONS_TABLE_PREFS) as Array<keyof ConnectionsTablePrefs>
   ).some((k) => prefs[k] !== DEFAULT_CONNECTIONS_TABLE_PREFS[k]);
 
-  const totalScopeCount = showIdle ? flows.length : activeCount;
+  const totalScopeCount = showIdle ? flows.length : activeCount + endedCount;
 
   return (
     <div className="space-y-4">
@@ -339,7 +373,7 @@ export function FlowsView({
           </div>
 
           <span className="text-xs font-medium app-text-muted tabular-nums whitespace-nowrap">
-            {filteredFlows.length} / {totalScopeCount} active
+            {filteredFlows.length} / {totalScopeCount} shown
           </span>
         </div>
       </div>
@@ -455,15 +489,18 @@ export function FlowsView({
                   </td>
                 </tr>
               ) : (
-                filteredFlows.map((flow) => {
+                pagedFlows.map((flow) => {
                   const hasResolvedHost = Boolean(
                     flow.dstHost && flow.dstHost !== flow.dstIp && flow.dstHost !== flow.dstService
                   );
                   return (
                     <tr
                       key={flow.id}
+                      data-ended={flow.ended ? 'true' : 'false'}
                       onClick={() => onSelectFlow(flow)}
-                      className="app-row-hover cursor-pointer transition-colors"
+                      className={`app-row-hover cursor-pointer transition-colors ${
+                        flow.ended ? 'opacity-65' : ''
+                      }`}
                     >
                       {prefs.showAppProtocol && (
                         <td className="py-2.5 px-3 whitespace-nowrap">
@@ -564,7 +601,12 @@ export function FlowsView({
 
                       {prefs.showDuration && (
                         <td className="py-2.5 px-3 text-right app-text-muted whitespace-nowrap tabular-nums">
-                          {formatDuration((flow.lastSeen - flow.firstSeen) / 1000)}
+                          <span>{formatDuration((flow.lastSeen - flow.firstSeen) / 1000)}</span>
+                          {flow.ended && (
+                            <span className="ml-1.5 text-[10px] uppercase tracking-wide opacity-80">
+                              Ended
+                            </span>
+                          )}
                         </td>
                       )}
                     </tr>
@@ -574,6 +616,51 @@ export function FlowsView({
             </tbody>
           </table>
         </div>
+
+        {/* Pagination Footer (50 connections per page) */}
+        {filteredFlows.length > 0 && (
+          <div
+            data-testid="flows-pagination"
+            className="px-4 py-3 border-t app-border flex flex-wrap items-center justify-between gap-3 text-xs app-text-muted"
+          >
+            <span className="tabular-nums">
+              Showing {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filteredFlows.length)} of{' '}
+              {filteredFlows.length} connections
+              {endedCount > 0 ? ` (${endedCount} recently ended)` : ''}
+            </span>
+
+            {totalPages > 1 && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  data-testid="flows-page-prev"
+                  disabled={safePage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border app-border app-surface app-row-hover disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Prev</span>
+                </button>
+                <span
+                  data-testid="flows-page-indicator"
+                  className="px-2 font-mono tabular-nums app-text-secondary"
+                >
+                  Page {safePage} / {totalPages}
+                </span>
+                <button
+                  type="button"
+                  data-testid="flows-page-next"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border app-border app-surface app-row-hover disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                >
+                  <span>Next</span>
+                  <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
