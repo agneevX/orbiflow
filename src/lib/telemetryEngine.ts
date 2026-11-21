@@ -6,20 +6,26 @@ import type {
   DashboardSnapshot,
   DeviceAlias,
   EnrichedFlow,
+  EthernetPortMetrics,
   HostSummary,
   InterfaceCounters,
   NotificationConfig,
   ProbeSnapshot,
   ProbeStatus,
   ProtocolSummary,
+  PublicSatelliteConfig,
   RawConntrackFlow,
   RemoteEndpointSummary,
+  SatelliteClientLink,
+  SatelliteTelemetry,
   ServerConfig,
   ServerStats,
+  TopologyTelemetry,
   TrafficPoint,
 } from '../types/telemetry';
 import {
   classifyApplication,
+  computePerceivedRouterLoadPct,
   condenseServiceLabel,
   describeRemoteIp,
   hasTangibleTraffic,
@@ -34,6 +40,10 @@ import {
   normalizeMac,
   resolveHostIdentity,
 } from './deviceIdentity';
+import {
+  DEFAULT_TABLE_PREFERENCES,
+  sanitizeTablePreferences,
+} from './tablePreferences';
 
 interface FlowTrackRecord {
   firstSeen: number;
@@ -245,6 +255,7 @@ export class TrafficMonitorEngine {
     persistenceMode: 'memory',
     cacheDir: '/config/cache',
     rdnsEnabled: true,
+    rdnsServer: '',
     rdnsTtlSec: 3600,
     rdnsSkipPrivate: true,
     lanDnsEnabled: true,
@@ -252,10 +263,22 @@ export class TrafficMonitorEngine {
     lanDnsTtlSec: 300,
     stripLanDomain: true,
     inferDeviceNames: true,
+    dhcpLeasesPath: '',
+    ispName: 'Internet',
+    ispMaxDownMbps: 1000,
+    ispMaxUpMbps: 200,
+    timeFormat: '12h',
+    tablePreferences: sanitizeTablePreferences(DEFAULT_TABLE_PREFERENCES),
   };
 
   private hostTopServicesCache = new Map<string, { services: string[]; updatedAt: number }>();
   private readonly topServicesRefreshMs = 15_000;
+  private routerPorts: EthernetPortMetrics[] = [];
+  private prevRouterPortBytes = new Map<string, { rx: number; tx: number }>();
+  private routerClients: SatelliteClientLink[] = [];
+  private probeSatellites: SatelliteTelemetry[] = [];
+  private sshSatellites: SatelliteTelemetry[] = [];
+  private satelliteConfigs: PublicSatelliteConfig[] = [];
 
   private serverStats: ServerStats = {
     configPath: '/config/config.json',
@@ -317,6 +340,7 @@ export class TrafficMonitorEngine {
       protocols: [],
       remotes: [],
       clientLinks: [],
+      topology: this.buildTopologyTelemetry(),
       rules: this.rules.map((r) => ({ ...r })),
       alerts: [],
       notifications: {
@@ -326,6 +350,51 @@ export class TrafficMonitorEngine {
       deviceAliases: { ...this.deviceAliases },
       serverConfig: { ...this.serverConfig },
       serverStats: { ...this.serverStats },
+    };
+  }
+
+  private buildTopologyTelemetry(): TopologyTelemetry {
+    const wanPort =
+      this.routerPorts.find((p) => p.role === 'wan') ||
+      this.routerPorts.find((p) => p.id === this.probeStatus.iface) ||
+      this.routerPorts.find((p) => p.linkUp && p.speedMbps > 0);
+    const routerWanSpeedMbps = wanPort?.speedMbps || 1000;
+
+    // Combine SSH-polled satellites with any probe-reported/simulated satellites (SSH takes precedence by id)
+    const mergedById = new Map<string, SatelliteTelemetry>();
+    for (const sat of this.probeSatellites) {
+      mergedById.set(sat.id, sat);
+    }
+    for (const sat of this.sshSatellites) {
+      mergedById.set(sat.id, sat);
+    }
+
+    return {
+      routerPorts: this.routerPorts.map((p) => ({ ...p })),
+      routerWanSpeedMbps,
+      routerClients: this.routerClients.map((c) => ({ ...c })),
+      satellites: Array.from(mergedById.values()),
+      satelliteConfigs: this.satelliteConfigs.map((c) => ({ ...c })),
+    };
+  }
+
+  public setSatelliteConfigs(configs: PublicSatelliteConfig[]): void {
+    this.satelliteConfigs = configs.map((c) => ({ ...c }));
+    this.latestSnapshot = {
+      ...this.latestSnapshot,
+      topology: this.buildTopologyTelemetry(),
+    };
+  }
+
+  public setSshSatellites(satellites: SatelliteTelemetry[]): void {
+    this.sshSatellites = satellites.map((s) => ({
+      ...s,
+      ports: s.ports.map((p) => ({ ...p })),
+      clients: s.clients.map((c) => ({ ...c })),
+    }));
+    this.latestSnapshot = {
+      ...this.latestSnapshot,
+      topology: this.buildTopologyTelemetry(),
     };
   }
 
@@ -374,13 +443,23 @@ export class TrafficMonitorEngine {
   public updateServerConfig(cfg: Partial<ServerConfig>, stats?: Partial<ServerStats>): void {
     const prevInfer = this.serverConfig.inferDeviceNames;
     const prevStrip = this.serverConfig.stripLanDomain;
-    this.serverConfig = { ...this.serverConfig, ...cfg };
+    const nextTablePrefs = cfg.tablePreferences
+      ? sanitizeTablePreferences(cfg.tablePreferences, this.serverConfig.tablePreferences)
+      : this.serverConfig.tablePreferences;
+    this.serverConfig = {
+      ...this.serverConfig,
+      ...cfg,
+      tablePreferences: nextTablePrefs,
+    };
     if (stats) {
       this.serverStats = { ...this.serverStats, ...stats };
     }
     this.latestSnapshot = {
       ...this.latestSnapshot,
-      serverConfig: { ...this.serverConfig },
+      serverConfig: {
+        ...this.serverConfig,
+        tablePreferences: sanitizeTablePreferences(this.serverConfig.tablePreferences),
+      },
       serverStats: { ...this.serverStats },
     };
     if (
@@ -642,11 +721,16 @@ export class TrafficMonitorEngine {
         const avgRx = Math.round(this.bucketSamples.reduce((s, p) => s + p.rxBps, 0) / count);
         const avgTx = Math.round(this.bucketSamples.reduce((s, p) => s + p.txBps, 0) / count);
         const avgFlows = Math.round(this.bucketSamples.reduce((s, p) => s + p.activeFlows, 0) / count);
+        const loadValues = this.bucketSamples
+          .map((p) => p.routerLoadPct)
+          .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+        const peakRouterLoadPct = loadValues.length > 0 ? Math.max(...loadValues) : undefined;
         this.rollupHistory.push({
           timestamp: this.currentBucketStart,
           rxBps: avgRx,
           txBps: avgTx,
           activeFlows: avgFlows,
+          ...(peakRouterLoadPct !== undefined ? { routerLoadPct: peakRouterLoadPct } : {}),
         });
         if (this.rollupHistory.length > this.maxRollupPoints) {
           this.rollupHistory.shift();
@@ -710,6 +794,75 @@ export class TrafficMonitorEngine {
 
     if (rxBps > this.peakRxBps) this.peakRxBps = rxBps;
     if (txBps > this.peakTxBps) this.peakTxBps = txBps;
+
+    // Update main router Ethernet port negotiation speeds & per-port Rx/Tx rates
+    if (Array.isArray(snapshot.ports) && snapshot.ports.length > 0) {
+      this.routerPorts = snapshot.ports.map((port) => {
+        const prevPort = this.prevRouterPortBytes.get(port.id);
+        const computedRx =
+          port.rxBps > 0
+            ? port.rxBps
+            : prevPort && port.rxBytes >= prevPort.rx
+              ? Math.round((port.rxBytes - prevPort.rx) / dtSec)
+              : 0;
+        const computedTx =
+          port.txBps > 0
+            ? port.txBps
+            : prevPort && port.txBytes >= prevPort.tx
+              ? Math.round((port.txBytes - prevPort.tx) / dtSec)
+              : 0;
+        this.prevRouterPortBytes.set(port.id, { rx: port.rxBytes, tx: port.txBytes });
+        return {
+          ...port,
+          rxBps: computedRx,
+          txBps: computedTx,
+        };
+      });
+    } else if (this.routerPorts.length === 0) {
+      // Synthesize baseline WAN port entry from active interface counters if agent doesn't emit ports yet
+      this.routerPorts = [
+        {
+          id: snapshot.iface.iface || 'eth0',
+          label: `WAN (${snapshot.iface.iface || 'eth0'})`,
+          role: 'wan',
+          linkUp: true,
+          speedMbps: 1000,
+          duplex: 'full',
+          rxBytes: snapshot.iface.rxBytes,
+          txBytes: snapshot.iface.txBytes,
+          rxBps: Math.round(rxBps),
+          txBps: Math.round(txBps),
+        },
+      ];
+    } else {
+      // Keep WAN port counters fresh between slower port refreshes
+      const wanIdx = this.routerPorts.findIndex(
+        (p) => p.role === 'wan' || p.id === snapshot.iface.iface
+      );
+      if (wanIdx >= 0) {
+        this.routerPorts[wanIdx] = {
+          ...this.routerPorts[wanIdx],
+          rxBytes: snapshot.iface.rxBytes,
+          txBytes: snapshot.iface.txBytes,
+          rxBps: Math.round(rxBps),
+          txBps: Math.round(txBps),
+        };
+      }
+    }
+
+    if (Array.isArray(snapshot.routerClients)) {
+      this.routerClients = snapshot.routerClients.map((c) => ({ ...c }));
+    }
+    if (Array.isArray(snapshot.satellites)) {
+      this.probeSatellites = snapshot.satellites.map((s) => ({
+        ...s,
+        ports: s.ports.map((p) => ({ ...p })),
+        clients: s.clients.map((c) => ({ ...c })),
+      }));
+    } else if (snapshot.source === 'live') {
+      // Clear simulator satellites once a real router probe takes over
+      this.probeSatellites = this.probeSatellites.filter((s) => s.source !== 'simulator');
+    }
 
     const arpByIp = new Map<string, ArpEntry>();
     for (const entry of snapshot.arp || []) {
@@ -851,11 +1004,19 @@ export class TrafficMonitorEngine {
 
     const tangibleFlows = enrichedFlows.filter((f) => hasTangibleTraffic(f.rxBps, f.txBps));
 
+    const routerLoadPct = computePerceivedRouterLoadPct({
+      load1m: this.probeStatus.load1m,
+      memUsedPct: this.probeStatus.memUsedPct,
+      conntrackCount: this.probeStatus.conntrackCount,
+      conntrackMax: this.probeStatus.conntrackMax,
+    });
+
     const point: TrafficPoint = {
       timestamp: now,
       rxBps: Math.round(rxBps),
       txBps: Math.round(txBps),
       activeFlows: tangibleFlows.length,
+      routerLoadPct,
     };
     this.recordHistoryPoint(point);
 
@@ -1141,6 +1302,7 @@ export class TrafficMonitorEngine {
       protocols,
       remotes,
       clientLinks,
+      topology: this.buildTopologyTelemetry(),
       rules: this.rules.map((r) => ({ ...r })),
       alerts: this.alerts.map((a) => ({ ...a })),
       notifications: {

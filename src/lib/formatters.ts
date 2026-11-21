@@ -2,6 +2,8 @@ import type {
   BandwidthUnit,
   ConntrackState,
   DestinationCategory,
+  TimeFormat,
+  TrafficPoint,
   TransportProtocol,
 } from '../types/telemetry';
 
@@ -74,28 +76,32 @@ export function formatDuration(seconds: number): string {
 export function formatTimestamp(
   ts: number,
   compact = false,
-  includeMonthDay = false
+  includeMonthDay = false,
+  timeFormat: TimeFormat = '12h'
 ): string {
   const d = new Date(ts);
+  const hour12 = timeFormat !== '24h';
+  const hourFormat: 'numeric' | '2-digit' = hour12 ? 'numeric' : '2-digit';
+
   if (includeMonthDay) {
     const mon = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     const time = d.toLocaleTimeString('en-US', {
-      hour12: false,
-      hour: '2-digit',
+      hour12,
+      hour: hourFormat,
       minute: '2-digit',
     });
     return `${mon} ${time}`;
   }
   if (compact) {
     return d.toLocaleTimeString('en-US', {
-      hour12: false,
-      hour: '2-digit',
+      hour12,
+      hour: hourFormat,
       minute: '2-digit',
     });
   }
   return d.toLocaleTimeString('en-US', {
-    hour12: false,
-    hour: '2-digit',
+    hour12,
+    hour: hourFormat,
     minute: '2-digit',
     second: '2-digit',
   });
@@ -389,17 +395,27 @@ export function describeRemoteIp(
   proto?: TransportProtocol,
   dport?: number
 ): { label: string; service: string; category: DestinationCategory } {
+  const isIcmp = proto === 'ICMP';
+
   if (cachedRdns) {
     const cleanHost = cachedRdns.trim().replace(/\.+$/, '');
     const lower = cleanHost.toLowerCase();
 
     for (const rule of RDNS_CATEGORY_RULES) {
       if (rule.patterns.some((p) => lower.includes(p))) {
-        return { label: cleanHost, service: rule.service, category: rule.category };
+        return {
+          label: cleanHost,
+          service: rule.service,
+          category: isIcmp ? 'Other' : rule.category,
+        };
       }
     }
 
     const rootDomain = extractRootDomain(cleanHost);
+    if (isIcmp) {
+      return { label: cleanHost, service: rootDomain || cleanHost, category: 'Other' };
+    }
+
     let category: DestinationCategory = 'CDN & Web';
     if (/(?:ec2|vps|cloud|compute|host|server|colo|dedi|static|node)/i.test(lower)) {
       category = 'Cloud & Hosting';
@@ -419,12 +435,16 @@ export function describeRemoteIp(
 
   for (const entry of KNOWN_REMOTE_PREFIXES) {
     if (ip.startsWith(entry.prefix)) {
-      return { label: entry.label, service: entry.service, category: entry.category };
+      return {
+        label: entry.label,
+        service: entry.service,
+        category: isIcmp ? 'Other' : entry.category,
+      };
     }
   }
 
   const fallbackCategory =
-    proto && typeof dport === 'number' ? inferCategoryFromPort(proto, dport) : 'Other';
+    !isIcmp && proto && typeof dport === 'number' ? inferCategoryFromPort(proto, dport) : 'Other';
   return { label: ip, service: 'External IP', category: fallbackCategory };
 }
 
@@ -508,4 +528,91 @@ export function compareIpv4(a: string, b: string): number {
   }
   return a.localeCompare(b);
 }
+
+/**
+ * Normalizes router 1-minute load average to a 0-100% CPU utilization estimate
+ * (defaulting to a dual-core ARM router when core count is unspecified).
+ */
+export function computeRouterCpuPct(load1m: number, cpuCores = 2): number {
+  if (!Number.isFinite(load1m) || load1m <= 0) return 0;
+  const cores = Math.max(1, Number.isFinite(cpuCores) ? cpuCores : 2);
+  return Math.min(100, Math.max(0, Math.round((load1m / cores) * 100)));
+}
+
+/**
+ * Computes a 0-100% perceived router load score combining CPU load, memory pressure,
+ * and nf_conntrack table utilization.
+ */
+export function computePerceivedRouterLoadPct(metrics: {
+  load1m: number;
+  memUsedPct: number;
+  conntrackCount: number;
+  conntrackMax: number;
+  cpuCores?: number;
+}): number {
+  const cpuPct = computeRouterCpuPct(metrics.load1m, metrics.cpuCores ?? 2);
+  const memPct = Number.isFinite(metrics.memUsedPct)
+    ? Math.min(100, Math.max(0, metrics.memUsedPct))
+    : 0;
+  const conntrackPct =
+    metrics.conntrackMax > 0 && Number.isFinite(metrics.conntrackCount)
+      ? Math.min(100, Math.max(0, (metrics.conntrackCount / metrics.conntrackMax) * 100))
+      : 0;
+
+  return Math.min(100, Math.max(0, Math.round(cpuPct * 0.6 + memPct * 0.3 + conntrackPct * 0.1)));
+}
+
+/**
+ * Computes download, upload, and perceived router load peaks across a set of TrafficPoints
+ * for the currently selected time window.
+ */
+export function computeWindowPeaks(
+  points: TrafficPoint[],
+  fallback?: { rxBps: number; txBps: number; routerLoadPct: number }
+): {
+  peakRxBps: number;
+  peakTxBps: number;
+  peakRouterLoadPct: number;
+} {
+  let peakRxBps = fallback ? Math.max(0, fallback.rxBps) : 0;
+  let peakTxBps = fallback ? Math.max(0, fallback.txBps) : 0;
+  let peakRouterLoadPct = fallback ? Math.max(0, Math.min(100, Math.round(fallback.routerLoadPct))) : 0;
+
+  for (const p of points) {
+    if (p.rxBps > peakRxBps) peakRxBps = p.rxBps;
+    if (p.txBps > peakTxBps) peakTxBps = p.txBps;
+    if (typeof p.routerLoadPct === 'number' && Number.isFinite(p.routerLoadPct)) {
+      const clamped = Math.max(0, Math.min(100, Math.round(p.routerLoadPct)));
+      if (clamped > peakRouterLoadPct) peakRouterLoadPct = clamped;
+    }
+  }
+
+  return { peakRxBps, peakTxBps, peakRouterLoadPct };
+}
+
+/**
+ * Removes redundant protocol names (e.g. TCP, UDP, ICMP) from an application label
+ * when the Connections table is actively filtered to that protocol.
+ */
+export function formatAppForProtocolFilter(
+  app: string,
+  proto: TransportProtocol,
+  dport: number,
+  activeProtoFilter: 'ALL' | TransportProtocol
+): string {
+  if (activeProtoFilter === 'ALL' || activeProtoFilter !== proto) {
+    return app;
+  }
+  if (app === `${proto} / ${dport}`) {
+    return dport > 0 ? `Port ${dport}` : 'Unknown';
+  }
+  if (proto === 'TCP' && app === 'DNS over TCP') {
+    return 'DNS';
+  }
+  if (proto === 'ICMP' && app === 'ICMP Ping') {
+    return 'Ping';
+  }
+  return app;
+}
+
 

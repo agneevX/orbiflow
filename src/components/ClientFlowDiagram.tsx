@@ -60,7 +60,7 @@ export function ClientFlowDiagram({
     const serviceSet = new Set(topServices.map(([srv]) => srv));
 
     const svgWidth = 860;
-    const svgHeight = 290;
+    const svgHeight = 320;
     const padY = 16;
     const gap = 10;
     const usableH = svgHeight - padY * 2;
@@ -81,7 +81,7 @@ export function ClientFlowDiagram({
       let cursorY = padY;
       return items.map(([key, v], idx) => {
         const rawH = (weights[idx] / sumW) * avail;
-        const h = Math.max(26, Math.min(72, rawH));
+        const h = Math.max(28, Math.min(80, rawH));
         const info = getLabel(key, v);
         const node: PositionedNode = {
           id: key,
@@ -187,24 +187,14 @@ export function ClientFlowDiagram({
   }
 
   return (
-    <div className="space-y-3" data-testid="client-flow-diagram">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex items-center gap-4 app-text-muted">
-          <span>Local Devices</span>
-          <span aria-hidden="true">→</span>
-          <span>Destinations &amp; Services</span>
+    <div className="relative" data-testid="client-flow-diagram">
+      {activeLink && (
+        <div className="pointer-events-none absolute right-2 top-1 z-10 px-2.5 py-1 rounded-lg border app-border app-surface/95 shadow text-[11px] tabular-nums app-text-secondary">
+          {activeLink.clientName} → {activeLink.service} ·{' '}
+          {formatBandwidth(activeLink.totalBps, unit)} · {formatBytes(activeLink.totalBytes)} (
+          {activeLink.flowCount} conn)
         </div>
-        <div className="font-mono tabular-nums app-text-secondary min-h-[18px]">
-          {activeLink ? (
-            <span>
-              {activeLink.clientName} → {activeLink.service} ·{' '}
-              {formatBandwidth(activeLink.totalBps, unit)} · {formatBytes(activeLink.totalBytes)} ({activeLink.flowCount} conn)
-            </span>
-          ) : (
-            <span className="app-text-muted">Hover a flow ribbon or click a node to inspect connections</span>
-          )}
-        </div>
-      </div>
+      )}
 
       <div className="w-full overflow-x-auto">
         <svg

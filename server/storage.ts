@@ -7,7 +7,10 @@ import type {
   DeviceAlias,
   NotificationConfig,
   PersistenceMode,
+  SatelliteConfig,
   ServerConfig,
+  TablePreferences,
+  TimeFormat,
   TrafficPoint,
 } from '../src/types/telemetry';
 
@@ -25,6 +28,7 @@ export interface PersistedUserConfig {
   persistenceMode: PersistenceMode;
   cacheDir: string;
   rdnsEnabled: boolean;
+  rdnsServer?: string;
   rdnsTtlSec: number;
   rdnsSkipPrivate: boolean;
   lanDnsEnabled?: boolean;
@@ -32,6 +36,13 @@ export interface PersistedUserConfig {
   lanDnsTtlSec?: number;
   stripLanDomain?: boolean;
   inferDeviceNames?: boolean;
+  dhcpLeasesPath?: string;
+  ispName?: string;
+  ispMaxDownMbps?: number;
+  ispMaxUpMbps?: number;
+  timeFormat?: TimeFormat;
+  tablePreferences?: TablePreferences;
+  satellites?: SatelliteConfig[];
   deviceAliases?: Record<string, DeviceAlias>;
   notifications?: NotificationConfig;
   rules?: AlertRule[];

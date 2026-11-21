@@ -104,3 +104,34 @@ test('summarizeSelectionRange calculates average, peak, and estimated volume for
   assert.equal(empty.sampleCount, 0);
 });
 
+test('analyzeTimeWindow populates leadingAnchor when a sample immediately precedes windowStart', () => {
+  const now = 1_700_000_000_000;
+
+  // Continuous leading edge (3s before 5m windowStart -> leadingAnchor captured)
+  const continuous: TrafficPoint[] = [];
+  for (let s = 306; s >= 0; s -= 3) {
+    continuous.push({
+      timestamp: now - s * 1000,
+      rxBps: 2_000_000,
+      txBps: 400_000,
+      activeFlows: 6,
+      routerLoadPct: 32,
+    });
+  }
+  const fullRes = analyzeTimeWindow('5m', continuous, [], now);
+  assert.equal(fullRes.status, 'full');
+  assert.ok(fullRes.leadingAnchor);
+  assert.equal(fullRes.leadingAnchor?.timestamp, now - 303_000);
+  assert.equal(fullRes.noDataRanges.length, 0);
+
+  // Leading sample separated by > 5m gapThreshold (125s before first in-window sample) is NOT used as leadingAnchor
+  const gappedHistory: TrafficPoint[] = [
+    { timestamp: now - 420_000, rxBps: 1_000_000, txBps: 100_000, activeFlows: 2 },
+    { timestamp: now - 295_000, rxBps: 2_000_000, txBps: 200_000, activeFlows: 4 },
+    { timestamp: now, rxBps: 2_200_000, txBps: 250_000, activeFlows: 5 },
+  ];
+  const gappedRes = analyzeTimeWindow('5m', gappedHistory, [], now);
+  assert.equal(gappedRes.leadingAnchor, null);
+});
+
+

@@ -1,8 +1,9 @@
-import { ArrowDownRight, ArrowUpRight, Gauge, Layers } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, MonitorSmartphone } from 'lucide-react';
 import type {
   BandwidthUnit,
   DashboardSnapshot,
   HostSummary,
+  TimeFormat,
   TimeWindow,
 } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
@@ -13,7 +14,12 @@ import {
 } from '../lib/timeWindowUtils';
 import { ThroughputChart } from './ThroughputChart';
 import { ClientFlowDiagram } from './ClientFlowDiagram';
-import { formatBandwidth, formatBytes, hasTangibleTraffic } from '../lib/formatters';
+import {
+  computeWindowPeaks,
+  formatBandwidth,
+  formatBytes,
+  hasTangibleTraffic,
+} from '../lib/formatters';
 
 interface OverviewViewProps {
   snapshot: DashboardSnapshot;
@@ -21,10 +27,12 @@ interface OverviewViewProps {
   windowAvailability: Record<TimeWindow, TimeWindowAnalysis>;
   onChangeTimeWindow?: (w: TimeWindow) => void;
   unit: BandwidthUnit;
+  timeFormat: TimeFormat;
   theme: ThemePalette;
   onSelectHost: (host: HostSummary) => void;
   onSelectFilter: (query: string) => void;
   onViewAllFlows: () => void;
+  onOpenHosts?: () => void;
 }
 
 export function OverviewView({
@@ -33,19 +41,31 @@ export function OverviewView({
   windowAvailability,
   onChangeTimeWindow,
   unit,
+  timeFormat,
   theme,
   onSelectHost,
   onSelectFilter,
   onViewAllFlows,
+  onOpenHosts,
 }: OverviewViewProps) {
   const isLongWindow = timeWindow === '1h' || timeWindow === '6h' || timeWindow === '24h';
   const activeAnalysis =
     windowAvailability[timeWindow] ||
     analyzeTimeWindow(timeWindow, snapshot.history, snapshot.rollupHistory);
 
+  const windowPeaks = computeWindowPeaks(activeAnalysis.points, {
+    rxBps: snapshot.kpis.rxBps,
+    txBps: snapshot.kpis.txBps,
+    routerLoadPct: 0,
+  });
+
+  const onlineClientsCount = snapshot.hosts.length;
+  const activeClientsCount = snapshot.kpis.activeHosts;
+
   const topHosts = snapshot.hosts
     .filter((h) => hasTangibleTraffic(h.rxBps, h.txBps))
     .slice(0, 5);
+
   const topServices = (() => {
     const map = new Map<
       string,
@@ -71,90 +91,101 @@ export function OverviewView({
 
   return (
     <div className="space-y-6">
-      {/* 2x2 Summary KPI Grid: Download | Upload on row 1, Combined | Active Connections on row 2 */}
+      {/* KPI Cards: Download, Upload, Clients Online */}
       <section
-        aria-label="Key internet bandwidth metrics"
-        data-testid="kpi-grid"
-        className="grid grid-cols-2 gap-3 sm:gap-4"
+        aria-label="Live internet speeds and clients online"
+        data-testid="home-kpi-cards"
+        className="grid grid-cols-1 sm:grid-cols-3 gap-4"
       >
-        <div className="app-surface border rounded-2xl p-3.5 sm:p-5">
+        <div className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-2">
           <div className="flex items-center justify-between gap-2 text-xs app-text-muted">
-            <span className="truncate">Download Speed</span>
-            <ArrowDownRight
-              className="h-4 w-4 shrink-0"
-              style={{ color: theme.rxColor }}
-              aria-hidden="true"
-            />
+            <span className="font-medium">Download</span>
+            <ArrowDownRight className="h-4 w-4 shrink-0 app-text-muted" aria-hidden="true" />
           </div>
-          <div className="mt-2 font-mono text-xl sm:text-2xl font-semibold tabular-nums">
+          <div
+            data-testid="kpi-download-live"
+            className="font-display text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums"
+          >
             {formatBandwidth(snapshot.kpis.rxBps, unit)}
           </div>
-          <div className="mt-1.5 text-[11px] sm:text-xs app-text-muted font-mono tabular-nums truncate">
-            Peak {formatBandwidth(snapshot.kpis.peakRxBps, unit)} · {formatBytes(snapshot.kpis.totalRxBytes)}
+          <div className="flex items-center justify-between gap-2 text-xs app-text-muted tabular-nums">
+            <span data-testid="kpi-download-peak">
+              {timeWindow} peak:{' '}
+              <span className="font-medium app-text-secondary">
+                {formatBandwidth(windowPeaks.peakRxBps, unit)}
+              </span>
+            </span>
           </div>
         </div>
 
-        <div className="app-surface border rounded-2xl p-3.5 sm:p-5">
+        <div className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-2">
           <div className="flex items-center justify-between gap-2 text-xs app-text-muted">
-            <span className="truncate">Upload Speed</span>
-            <ArrowUpRight
-              className="h-4 w-4 shrink-0"
-              style={{ color: theme.txColor }}
-              aria-hidden="true"
-            />
+            <span className="font-medium">Upload</span>
+            <ArrowUpRight className="h-4 w-4 shrink-0 app-text-muted" aria-hidden="true" />
           </div>
-          <div className="mt-2 font-mono text-xl sm:text-2xl font-semibold tabular-nums">
+          <div
+            data-testid="kpi-upload-live"
+            className="font-display text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums"
+          >
             {formatBandwidth(snapshot.kpis.txBps, unit)}
           </div>
-          <div className="mt-1.5 text-[11px] sm:text-xs app-text-muted font-mono tabular-nums truncate">
-            Peak {formatBandwidth(snapshot.kpis.peakTxBps, unit)} · {formatBytes(snapshot.kpis.totalTxBytes)}
+          <div className="flex items-center justify-between gap-2 text-xs app-text-muted tabular-nums">
+            <span data-testid="kpi-upload-peak">
+              {timeWindow} peak:{' '}
+              <span className="font-medium app-text-secondary">
+                {formatBandwidth(windowPeaks.peakTxBps, unit)}
+              </span>
+            </span>
           </div>
         </div>
 
-        <div className="app-surface border rounded-2xl p-3.5 sm:p-5">
-          <div className="flex items-center justify-between gap-2 text-xs app-text-muted">
-            <span className="truncate">Combined Speed</span>
-            <Gauge className="h-4 w-4 shrink-0 app-text-muted" aria-hidden="true" />
+        <button
+          type="button"
+          data-testid="kpi-clients-online-card"
+          onClick={() => onOpenHosts?.()}
+          className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-2 text-left app-row-hover transition-colors"
+        >
+          <div className="flex items-center justify-between gap-2 text-xs app-text-muted w-full">
+            <span className="font-medium">Clients Online</span>
+            <MonitorSmartphone className="h-4 w-4 shrink-0 app-text-muted" aria-hidden="true" />
           </div>
-          <div className="mt-2 font-mono text-xl sm:text-2xl font-semibold tabular-nums">
-            {formatBandwidth(snapshot.kpis.combinedBps, unit)}
+          <div
+            data-testid="kpi-clients-online-count"
+            className="font-display text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums"
+          >
+            {onlineClientsCount}
           </div>
-          <div className="mt-1.5 text-[11px] sm:text-xs app-text-muted font-mono tabular-nums truncate">
-            {formatBytes(snapshot.kpis.totalRxBytes + snapshot.kpis.totalTxBytes)} transferred
+          <div className="flex items-center justify-between gap-2 text-xs app-text-muted tabular-nums w-full min-w-0">
+            <span className="truncate">
+              <span className="font-medium app-text-secondary">{activeClientsCount}</span> active
+            </span>
+            <span className="shrink-0">
+              {snapshot.kpis.activeFlows}{' '}
+              {snapshot.kpis.activeFlows === 1 ? 'connection' : 'connections'}
+            </span>
           </div>
-        </div>
-
-        <div className="app-surface border rounded-2xl p-3.5 sm:p-5">
-          <div className="flex items-center justify-between gap-2 text-xs app-text-muted">
-            <span className="truncate">Active Connections</span>
-            <Layers className="h-4 w-4 shrink-0 app-text-muted" aria-hidden="true" />
-          </div>
-          <div className="mt-2 font-mono text-xl sm:text-2xl font-semibold tabular-nums">
-            {snapshot.kpis.activeFlows}
-          </div>
-          <div className="mt-1.5 text-[11px] sm:text-xs app-text-muted font-mono tabular-nums truncate">
-            {snapshot.kpis.activeHosts} active devices
-          </div>
-        </div>
+        </button>
       </section>
 
-      {/* Primary Focal Anchor: Live Bandwidth Chart */}
+      {/* Primary Focal Anchor: Internet traffic Chart */}
       <section className="app-surface border rounded-2xl p-4 sm:p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <div>
-            <h2 className="font-display text-sm font-semibold">Live Bandwidth</h2>
+            <h2 className="font-display text-sm font-semibold">Internet traffic</h2>
             <p className="text-xs app-text-muted mt-0.5">
-              {activeAnalysis.status === 'full' ? (
+              Real-time download and upload throughput across the {timeWindow} window
+              {activeAnalysis.status !== 'full' && (
                 <>
-                  Live speeds from {snapshot.probe.hostname} · Drag across the chart to inspect or zoom
+                  {' · '}
+                  <span
+                    data-testid="window-coverage-note"
+                    className={
+                      activeAnalysis.status === 'empty' ? 'text-amber-500 font-medium' : ''
+                    }
+                  >
+                    {activeAnalysis.summaryText}
+                  </span>
                 </>
-              ) : (
-                <span
-                  data-testid="window-coverage-note"
-                  className={activeAnalysis.status === 'empty' ? 'text-amber-500 font-medium' : ''}
-                >
-                  {activeAnalysis.summaryText} · Drag to inspect or zoom
-                </span>
               )}
             </p>
           </div>
@@ -162,7 +193,7 @@ export function OverviewView({
             <div
               role="group"
               aria-label="Mobile chart time window"
-              className="flex md:hidden items-center h-10 app-input border rounded-xl p-1"
+              className="flex lg:hidden items-center h-9 app-input border rounded-xl p-1"
             >
               {ALL_TIME_WINDOWS.map((w) => {
                 const info = windowAvailability[w];
@@ -174,7 +205,7 @@ export function OverviewView({
                     type="button"
                     aria-label={isEmpty ? `${w} (no data)` : isPartial ? `${w} (partial data)` : w}
                     onClick={() => onChangeTimeWindow(w)}
-                    className={`inline-flex items-center gap-1 h-full px-2.5 text-xs font-mono rounded-lg transition-colors ${
+                    className={`inline-flex items-center gap-1 h-full px-2 text-xs font-medium tabular-nums rounded-lg transition-colors ${
                       timeWindow === w
                         ? 'bg-sky-500/15 text-sky-500 font-semibold'
                         : isEmpty
@@ -204,6 +235,7 @@ export function OverviewView({
         <ThroughputChart
           analysis={activeAnalysis}
           unit={unit}
+          timeFormat={timeFormat}
           theme={theme}
           longWindow={isLongWindow}
           height={250}
@@ -212,19 +244,20 @@ export function OverviewView({
 
       {/* Device to Destination Flow Diagram */}
       <section className="app-surface border rounded-2xl p-4 sm:p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+        <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
           <div>
-            <h2 className="font-display text-sm font-semibold">Live Traffic</h2>
+            <h2 className="font-display text-sm font-semibold">Flows</h2>
             <p className="text-xs app-text-muted mt-0.5">
-              Live bandwidth paths between local devices and internet services
+              Live traffic paths from local devices to internet services
             </p>
           </div>
           <button
             type="button"
+            data-testid="inspect-connections-btn"
             onClick={onViewAllFlows}
             className="text-xs font-medium text-sky-500 hover:text-sky-400 transition-colors whitespace-nowrap"
           >
-            Inspect all {snapshot.kpis.activeFlows} active connections →
+            Inspect connections
           </button>
         </div>
 
@@ -236,12 +269,14 @@ export function OverviewView({
         />
       </section>
 
-      {/* Compact Two-Column Summary: Top Devices & Top Services */}
+      {/* Compact Two-Column Summary: Top Devices & Top Destinations */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
         <section className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col">
-          <div className="flex items-center justify-between mb-3">
+          <div className="mb-3">
             <h2 className="font-display text-sm font-semibold">Top Devices</h2>
-            <span className="text-xs app-text-muted">Click device to filter</span>
+            <p className="text-xs app-text-muted mt-0.5">
+              Local clients transferring the most bandwidth right now
+            </p>
           </div>
 
           {topHosts.length === 0 ? (
@@ -260,21 +295,15 @@ export function OverviewView({
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium truncate">{host.hostname}</span>
-                      <span className="font-mono text-xs app-text-muted tabular-nums">
-                        {host.ip}
-                      </span>
+                      <span className="text-xs app-text-muted tabular-nums">{host.ip}</span>
                     </div>
                     <div className="text-xs app-text-muted mt-0.5 truncate">
                       {host.vendor} · {host.activeFlows} connections
                     </div>
                   </div>
-                  <div className="text-right font-mono text-xs tabular-nums shrink-0">
-                    <div style={{ color: theme.rxColor }}>
-                      {formatBandwidth(host.rxBps, unit)} ↓
-                    </div>
-                    <div style={{ color: theme.txColor }}>
-                      {formatBandwidth(host.txBps, unit)} ↑
-                    </div>
+                  <div className="text-right text-xs font-medium tabular-nums shrink-0">
+                    <div>{formatBandwidth(host.rxBps, unit)} ↓</div>
+                    <div className="app-text-muted">{formatBandwidth(host.txBps, unit)} ↑</div>
                   </div>
                 </button>
               ))}
@@ -283,9 +312,11 @@ export function OverviewView({
         </section>
 
         <section className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col">
-          <div className="flex items-center justify-between mb-3">
+          <div className="mb-3">
             <h2 className="font-display text-sm font-semibold">Top Destinations</h2>
-            <span className="text-xs app-text-muted">Click service to filter</span>
+            <p className="text-xs app-text-muted mt-0.5">
+              Internet services receiving the highest active traffic
+            </p>
           </div>
 
           {topServices.length === 0 ? (
@@ -307,7 +338,7 @@ export function OverviewView({
                       {srv.category} · {srv.flows} active connections · {formatBytes(srv.bytes)}
                     </div>
                   </div>
-                  <div className="font-mono text-xs font-medium tabular-nums shrink-0">
+                  <div className="text-xs font-medium tabular-nums shrink-0">
                     {formatBandwidth(srv.bps, unit)}
                   </div>
                 </button>

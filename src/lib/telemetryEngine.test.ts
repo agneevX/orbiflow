@@ -191,7 +191,7 @@ test('PersistenceStore saves user config in configDir and supports changing cach
   }
 });
 
-import { generateDockerCompose, generatePythonProbe } from './probeTemplates';
+import { generateDockerCompose, generateInitScript, generatePythonProbe } from './probeTemplates';
 
 test('generateDockerCompose only includes PUID, PGID, and TZ environment variables', () => {
   const yaml = generateDockerCompose();
@@ -636,22 +636,30 @@ test('TrafficMonitorEngine throttles topServices updates, toggles inferDeviceNam
   assert.equal(hReenabled?.nameSource, 'fingerprint');
 });
 
-test('generatePythonProbe includes daemonize, logging options, and slow-polled system interval without urllib/argparse', () => {
-  const py = generatePythonProbe({
+test('generatePythonProbe includes daemonize, logging options, dhcp-leases, and slow-polled system interval without urllib/argparse', () => {
+  const cfg = {
     wsUrl: 'ws://192.168.1.10:3000/ws/ingest',
     httpUrl: 'http://192.168.1.10:3000/api/ingest',
     token: 'of_test',
     iface: 'eth0',
     intervalSec: 3,
     probeId: 'router-eth0',
-  });
+    dhcpLeasesPath: '/var/lib/misc/custom.leases',
+  };
+  const py = generatePythonProbe(cfg);
   assert.ok(py.includes('INTERVAL_SEC = 3'));
   assert.ok(py.includes('SYS_INTERVAL_SEC = 30'));
+  assert.ok(py.includes('DHCP_LEASES_PATH = "/var/lib/misc/custom.leases"'));
+  assert.ok(py.includes('--dhcp-leases'));
   assert.ok(py.includes('--daemonize'));
   assert.ok(py.includes('def daemonize_process('));
   assert.ok(py.includes('--log-level'));
   assert.ok(py.includes('--log-file'));
   assert.ok(!py.includes('import argparse'));
   assert.ok(!py.includes('import urllib'));
+
+  const init = generateInitScript(cfg);
+  assert.ok(init.includes('--dhcp-leases "/var/lib/misc/custom.leases"'));
 });
+
 

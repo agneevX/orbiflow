@@ -1,5 +1,5 @@
 import { X, Filter } from 'lucide-react';
-import type { BandwidthUnit, EnrichedFlow } from '../types/telemetry';
+import type { BandwidthUnit, EnrichedFlow, TimeFormat } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
 import { formatBandwidth, formatBytes, formatDuration, formatTimestamp } from '../lib/formatters';
 import { TechTerm } from './TechTerm';
@@ -7,6 +7,7 @@ import { TechTerm } from './TechTerm';
 interface FlowInspectorDrawerProps {
   flow: EnrichedFlow | null;
   unit: BandwidthUnit;
+  timeFormat?: TimeFormat;
   theme: ThemePalette;
   onClose: () => void;
   onFilterByHost: (ip: string) => void;
@@ -15,6 +16,7 @@ interface FlowInspectorDrawerProps {
 export function FlowInspectorDrawer({
   flow,
   unit,
+  timeFormat = '12h',
   theme,
   onClose,
   onFilterByHost,
@@ -107,9 +109,13 @@ export function FlowInspectorDrawer({
             </dd>
           </div>
           <div className="py-2.5 flex justify-between gap-4">
-            <dt className="app-text-muted">Service / Category</dt>
+            <dt className="app-text-muted">
+              {flow.proto === 'ICMP' ? 'Destination' : 'Service / Category'}
+            </dt>
             <dd className="text-right app-text-secondary">
-              {flow.dstService} · {flow.dstCategory}
+              {flow.proto === 'ICMP'
+                ? flow.dstService
+                : `${flow.dstService} · ${flow.dstCategory}`}
             </dd>
           </div>
           <div className="py-2.5 flex justify-between gap-4">
@@ -149,7 +155,8 @@ export function FlowInspectorDrawer({
           <div className="py-2.5 flex justify-between gap-4">
             <dt className="app-text-muted">First / Last Observed</dt>
             <dd className="font-mono app-text-secondary tabular-nums">
-              {formatTimestamp(flow.firstSeen)} / {formatTimestamp(flow.lastSeen)}
+              {formatTimestamp(flow.firstSeen, false, false, timeFormat)} /{' '}
+              {formatTimestamp(flow.lastSeen, false, false, timeFormat)}
             </dd>
           </div>
         </dl>

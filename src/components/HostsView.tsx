@@ -1,17 +1,23 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
   ArrowUpDown,
   Check,
+  Columns3,
   Pencil,
   RotateCcw,
   Search,
   ShieldAlert,
   X,
 } from 'lucide-react';
-import type { BandwidthUnit, DeviceNameSource, HostSummary } from '../types/telemetry';
+import type {
+  BandwidthUnit,
+  DeviceNameSource,
+  DevicesTablePrefs,
+  HostSummary,
+} from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
 import {
   compareIpv4,
@@ -19,12 +25,15 @@ import {
   formatBytes,
   hasTangibleTraffic,
 } from '../lib/formatters';
+import { DEFAULT_DEVICES_TABLE_PREFS } from '../lib/tablePreferences';
 import { TechTerm } from './TechTerm';
 
 interface HostsViewProps {
   hosts: HostSummary[];
   unit: BandwidthUnit;
   theme: ThemePalette;
+  prefs: DevicesTablePrefs;
+  onUpdatePrefs: (next: DevicesTablePrefs) => Promise<void>;
   onInspectHostFlows: (host: HostSummary) => void;
   onSaveAlias: (alias: { key: string; matchBy: 'mac' | 'ip'; name: string }) => Promise<void>;
   onDeleteAlias: (key: string) => Promise<void>;
@@ -56,10 +65,27 @@ const SOURCE_META: Record<DeviceNameSource, { label: string; tip: string }> = {
   },
 };
 
+const DEVICE_COLUMN_ITEMS: Array<{
+  key: keyof DevicesTablePrefs;
+  label: string;
+  section: 'columns' | 'details';
+}> = [
+  { key: 'showIp', label: 'IP Address', section: 'columns' },
+  { key: 'showMac', label: 'MAC Address', section: 'columns' },
+  { key: 'showTopServices', label: 'Top Services', section: 'columns' },
+  { key: 'showConnections', label: 'Connections Count', section: 'columns' },
+  { key: 'showDownload', label: 'Download', section: 'columns' },
+  { key: 'showUpload', label: 'Upload', section: 'columns' },
+  { key: 'showTotal', label: 'Total', section: 'columns' },
+  { key: 'showVendorSource', label: 'Vendor & Name Source', section: 'details' },
+];
+
 export function HostsView({
   hosts,
   unit,
   theme,
+  prefs,
+  onUpdatePrefs,
   onInspectHostFlows,
   onSaveAlias,
   onDeleteAlias,
@@ -75,6 +101,26 @@ export function HostsView({
   // Default to Total Data descending so rows remain calm and do not jump every poll tick
   const [sortKey, setSortKey] = useState<HostSortKey>('totalBytes');
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
+  const [columnsOpen, setColumnsOpen] = useState(false);
+  const columnsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!columnsOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (columnsRef.current && !columnsRef.current.contains(e.target as Node)) {
+        setColumnsOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setColumnsOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [columnsOpen]);
 
   const activeHostCount = useMemo(
     () => hosts.filter((h) => hasTangibleTraffic(h.rxBps, h.txBps)).length,
@@ -143,7 +189,6 @@ export function HostsView({
         cmp = a[sortKey] - b[sortKey];
       }
       if (cmp !== 0) return cmp * dir;
-      // Deterministic IP tie-breaker prevents rows with identical rates from shuffling
       return compareIpv4(a.ip, b.ip);
     });
   }, [hosts, search, typeFilter, showIdle, sortKey, sortDir]);
@@ -176,11 +221,35 @@ export function HostsView({
     }
   };
 
+  const togglePref = (key: keyof DevicesTablePrefs) => {
+    void onUpdatePrefs({ ...prefs, [key]: !prefs[key] });
+  };
+
+  const resetColumnDefaults = () => {
+    void onUpdatePrefs({ ...DEFAULT_DEVICES_TABLE_PREFS });
+  };
+
+  const visibleColCount =
+    2 +
+    [
+      prefs.showIp,
+      prefs.showMac,
+      prefs.showTopServices,
+      prefs.showConnections,
+      prefs.showDownload,
+      prefs.showUpload,
+      prefs.showTotal,
+    ].filter(Boolean).length;
+
+  const isCustomized = (
+    Object.keys(DEFAULT_DEVICES_TABLE_PREFS) as Array<keyof DevicesTablePrefs>
+  ).some((k) => prefs[k] !== DEFAULT_DEVICES_TABLE_PREFS[k]);
+
   return (
     <div className="space-y-4">
-      {/* Search, Filter & Activity Controls */}
+      {/* Search, Filter & Global Column Customizer */}
       <div className="app-surface border rounded-2xl p-4 flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-[220px]">
+        <div className="relative flex-1 min-w-[200px]">
           <Search
             className="h-4 w-4 app-text-muted absolute left-3 top-1/2 -translate-y-1/2"
             aria-hidden="true"
@@ -226,6 +295,89 @@ export function HostsView({
           <span>Show idle{idleCount > 0 ? ` (${idleCount})` : ''}</span>
         </label>
 
+        {/* Global Column Customizer */}
+        <div ref={columnsRef} className="relative">
+          <button
+            type="button"
+            data-testid="hosts-columns-btn"
+            aria-expanded={columnsOpen}
+            onClick={() => setColumnsOpen((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-medium transition-colors whitespace-nowrap ${
+              columnsOpen || isCustomized
+                ? 'border-sky-500/50 bg-sky-500/10 text-sky-500'
+                : 'app-border app-input app-row-hover app-text-secondary'
+            }`}
+          >
+            <Columns3 className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Columns</span>
+          </button>
+
+          {columnsOpen && (
+            <div
+              data-testid="hosts-columns-popover"
+              className="absolute right-0 top-full mt-2 w-60 p-3.5 rounded-2xl border app-border app-surface shadow-xl z-30 space-y-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-semibold">Devices Columns</div>
+                  <div className="text-[11px] app-text-muted">Saved globally in config.json</div>
+                </div>
+                <button
+                  type="button"
+                  data-testid="hosts-columns-reset"
+                  onClick={resetColumnDefaults}
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-500 hover:text-sky-400"
+                >
+                  <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                  Reset
+                </button>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider app-text-muted">
+                  Visible Columns
+                </div>
+                {DEVICE_COLUMN_ITEMS.filter((i) => i.section === 'columns').map((item) => (
+                  <label
+                    key={item.key}
+                    className="flex items-center gap-2 py-1 px-1.5 rounded-lg app-row-hover cursor-pointer text-xs select-none"
+                  >
+                    <input
+                      type="checkbox"
+                      data-testid={`hosts-col-${item.key}`}
+                      checked={prefs[item.key]}
+                      onChange={() => togglePref(item.key)}
+                      className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
+                    />
+                    <span>{item.label}</span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="pt-2 border-t app-border space-y-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider app-text-muted">
+                  Cell Details
+                </div>
+                {DEVICE_COLUMN_ITEMS.filter((i) => i.section === 'details').map((item) => (
+                  <label
+                    key={item.key}
+                    className="flex items-center gap-2 py-1 px-1.5 rounded-lg app-row-hover cursor-pointer text-xs select-none"
+                  >
+                    <input
+                      type="checkbox"
+                      data-testid={`hosts-col-${item.key}`}
+                      checked={prefs[item.key]}
+                      onChange={() => togglePref(item.key)}
+                      className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
+                    />
+                    <span>{item.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
         <div className="flex items-center gap-3 ml-auto">
           {randomizedCount > 0 && (
             <div className="hidden sm:flex items-center gap-1.5 text-xs text-amber-500 whitespace-nowrap">
@@ -236,110 +388,116 @@ export function HostsView({
               />
             </div>
           )}
-          <div className="text-xs font-mono app-text-muted tabular-nums whitespace-nowrap">
+          <div className="text-xs font-medium app-text-muted tabular-nums whitespace-nowrap">
             {filteredHosts.length} / {showIdle ? hosts.length : activeHostCount}{' '}
             {showIdle ? 'devices' : 'active'}
           </div>
         </div>
       </div>
 
-      {/* Fixed-Layout Stable Devices Table */}
+      {/* Stable Devices Table with Globally Customizable Columns */}
       <div className="app-surface border rounded-2xl overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[980px] table-fixed text-left border-collapse">
-            <colgroup>
-              <col className="w-[23%]" />
-              <col className="w-[12%]" />
-              <col className="w-[15%]" />
-              <col className="w-[17%]" />
-              <col className="w-[6%]" />
-              <col className="w-[8%]" />
-              <col className="w-[8%]" />
-              <col className="w-[6%]" />
-              <col className="w-[5%]" />
-            </colgroup>
+          <table className="w-full text-left border-collapse" data-testid="hosts-table">
             <thead>
               <tr className="border-b app-border text-[11px] font-medium app-text-muted app-sidebar">
-                <th className="py-2.5 px-3">
+                <th className="py-2.5 px-3 min-w-[200px]">
                   <button
                     type="button"
                     data-testid="sort-hosts-hostname"
                     onClick={() => toggleSort('hostname')}
                     className="inline-flex items-center gap-1 hover:opacity-80 whitespace-nowrap"
                   >
-                    <span>Device Name / Type</span>
+                    <span>Device</span>
                     {renderSortIcon('hostname')}
                   </button>
                 </th>
-                <th className="py-2.5 px-3">
-                  <button
-                    type="button"
-                    data-testid="sort-hosts-ip"
-                    onClick={() => toggleSort('ip')}
-                    className="inline-flex items-center gap-1 hover:opacity-80 whitespace-nowrap"
-                  >
-                    <span>IP Address</span>
-                    {renderSortIcon('ip')}
-                  </button>
-                </th>
-                <th className="py-2.5 px-3">
-                  <TechTerm
-                    label="MAC Address"
-                    tip="Hardware network identifier. Addresses with the IEEE locally administered bit set (2nd hex digit 2, 6, a, or e) are flagged as Private MACs."
-                  />
-                </th>
-                <th className="py-2.5 px-3">Top Services</th>
-                <th className="py-2.5 px-2 text-right">
-                  <button
-                    type="button"
-                    data-testid="sort-hosts-flows"
-                    onClick={() => toggleSort('activeFlows')}
-                    className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
-                  >
-                    <span>Conns</span>
-                    {renderSortIcon('activeFlows')}
-                  </button>
-                </th>
-                <th className="py-2.5 px-2 text-right">
-                  <button
-                    type="button"
-                    data-testid="sort-hosts-rx"
-                    onClick={() => toggleSort('rxBps')}
-                    className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
-                  >
-                    <span>Download</span>
-                    {renderSortIcon('rxBps')}
-                  </button>
-                </th>
-                <th className="py-2.5 px-2 text-right">
-                  <button
-                    type="button"
-                    data-testid="sort-hosts-tx"
-                    onClick={() => toggleSort('txBps')}
-                    className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
-                  >
-                    <span>Upload</span>
-                    {renderSortIcon('txBps')}
-                  </button>
-                </th>
-                <th className="py-2.5 px-2 text-right">
-                  <button
-                    type="button"
-                    data-testid="sort-hosts-total"
-                    onClick={() => toggleSort('totalBytes')}
-                    className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
-                  >
-                    <span>Total</span>
-                    {renderSortIcon('totalBytes')}
-                  </button>
-                </th>
-                <th className="py-2.5 px-3 text-right">Flows</th>
+                {prefs.showIp && (
+                  <th className="py-2.5 px-3 whitespace-nowrap">
+                    <button
+                      type="button"
+                      data-testid="sort-hosts-ip"
+                      onClick={() => toggleSort('ip')}
+                      className="inline-flex items-center gap-1 hover:opacity-80 whitespace-nowrap"
+                    >
+                      <span>IP Address</span>
+                      {renderSortIcon('ip')}
+                    </button>
+                  </th>
+                )}
+                {prefs.showMac && (
+                  <th className="py-2.5 px-3 whitespace-nowrap">
+                    <TechTerm
+                      label="MAC Address"
+                      tip="Hardware network identifier. Addresses with the IEEE locally administered bit set (2nd hex digit 2, 6, a, or e) are flagged as Private MACs."
+                    />
+                  </th>
+                )}
+                {prefs.showTopServices && (
+                  <th className="py-2.5 px-3 min-w-[160px] max-w-[260px]">Top Services</th>
+                )}
+                {prefs.showConnections && (
+                  <th className="py-2.5 px-2 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      data-testid="sort-hosts-flows"
+                      onClick={() => toggleSort('activeFlows')}
+                      className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
+                    >
+                      <span>Conns</span>
+                      {renderSortIcon('activeFlows')}
+                    </button>
+                  </th>
+                )}
+                {prefs.showDownload && (
+                  <th className="py-2.5 px-2 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      data-testid="sort-hosts-rx"
+                      onClick={() => toggleSort('rxBps')}
+                      className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
+                    >
+                      <span>Download</span>
+                      {renderSortIcon('rxBps')}
+                    </button>
+                  </th>
+                )}
+                {prefs.showUpload && (
+                  <th className="py-2.5 px-2 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      data-testid="sort-hosts-tx"
+                      onClick={() => toggleSort('txBps')}
+                      className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
+                    >
+                      <span>Upload</span>
+                      {renderSortIcon('txBps')}
+                    </button>
+                  </th>
+                )}
+                {prefs.showTotal && (
+                  <th className="py-2.5 px-2 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      data-testid="sort-hosts-total"
+                      onClick={() => toggleSort('totalBytes')}
+                      className="inline-flex items-center justify-end gap-1 ml-auto hover:opacity-80 whitespace-nowrap"
+                    >
+                      <span>Total</span>
+                      {renderSortIcon('totalBytes')}
+                    </button>
+                  </th>
+                )}
+                <th className="py-2.5 px-3 text-right whitespace-nowrap">Flows</th>
               </tr>
             </thead>
             <tbody className="divide-y app-border text-xs">
               {filteredHosts.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-10 text-center app-text-muted space-y-2">
+                  <td
+                    colSpan={Math.max(1, visibleColCount)}
+                    className="py-10 text-center app-text-muted space-y-2"
+                  >
                     <div>
                       {!showIdle && idleCount > 0 && !search && typeFilter === 'ALL'
                         ? `No devices with active traffic right now (${idleCount} idle devices hidden).`
@@ -371,9 +529,9 @@ export function HostsView({
                     <tr
                       key={host.ip}
                       data-testid={`host-row-${host.ip}`}
-                      className={`app-row-hover transition-colors ${isEditing ? '' : 'h-[64px]'}`}
+                      className={`app-row-hover transition-colors ${isEditing ? '' : 'h-[62px]'}`}
                     >
-                      <td className="py-2.5 px-3 align-middle overflow-hidden">
+                      <td className="py-2.5 px-3 align-middle max-w-[260px]">
                         {isEditing ? (
                           <div className="space-y-1.5" data-testid="device-rename-form">
                             <div className="flex items-center gap-1.5">
@@ -469,69 +627,91 @@ export function HostsView({
                                 <Pencil className="h-3 w-3" aria-hidden="true" />
                               </button>
                             </div>
-                            <div className="text-[11px] app-text-muted flex items-center gap-1.5 min-w-0 leading-4">
-                              <span className="truncate" title={host.vendor}>
-                                {host.vendor}
-                              </span>
-                              <span aria-hidden="true" className="shrink-0">
-                                ·
-                              </span>
-                              <span className="shrink-0">
-                                <TechTerm
-                                  label={sourceMeta.label}
-                                  tip={
-                                    host.ptrHostname
-                                      ? `${sourceMeta.tip} Full PTR: ${host.ptrHostname}`
-                                      : sourceMeta.tip
-                                  }
-                                />
-                              </span>
+                            {prefs.showVendorSource && (
+                              <div className="text-[11px] app-text-muted flex items-center gap-1.5 min-w-0 leading-4">
+                                <span className="truncate" title={host.vendor}>
+                                  {host.vendor}
+                                </span>
+                                <span aria-hidden="true" className="shrink-0">
+                                  ·
+                                </span>
+                                <span className="shrink-0">
+                                  <TechTerm
+                                    label={sourceMeta.label}
+                                    tip={
+                                      host.ptrHostname
+                                        ? `${sourceMeta.tip} Full PTR: ${host.ptrHostname}`
+                                        : sourceMeta.tip
+                                    }
+                                  />
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </td>
+
+                      {prefs.showIp && (
+                        <td className="py-2.5 px-3 align-middle whitespace-nowrap tabular-nums">
+                          {host.ip}
+                        </td>
+                      )}
+
+                      {prefs.showMac && (
+                        <td className="py-2.5 px-3 align-middle font-mono text-[11px] app-text-muted whitespace-nowrap">
+                          <div title={host.mac}>{host.mac}</div>
+                          {host.isRandomizedMac && (
+                            <div className="text-[11px] font-sans text-amber-500 leading-4">
+                              <TechTerm
+                                label="Private MAC"
+                                tip="IEEE 802.3 locally administered (randomized) MAC address. Pinning a custom name by MAC persists across DHCP renewals on your home Wi-Fi."
+                              />
                             </div>
+                          )}
+                        </td>
+                      )}
+
+                      {prefs.showTopServices && (
+                        <td
+                          className="py-2.5 px-3 align-middle app-text-secondary max-w-[240px]"
+                          title={serviceText}
+                        >
+                          <div className="text-xs leading-snug line-clamp-2 break-words">
+                            {serviceText}
                           </div>
-                        )}
-                      </td>
-                      <td className="py-2.5 px-3 align-middle font-mono whitespace-nowrap tabular-nums truncate">
-                        {host.ip}
-                      </td>
-                      <td className="py-2.5 px-3 align-middle font-mono app-text-muted overflow-hidden">
-                        <div className="truncate" title={host.mac}>
-                          {host.mac}
-                        </div>
-                        {host.isRandomizedMac && (
-                          <div className="text-[11px] font-sans text-amber-500 leading-4 truncate">
-                            <TechTerm
-                              label="Private MAC"
-                              tip="IEEE 802.3 locally administered (randomized) MAC address. Pinning a custom name by MAC persists across DHCP renewals on your home Wi-Fi."
-                            />
-                          </div>
-                        )}
-                      </td>
-                      <td
-                        className="py-2.5 px-3 align-middle app-text-secondary overflow-hidden"
-                        title={serviceText}
-                      >
-                        <div className="text-xs leading-snug line-clamp-2 break-words">
-                          {serviceText}
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-2 align-middle text-right font-mono tabular-nums whitespace-nowrap">
-                        {host.activeFlows}
-                      </td>
-                      <td
-                        className="py-2.5 px-2 align-middle text-right font-mono whitespace-nowrap tabular-nums"
-                        style={{ color: theme.rxColor }}
-                      >
-                        {formatBandwidth(host.rxBps, unit)}
-                      </td>
-                      <td
-                        className="py-2.5 px-2 align-middle text-right font-mono whitespace-nowrap tabular-nums"
-                        style={{ color: theme.txColor }}
-                      >
-                        {formatBandwidth(host.txBps, unit)}
-                      </td>
-                      <td className="py-2.5 px-2 align-middle text-right font-mono whitespace-nowrap tabular-nums">
-                        {formatBytes(host.totalBytes)}
-                      </td>
+                        </td>
+                      )}
+
+                      {prefs.showConnections && (
+                        <td className="py-2.5 px-2 align-middle text-right font-medium tabular-nums whitespace-nowrap">
+                          {host.activeFlows}
+                        </td>
+                      )}
+
+                      {prefs.showDownload && (
+                        <td
+                          className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums"
+                          style={{ color: theme.rxColor }}
+                        >
+                          {formatBandwidth(host.rxBps, unit)}
+                        </td>
+                      )}
+
+                      {prefs.showUpload && (
+                        <td
+                          className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums"
+                          style={{ color: theme.txColor }}
+                        >
+                          {formatBandwidth(host.txBps, unit)}
+                        </td>
+                      )}
+
+                      {prefs.showTotal && (
+                        <td className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums">
+                          {formatBytes(host.totalBytes)}
+                        </td>
+                      )}
+
                       <td className="py-2.5 px-3 align-middle text-right whitespace-nowrap">
                         <button
                           type="button"

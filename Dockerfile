@@ -28,7 +28,7 @@ RUN apk add --no-cache su-exec tzdata && \
   adduser -u 1000 -S -D -H -h /config -s /sbin/nologin -G orbiflow orbiflow
 
 COPY package.json ./
-RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws'].map((k) => k + '@' + d[k]).join(' '));" \
+RUN node -e "const d = require('./package.json').dependencies; console.log(['express', 'ws', 'ssh2'].map((k) => k + '@' + d[k]).join(' '));" \
   | xargs npm install --no-save --no-audit --no-fund && \
   rm -f package.json package-lock.json && \
   mkdir -p /config/cache && \

@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Sidebar, type NavTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { OverviewView } from './components/OverviewView';
+import { TrafficMapView } from './components/TrafficMapView';
 import { FlowsView } from './components/FlowsView';
 import { HostsView } from './components/HostsView';
 import { AlertsView } from './components/AlertsView';
 import { SetupView } from './components/SetupView';
 import { SettingsView } from './components/SettingsView';
 import { FlowInspectorDrawer } from './components/FlowInspectorDrawer';
+import type { SatelliteSavePayload } from './components/SatelliteManager';
 import {
   THEMES,
   applyThemeToDocument,
@@ -25,10 +27,13 @@ import {
   analyzeTimeWindow,
   type TimeWindowAnalysis,
 } from './lib/timeWindowUtils';
+import { DEFAULT_TABLE_PREFERENCES } from './lib/tablePreferences';
 import type {
   AlertRule,
   BandwidthUnit,
+  ConnectionsTablePrefs,
   DashboardSnapshot,
+  DevicesTablePrefs,
   EnrichedFlow,
   HostSummary,
   NotificationConfig,
@@ -81,7 +86,7 @@ function loadInitialThemeState(): {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('overview');
-  const [timeWindow, setTimeWindow] = useState<TimeWindow>('1m');
+  const [timeWindow, setTimeWindow] = useState<TimeWindow>('5m');
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
 
@@ -252,6 +257,26 @@ export default function App() {
     }
   };
 
+  const handleUpdateConnectionsPrefs = async (next: ConnectionsTablePrefs) => {
+    const current = snapshot?.serverConfig.tablePreferences || DEFAULT_TABLE_PREFERENCES;
+    await handleSaveSettings({
+      tablePreferences: {
+        ...current,
+        connections: next,
+      },
+    });
+  };
+
+  const handleUpdateDevicesPrefs = async (next: DevicesTablePrefs) => {
+    const current = snapshot?.serverConfig.tablePreferences || DEFAULT_TABLE_PREFERENCES;
+    await handleSaveSettings({
+      tablePreferences: {
+        ...current,
+        devices: next,
+      },
+    });
+  };
+
   const handleSaveNotifications = async (notifications: NotificationConfig) => {
     const res = await fetch('/api/notifications', {
       method: 'POST',
@@ -330,6 +355,43 @@ export default function App() {
     handleFilterConnections(host.ip);
   };
 
+  const handleSaveSatellite = async (
+    payload: SatelliteSavePayload
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const res = await fetch('/api/satellites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({ ok: false, error: 'Invalid server response' }));
+    if (res.ok && data.snapshot) {
+      setSnapshot(data.snapshot);
+      return { ok: true };
+    }
+    return { ok: false, error: data.error || 'Failed to save satellite' };
+  };
+
+  const handleDeleteSatellite = async (id: string) => {
+    const res = await fetch(`/api/satellites/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.snapshot) {
+      setSnapshot(data.snapshot);
+    }
+  };
+
+  const handleTestSatellite = async (
+    payload: SatelliteSavePayload
+  ): Promise<{ ok: boolean; error?: string; summary?: string }> => {
+    const res = await fetch('/api/satellites/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return res.json().catch(() => ({ ok: false, error: 'Unable to parse server response' }));
+  };
+
   const [nowTick, setNowTick] = useState(() => Date.now());
 
   useEffect(() => {
@@ -347,7 +409,14 @@ export default function App() {
         : rollupHistory.length > 0
           ? rollupHistory[rollupHistory.length - 1].timestamp
           : nowTick;
-    const referenceNow = Math.max(nowTick, latestTs);
+    // Anchor the right edge of live graphs to the latest incoming sample timestamp
+    // so there is zero empty gap on the right; only advance with wall-clock if data stops.
+    const referenceNow =
+      history.length > 0 || rollupHistory.length > 0
+        ? nowTick - latestTs > 20_000
+          ? nowTick
+          : latestTs
+        : nowTick;
     const entries = ALL_TIME_WINDOWS.map((w) => [
       w,
       analyzeTimeWindow(w, history, rollupHistory, referenceNow),
@@ -371,6 +440,7 @@ export default function App() {
   }
 
   const unackAlerts = snapshot.alerts.filter((a) => !a.acknowledged).length;
+  const activeTimeFormat = snapshot.serverConfig.timeFormat || '12h';
 
   return (
     <div className="min-h-screen app-canvas flex">
@@ -390,6 +460,10 @@ export default function App() {
         onChangeActiveTheme={handleChangeActiveTheme}
         unit={unit}
         onChangeUnit={setUnit}
+        timeFormat={activeTimeFormat}
+        onChangeTimeFormat={(tf) => {
+          void handleSaveSettings({ timeFormat: tf });
+        }}
         onToggleSimulator={handleToggleSimulator}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
@@ -404,6 +478,13 @@ export default function App() {
           paused={paused}
           onTogglePause={() => setPaused((p) => !p)}
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
+          rxBps={snapshot.kpis.rxBps}
+          txBps={snapshot.kpis.txBps}
+          probe={snapshot.probe}
+          unit={unit}
+          theme={activeTheme}
+          serverConfig={snapshot.serverConfig}
+          onSaveSettings={handleSaveSettings}
         />
 
         <main className="flex-1 p-4 sm:p-6 max-w-[1440px] w-full mx-auto">
@@ -414,6 +495,7 @@ export default function App() {
               windowAvailability={windowAvailability}
               onChangeTimeWindow={setTimeWindow}
               unit={unit}
+              timeFormat={activeTimeFormat}
               theme={activeTheme}
               onSelectHost={handleSelectHost}
               onSelectFilter={handleFilterConnections}
@@ -421,6 +503,20 @@ export default function App() {
                 setFlowSearchSeed('');
                 setActiveTab('flows');
               }}
+              onOpenHosts={() => setActiveTab('hosts')}
+            />
+          )}
+
+          {activeTab === 'topology' && (
+            <TrafficMapView
+              snapshot={snapshot}
+              unit={unit}
+              theme={activeTheme}
+              paused={paused}
+              onInspectHostFlows={handleSelectHost}
+              onSaveSatellite={handleSaveSatellite}
+              onDeleteSatellite={handleDeleteSatellite}
+              onTestSatellite={handleTestSatellite}
             />
           )}
 
@@ -431,6 +527,11 @@ export default function App() {
               unit={unit}
               theme={activeTheme}
               initialSearch={flowSearchSeed}
+              prefs={
+                snapshot.serverConfig.tablePreferences?.connections ||
+                DEFAULT_TABLE_PREFERENCES.connections
+              }
+              onUpdatePrefs={handleUpdateConnectionsPrefs}
               onSelectFlow={setSelectedFlow}
             />
           )}
@@ -440,6 +541,11 @@ export default function App() {
               hosts={snapshot.hosts}
               unit={unit}
               theme={activeTheme}
+              prefs={
+                snapshot.serverConfig.tablePreferences?.devices ||
+                DEFAULT_TABLE_PREFERENCES.devices
+              }
+              onUpdatePrefs={handleUpdateDevicesPrefs}
               onInspectHostFlows={handleSelectHost}
               onSaveAlias={handleSaveDeviceAlias}
               onDeleteAlias={handleDeleteDeviceAlias}
@@ -451,6 +557,7 @@ export default function App() {
               rules={snapshot.rules}
               alerts={snapshot.alerts}
               notifications={snapshot.notifications}
+              timeFormat={activeTimeFormat}
               onSaveRules={handleSaveRules}
               onSaveNotifications={handleSaveNotifications}
               onTestNotification={handleTestNotification}
@@ -460,14 +567,23 @@ export default function App() {
           )}
 
           {activeTab === 'setup' && (
-            <SetupView defaultToken={snapshot.serverConfig.probeToken} />
+            <SetupView
+              defaultToken={snapshot.serverConfig.probeToken}
+              defaultDhcpLeasesPath={snapshot.serverConfig.dhcpLeasesPath}
+            />
           )}
 
           {activeTab === 'settings' && (
             <SettingsView
               serverConfig={snapshot.serverConfig}
               serverStats={snapshot.serverStats}
+              satellites={snapshot.topology?.satellites || []}
+              satelliteConfigs={snapshot.topology?.satelliteConfigs || []}
+              unit={unit}
               onSaveSettings={handleSaveSettings}
+              onSaveSatellite={handleSaveSatellite}
+              onDeleteSatellite={handleDeleteSatellite}
+              onTestSatellite={handleTestSatellite}
             />
           )}
         </main>
@@ -476,6 +592,7 @@ export default function App() {
       <FlowInspectorDrawer
         flow={selectedFlow}
         unit={unit}
+        timeFormat={activeTimeFormat}
         theme={activeTheme}
         onClose={() => setSelectedFlow(null)}
         onFilterByHost={handleFilterConnections}

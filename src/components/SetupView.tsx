@@ -56,9 +56,13 @@ const ARTIFACT_META: Array<{
 
 interface SetupViewProps {
   defaultToken?: string;
+  defaultDhcpLeasesPath?: string;
 }
 
-export function SetupView({ defaultToken = '' }: SetupViewProps) {
+export function SetupView({
+  defaultToken = '',
+  defaultDhcpLeasesPath = '',
+}: SetupViewProps) {
   const defaultHost =
     typeof window !== 'undefined' && window.location.hostname !== 'localhost'
       ? window.location.hostname
@@ -69,12 +73,17 @@ export function SetupView({ defaultToken = '' }: SetupViewProps) {
   const [token, setToken] = useState(defaultToken);
   const [iface, setIface] = useState('eth0');
   const [intervalSec, setIntervalSec] = useState('3');
+  const [dhcpLeasesPath, setDhcpLeasesPath] = useState(defaultDhcpLeasesPath);
   const [activeArtifact, setActiveArtifact] = useState<ArtifactTab>('python');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setToken(defaultToken);
   }, [defaultToken]);
+
+  useEffect(() => {
+    setDhcpLeasesPath(defaultDhcpLeasesPath);
+  }, [defaultDhcpLeasesPath]);
 
   const probeCfg = useMemo(
     () => ({
@@ -84,8 +93,9 @@ export function SetupView({ defaultToken = '' }: SetupViewProps) {
       iface,
       intervalSec: Math.max(1, Number(intervalSec) || 3),
       probeId: `router-${iface || 'wan'}`,
+      dhcpLeasesPath: dhcpLeasesPath.trim(),
     }),
-    [serverHost, serverPort, token, iface, intervalSec]
+    [serverHost, serverPort, token, iface, intervalSec, dhcpLeasesPath]
   );
 
   const currentContent = useMemo(() => {
@@ -97,7 +107,7 @@ export function SetupView({ defaultToken = '' }: SetupViewProps) {
       case 'c':
         return generateCProbeSource(probeCfg);
       case 'init':
-        return generateInitScript();
+        return generateInitScript(probeCfg);
       case 'docker':
         return generateDockerCompose(probeCfg);
     }
@@ -146,7 +156,7 @@ export function SetupView({ defaultToken = '' }: SetupViewProps) {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
             <label htmlFor="cfg-host" className="block text-xs app-text-muted mb-1.5">
               Server LAN IP
@@ -197,6 +207,20 @@ export function SetupView({ defaultToken = '' }: SetupViewProps) {
               max={60}
               value={intervalSec}
               onChange={(e) => setIntervalSec(e.target.value)}
+              className="w-full app-input border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+            />
+          </div>
+          <div>
+            <label htmlFor="cfg-dhcp-leases" className="block text-xs app-text-muted mb-1.5">
+              DHCP Leases File
+            </label>
+            <input
+              id="cfg-dhcp-leases"
+              data-testid="setup-dhcp-leases-input"
+              type="text"
+              value={dhcpLeasesPath}
+              onChange={(e) => setDhcpLeasesPath(e.target.value)}
+              placeholder="Auto-detect (/tmp/dhcp.leases)"
               className="w-full app-input border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
             />
           </div>

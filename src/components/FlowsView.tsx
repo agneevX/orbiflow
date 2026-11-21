@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
-import { ArrowUpDown, Search, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowUpDown, Columns3, RotateCcw, Search, X } from 'lucide-react';
 import type {
   BandwidthUnit,
+  ConnectionsTablePrefs,
   DestinationCategory,
   EnrichedFlow,
   TransportProtocol,
@@ -9,11 +10,13 @@ import type {
 import type { ThemePalette } from '../lib/themes';
 import {
   ALL_DESTINATION_CATEGORIES,
+  formatAppForProtocolFilter,
   formatBandwidth,
   formatBytes,
   formatDuration,
   hasTangibleTraffic,
 } from '../lib/formatters';
+import { DEFAULT_CONNECTIONS_TABLE_PREFS } from '../lib/tablePreferences';
 import { TechTerm } from './TechTerm';
 
 interface FlowsViewProps {
@@ -21,6 +24,8 @@ interface FlowsViewProps {
   unit: BandwidthUnit;
   theme: ThemePalette;
   initialSearch?: string;
+  prefs: ConnectionsTablePrefs;
+  onUpdatePrefs: (next: ConnectionsTablePrefs) => Promise<void>;
   onSelectFlow: (flow: EnrichedFlow) => void;
 }
 
@@ -32,11 +37,33 @@ const PROTO_TIPS: Record<'TCP' | 'UDP' | 'ICMP', string> = {
   ICMP: 'Internet Control Message Protocol — diagnostic messages such as ping and network reachability checks.',
 };
 
+const COLUMN_TOGGLE_ITEMS: Array<{
+  key: keyof ConnectionsTablePrefs;
+  label: string;
+  section: 'columns' | 'details';
+}> = [
+  { key: 'showAppProtocol', label: 'App / Protocol', section: 'columns' },
+  { key: 'showLocalDevice', label: 'Local Device', section: 'columns' },
+  { key: 'showDestination', label: 'Destination', section: 'columns' },
+  { key: 'showDestinationIpPort', label: 'Destination IP : Port', section: 'columns' },
+  { key: 'showCategory', label: 'Category', section: 'columns' },
+  { key: 'showDownload', label: 'Download', section: 'columns' },
+  { key: 'showUpload', label: 'Upload', section: 'columns' },
+  { key: 'showTotal', label: 'Total', section: 'columns' },
+  { key: 'showDuration', label: 'Duration', section: 'columns' },
+  { key: 'showProtocol', label: 'Protocol badge (TCP/UDP)', section: 'details' },
+  { key: 'showLocalPort', label: 'Local device port', section: 'details' },
+  { key: 'showLocalIp', label: 'Local IP address', section: 'details' },
+  { key: 'showDestinationRdns', label: 'Reverse DNS on next line', section: 'details' },
+];
+
 export function FlowsView({
   flows,
   unit,
   theme,
   initialSearch = '',
+  prefs,
+  onUpdatePrefs,
   onSelectFlow,
 }: FlowsViewProps) {
   const [search, setSearch] = useState(initialSearch);
@@ -45,6 +72,26 @@ export function FlowsView({
   const [showIdle, setShowIdle] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>('totalBps');
   const [sortAsc, setSortAsc] = useState(false);
+  const [columnsOpen, setColumnsOpen] = useState(false);
+  const columnsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!columnsOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (columnsRef.current && !columnsRef.current.contains(e.target as Node)) {
+        setColumnsOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setColumnsOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [columnsOpen]);
 
   const activeCount = useMemo(
     () => flows.filter((f) => hasTangibleTraffic(f.rxBps, f.txBps)).length,
@@ -57,7 +104,9 @@ export function FlowsView({
     const list = flows.filter((f) => {
       if (!showIdle && !hasTangibleTraffic(f.rxBps, f.txBps)) return false;
       if (protoFilter !== 'ALL' && f.proto !== protoFilter) return false;
-      if (categoryFilter !== 'ALL' && f.dstCategory !== categoryFilter) return false;
+      if (protoFilter !== 'ICMP' && categoryFilter !== 'ALL' && f.dstCategory !== categoryFilter) {
+        return false;
+      }
       if (q) {
         const hay =
           `${f.srcIp} ${f.srcHost} ${f.dstIp} ${f.dstHost || ''} ${f.dstService} ${f.dstCategory} ${f.app} ${f.sport} ${f.dport}`.toLowerCase();
@@ -88,13 +137,38 @@ export function FlowsView({
     setCategoryFilter('ALL');
   };
 
+  const togglePref = (key: keyof ConnectionsTablePrefs) => {
+    const next: ConnectionsTablePrefs = { ...prefs, [key]: !prefs[key] };
+    void onUpdatePrefs(next);
+  };
+
+  const resetColumnDefaults = () => {
+    void onUpdatePrefs({ ...DEFAULT_CONNECTIONS_TABLE_PREFS });
+  };
+
+  const visibleColCount = [
+    prefs.showAppProtocol,
+    prefs.showLocalDevice,
+    prefs.showDestination,
+    prefs.showDestinationIpPort,
+    prefs.showCategory,
+    prefs.showDownload,
+    prefs.showUpload,
+    prefs.showTotal,
+    prefs.showDuration,
+  ].filter(Boolean).length;
+
+  const isCustomized = (
+    Object.keys(DEFAULT_CONNECTIONS_TABLE_PREFS) as Array<keyof ConnectionsTablePrefs>
+  ).some((k) => prefs[k] !== DEFAULT_CONNECTIONS_TABLE_PREFS[k]);
+
   const totalScopeCount = showIdle ? flows.length : activeCount;
 
   return (
     <div className="space-y-4">
-      {/* Filter & Search Toolbar */}
+      {/* Filter, Search & Global Column Customization Toolbar */}
       <div className="app-surface border rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="relative flex-1 min-w-[220px] max-w-md">
+        <div className="relative flex-1 min-w-[200px] max-w-md">
           <label htmlFor="flow-search-input" className="sr-only">
             Filter connections by IP, device, hostname, service, category, or port
           </label>
@@ -122,7 +196,7 @@ export function FlowsView({
           )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
           <div
             role="group"
             aria-label="Filter by transport protocol"
@@ -133,8 +207,11 @@ export function FlowsView({
                 key={p}
                 type="button"
                 title={p === 'ALL' ? 'Show all connection protocols' : PROTO_TIPS[p]}
-                onClick={() => setProtoFilter(p)}
-                className={`px-2.5 py-1 text-xs font-mono rounded-lg transition-colors whitespace-nowrap ${
+                onClick={() => {
+                  setProtoFilter(p);
+                  if (p === 'ICMP') setCategoryFilter('ALL');
+                }}
+                className={`px-2.5 py-1 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
                   protoFilter === p
                     ? 'bg-sky-500/15 text-sky-500 font-semibold'
                     : 'app-text-muted'
@@ -145,25 +222,27 @@ export function FlowsView({
             ))}
           </div>
 
-          <div className="flex items-center gap-2">
-            <label htmlFor="category-filter" className="text-xs app-text-muted whitespace-nowrap">
-              Category
-            </label>
-            <select
-              id="category-filter"
-              data-testid="category-filter-select"
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value as 'ALL' | DestinationCategory)}
-              className="app-input border rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
-            >
-              <option value="ALL">All Categories</option>
-              {ALL_DESTINATION_CATEGORIES.map((cat) => (
-                <option key={cat} value={cat}>
-                  {cat}
-                </option>
-              ))}
-            </select>
-          </div>
+          {protoFilter !== 'ICMP' && (
+            <div className="flex items-center gap-2">
+              <label htmlFor="category-filter" className="text-xs app-text-muted whitespace-nowrap">
+                Category
+              </label>
+              <select
+                id="category-filter"
+                data-testid="category-filter-select"
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value as 'ALL' | DestinationCategory)}
+                className="app-input border rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+              >
+                <option value="ALL">All Categories</option>
+                {ALL_DESTINATION_CATEGORIES.map((cat) => (
+                  <option key={cat} value={cat}>
+                    {cat}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <label className="inline-flex items-center gap-1.5 text-xs app-text-muted cursor-pointer whitespace-nowrap select-none">
             <input
@@ -176,76 +255,180 @@ export function FlowsView({
             <span>Show idle{idleCount > 0 ? ` (${idleCount})` : ''}</span>
           </label>
 
-          <span className="text-xs font-mono app-text-muted tabular-nums whitespace-nowrap">
+          {/* Global Column Customizer */}
+          <div ref={columnsRef} className="relative">
+            <button
+              type="button"
+              data-testid="flows-columns-btn"
+              aria-expanded={columnsOpen}
+              onClick={() => setColumnsOpen((v) => !v)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-medium transition-colors whitespace-nowrap ${
+                columnsOpen || isCustomized
+                  ? 'border-sky-500/50 bg-sky-500/10 text-sky-500'
+                  : 'app-border app-input app-row-hover app-text-secondary'
+              }`}
+            >
+              <Columns3 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Columns</span>
+            </button>
+
+            {columnsOpen && (
+              <div
+                data-testid="flows-columns-popover"
+                className="absolute right-0 top-full mt-2 w-64 p-3.5 rounded-2xl border app-border app-surface shadow-xl z-30 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-semibold">Connections Columns</div>
+                    <div className="text-[11px] app-text-muted">Saved globally in config.json</div>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="flows-columns-reset"
+                    onClick={resetColumnDefaults}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-500 hover:text-sky-400"
+                  >
+                    <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                    Reset
+                  </button>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider app-text-muted">
+                    Visible Columns
+                  </div>
+                  {COLUMN_TOGGLE_ITEMS.filter((i) => i.section === 'columns').map((item) => (
+                    <label
+                      key={item.key}
+                      className="flex items-center gap-2 py-1 px-1.5 rounded-lg app-row-hover cursor-pointer text-xs select-none"
+                    >
+                      <input
+                        type="checkbox"
+                        data-testid={`flows-col-${item.key}`}
+                        checked={prefs[item.key]}
+                        onChange={() => togglePref(item.key)}
+                        className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
+                      />
+                      <span>{item.label}</span>
+                    </label>
+                  ))}
+                </div>
+
+                <div className="pt-2 border-t app-border space-y-1.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider app-text-muted">
+                    Cell Details
+                  </div>
+                  {COLUMN_TOGGLE_ITEMS.filter((i) => i.section === 'details').map((item) => (
+                    <label
+                      key={item.key}
+                      className="flex items-center gap-2 py-1 px-1.5 rounded-lg app-row-hover cursor-pointer text-xs select-none"
+                    >
+                      <input
+                        type="checkbox"
+                        data-testid={`flows-col-${item.key}`}
+                        checked={prefs[item.key]}
+                        onChange={() => togglePref(item.key)}
+                        className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
+                      />
+                      <span>{item.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <span className="text-xs font-medium app-text-muted tabular-nums whitespace-nowrap">
             {filteredFlows.length} / {totalScopeCount} active
           </span>
         </div>
       </div>
 
-      {/* Dense Active Flow Table (Established / Active Traffic Only — State column removed) */}
+      {/* Customizable Active Connections Table */}
       <div className="app-surface border rounded-2xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse" data-testid="flows-table">
             <thead>
               <tr className="border-b app-border text-[11px] font-medium app-text-muted app-sidebar">
-                <th className="py-2.5 px-3">
-                  <TechTerm
-                    label="App / Protocol"
-                    tip="Detected application or service type along with the underlying transport protocol (TCP, UDP, or ICMP)."
-                  />
-                </th>
-                <th className="py-2.5 px-3">
-                  <TechTerm
-                    label="Local Device : Port"
-                    tip="The device on your local network and the source port used for this session."
-                  />
-                </th>
-                <th className="py-2.5 px-3">
-                  <TechTerm
-                    label="Destination / Reverse DNS"
-                    tip="Remote IP address, port, and automatically reverse-looked-up hostname / service."
-                  />
-                </th>
-                <th className="py-2.5 px-3">Category</th>
-                <th className="py-2.5 px-3 text-right">
-                  <button
-                    type="button"
-                    onClick={() => handleSort('rxBps')}
-                    className="inline-flex items-center gap-1"
-                  >
-                    Download
-                    <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
-                  </button>
-                </th>
-                <th className="py-2.5 px-3 text-right">
-                  <button
-                    type="button"
-                    onClick={() => handleSort('txBps')}
-                    className="inline-flex items-center gap-1"
-                  >
-                    Upload
-                    <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
-                  </button>
-                </th>
-                <th className="py-2.5 px-3 text-right">
-                  <button
-                    type="button"
-                    onClick={() => handleSort('totalBytes')}
-                    className="inline-flex items-center gap-1"
-                  >
-                    Total Data
-                    <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
-                  </button>
-                </th>
-                <th className="py-2.5 px-3 text-right">Duration</th>
+                {prefs.showAppProtocol && (
+                  <th className="py-2.5 px-3 whitespace-nowrap">
+                    <TechTerm
+                      label={prefs.showProtocol && protoFilter === 'ALL' ? 'App / Protocol' : 'App'}
+                      tip="Detected application or service type along with the optional underlying transport protocol (TCP, UDP, or ICMP)."
+                    />
+                  </th>
+                )}
+                {prefs.showLocalDevice && (
+                  <th className="py-2.5 px-3 whitespace-nowrap">
+                    <TechTerm
+                      label={prefs.showLocalPort ? 'Local Device : Port' : 'Local Device'}
+                      tip="The device on your local network initiating or receiving this connection."
+                    />
+                  </th>
+                )}
+                {prefs.showDestination && (
+                  <th className="py-2.5 px-3 whitespace-nowrap">
+                    <TechTerm
+                      label={prefs.showDestinationRdns ? 'Destination' : 'Destination Service'}
+                      tip="Detected destination service name with reverse DNS hostname shown underneath when resolved."
+                    />
+                  </th>
+                )}
+                {prefs.showDestinationIpPort && (
+                  <th className="py-2.5 px-3 whitespace-nowrap">Destination IP : Port</th>
+                )}
+                {prefs.showCategory && <th className="py-2.5 px-3 whitespace-nowrap">Category</th>}
+                {prefs.showDownload && (
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => handleSort('rxBps')}
+                      className="inline-flex items-center gap-1"
+                    >
+                      Download
+                      <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+                    </button>
+                  </th>
+                )}
+                {prefs.showUpload && (
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => handleSort('txBps')}
+                      className="inline-flex items-center gap-1"
+                    >
+                      Upload
+                      <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+                    </button>
+                  </th>
+                )}
+                {prefs.showTotal && (
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => handleSort('totalBytes')}
+                      className="inline-flex items-center gap-1"
+                    >
+                      Total
+                      <ArrowUpDown className="h-3 w-3" aria-hidden="true" />
+                    </button>
+                  </th>
+                )}
+                {prefs.showDuration && (
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Duration</th>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y app-border text-xs">
               {filteredFlows.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center space-y-3">
+                  <td colSpan={Math.max(1, visibleColCount)} className="py-12 text-center space-y-3">
                     <p className="text-sm app-text-muted">
-                      {!showIdle && idleCount > 0 && !search && protoFilter === 'ALL' && categoryFilter === 'ALL'
+                      {!showIdle &&
+                      idleCount > 0 &&
+                      !search &&
+                      protoFilter === 'ALL' &&
+                      categoryFilter === 'ALL'
                         ? `No active traffic right now (${idleCount} idle established connections hidden).`
                         : 'No active connections match your current filters.'}
                     </p>
@@ -273,67 +456,117 @@ export function FlowsView({
                 </tr>
               ) : (
                 filteredFlows.map((flow) => {
-                  const hasResolvedHost = Boolean(flow.dstHost && flow.dstHost !== flow.dstIp);
+                  const hasResolvedHost = Boolean(
+                    flow.dstHost && flow.dstHost !== flow.dstIp && flow.dstHost !== flow.dstService
+                  );
                   return (
                     <tr
                       key={flow.id}
                       onClick={() => onSelectFlow(flow)}
                       className="app-row-hover cursor-pointer transition-colors"
                     >
-                      <td className="py-2.5 px-3 whitespace-nowrap">
-                        <span className="font-medium">{flow.app}</span>
-                        <span
-                          className="ml-1.5 font-mono app-text-muted"
-                          title={
-                            flow.proto === 'TCP' || flow.proto === 'UDP' || flow.proto === 'ICMP'
-                              ? PROTO_TIPS[flow.proto]
-                              : undefined
-                          }
-                        >
-                          {flow.proto}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3 font-mono whitespace-nowrap tabular-nums">
-                        <span>{flow.srcHost}</span>
-                        <span className="app-text-muted">:{flow.sport}</span>
-                      </td>
-                      <td className="py-2.5 px-3 max-w-[320px]">
-                        <div className="flex items-center gap-1.5 truncate">
-                          <span className="font-medium truncate">{flow.dstService}</span>
-                          {hasResolvedHost && flow.dstHost !== flow.dstService && (
+                      {prefs.showAppProtocol && (
+                        <td className="py-2.5 px-3 whitespace-nowrap">
+                          <span className="font-medium">
+                            {formatAppForProtocolFilter(
+                              flow.app,
+                              flow.proto,
+                              flow.dport,
+                              protoFilter
+                            )}
+                          </span>
+                          {prefs.showProtocol && protoFilter === 'ALL' && (
                             <span
-                              className="font-mono text-[11px] app-text-muted truncate"
-                              title={flow.dstHost}
+                              className="ml-1.5 text-[11px] app-text-muted"
+                              title={
+                                flow.proto === 'TCP' ||
+                                flow.proto === 'UDP' ||
+                                flow.proto === 'ICMP'
+                                  ? PROTO_TIPS[flow.proto]
+                                  : undefined
+                              }
                             >
-                              · {flow.dstHost}
+                              {flow.proto}
                             </span>
                           )}
-                        </div>
-                        <div className="font-mono text-[11px] app-text-muted tabular-nums truncate">
+                        </td>
+                      )}
+
+                      {prefs.showLocalDevice && (
+                        <td className="py-2.5 px-3 whitespace-nowrap">
+                          <div className="tabular-nums">
+                            <span className="font-medium">{flow.srcHost}</span>
+                            {prefs.showLocalPort && (
+                              <span className="font-mono text-[11px] app-text-muted">
+                                :{flow.sport}
+                              </span>
+                            )}
+                          </div>
+                          {prefs.showLocalIp && flow.srcHost !== flow.srcIp && (
+                            <div className="text-[11px] font-mono app-text-muted tabular-nums">
+                              {flow.srcIp}
+                            </div>
+                          )}
+                        </td>
+                      )}
+
+                      {prefs.showDestination && (
+                        <td className="py-2.5 px-3 max-w-[300px]">
+                          <div className="font-medium truncate" title={flow.dstService}>
+                            {flow.dstService}
+                          </div>
+                          {prefs.showDestinationRdns && hasResolvedHost && (
+                            <div
+                              className="text-[11px] app-text-muted truncate"
+                              title={flow.dstHost}
+                            >
+                              {flow.dstHost}
+                            </div>
+                          )}
+                        </td>
+                      )}
+
+                      {prefs.showDestinationIpPort && (
+                        <td className="py-2.5 px-3 font-mono text-[11px] app-text-secondary whitespace-nowrap tabular-nums">
                           {flow.dstIp}:{flow.dport}
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 app-text-secondary whitespace-nowrap">
-                        {flow.dstCategory}
-                      </td>
-                      <td
-                        className="py-2.5 px-3 text-right font-mono whitespace-nowrap tabular-nums"
-                        style={{ color: theme.rxColor }}
-                      >
-                        {formatBandwidth(flow.rxBps, unit)}
-                      </td>
-                      <td
-                        className="py-2.5 px-3 text-right font-mono whitespace-nowrap tabular-nums"
-                        style={{ color: theme.txColor }}
-                      >
-                        {formatBandwidth(flow.txBps, unit)}
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-mono whitespace-nowrap tabular-nums">
-                        {formatBytes(flow.totalBytes)}
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-mono app-text-muted whitespace-nowrap tabular-nums">
-                        {formatDuration((flow.lastSeen - flow.firstSeen) / 1000)}
-                      </td>
+                        </td>
+                      )}
+
+                      {prefs.showCategory && (
+                        <td className="py-2.5 px-3 app-text-secondary whitespace-nowrap">
+                          {flow.proto === 'ICMP' ? '—' : flow.dstCategory}
+                        </td>
+                      )}
+
+                      {prefs.showDownload && (
+                        <td
+                          className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums"
+                          style={{ color: theme.rxColor }}
+                        >
+                          {formatBandwidth(flow.rxBps, unit)}
+                        </td>
+                      )}
+
+                      {prefs.showUpload && (
+                        <td
+                          className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums"
+                          style={{ color: theme.txColor }}
+                        >
+                          {formatBandwidth(flow.txBps, unit)}
+                        </td>
+                      )}
+
+                      {prefs.showTotal && (
+                        <td className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums">
+                          {formatBytes(flow.totalBytes)}
+                        </td>
+                      )}
+
+                      {prefs.showDuration && (
+                        <td className="py-2.5 px-3 text-right app-text-muted whitespace-nowrap tabular-nums">
+                          {formatDuration((flow.lastSeen - flow.firstSeen) / 1000)}
+                        </td>
+                      )}
                     </tr>
                   );
                 })

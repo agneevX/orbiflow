@@ -1,24 +1,46 @@
 import { useEffect, useState } from 'react';
 import {
   Check,
+  Clock,
   Copy,
   Database,
   Eye,
   EyeOff,
   FileCog,
+  FileText,
   FolderOpen,
+  Globe,
   KeyRound,
   MonitorSmartphone,
+  Radio,
   RefreshCw,
 } from 'lucide-react';
-import type { PersistenceMode, ServerConfig, ServerStats } from '../types/telemetry';
+import type {
+  BandwidthUnit,
+  PersistenceMode,
+  PublicSatelliteConfig,
+  SatelliteTelemetry,
+  ServerConfig,
+  ServerStats,
+  TimeFormat,
+} from '../types/telemetry';
 import { formatBytes } from '../lib/formatters';
+import { validateDhcpLeasesPath, validateDnsServer } from '../lib/tablePreferences';
 import { TechTerm } from './TechTerm';
+import { SatelliteManager, type SatelliteSavePayload } from './SatelliteManager';
 
 interface SettingsViewProps {
   serverConfig: ServerConfig;
   serverStats: ServerStats;
+  satellites: SatelliteTelemetry[];
+  satelliteConfigs: PublicSatelliteConfig[];
+  unit: BandwidthUnit;
   onSaveSettings: (cfg: Partial<ServerConfig>) => Promise<void>;
+  onSaveSatellite: (payload: SatelliteSavePayload) => Promise<{ ok: boolean; error?: string }>;
+  onDeleteSatellite: (id: string) => Promise<void>;
+  onTestSatellite: (
+    payload: SatelliteSavePayload
+  ) => Promise<{ ok: boolean; error?: string; summary?: string }>;
 }
 
 function generateClientRandomToken(): string {
@@ -37,7 +59,13 @@ function generateClientRandomToken(): string {
 export function SettingsView({
   serverConfig,
   serverStats,
+  satellites,
+  satelliteConfigs,
+  unit,
   onSaveSettings,
+  onSaveSatellite,
+  onDeleteSatellite,
+  onTestSatellite,
 }: SettingsViewProps) {
   const [probeToken, setProbeToken] = useState(serverConfig.probeToken || '');
   const [showToken, setShowToken] = useState(false);
@@ -49,6 +77,11 @@ export function SettingsView({
   const [inferDeviceNames, setInferDeviceNames] = useState(
     serverConfig.inferDeviceNames !== false
   );
+  const [dhcpLeasesPath, setDhcpLeasesPath] = useState(serverConfig.dhcpLeasesPath || '');
+  const [dhcpPathError, setDhcpPathError] = useState('');
+  const [rdnsServer, setRdnsServer] = useState(serverConfig.rdnsServer || '');
+  const [rdnsServerError, setRdnsServerError] = useState('');
+  const [timeFormat, setTimeFormat] = useState<TimeFormat>(serverConfig.timeFormat || '12h');
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
 
@@ -57,7 +90,18 @@ export function SettingsView({
     setPersistenceMode(serverConfig.persistenceMode);
     setCacheDir(serverConfig.cacheDir || '/config/cache');
     setInferDeviceNames(serverConfig.inferDeviceNames !== false);
-  }, [serverConfig]);
+    setDhcpLeasesPath(serverConfig.dhcpLeasesPath || '');
+    setRdnsServer(serverConfig.rdnsServer || '');
+    setTimeFormat(serverConfig.timeFormat || '12h');
+  }, [
+    serverConfig.probeToken,
+    serverConfig.persistenceMode,
+    serverConfig.cacheDir,
+    serverConfig.inferDeviceNames,
+    serverConfig.dhcpLeasesPath,
+    serverConfig.rdnsServer,
+    serverConfig.timeFormat,
+  ]);
 
   const handleGenerateToken = () => {
     setProbeToken(generateClientRandomToken());
@@ -77,6 +121,18 @@ export function SettingsView({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const pathCheck = validateDhcpLeasesPath(dhcpLeasesPath);
+    if (!pathCheck.ok) {
+      setDhcpPathError(pathCheck.error || 'Invalid DHCP leases path');
+      return;
+    }
+    const dnsCheck = validateDnsServer(rdnsServer);
+    if (!dnsCheck.ok) {
+      setRdnsServerError(dnsCheck.error || 'Invalid reverse DNS server address');
+      return;
+    }
+    setDhcpPathError('');
+    setRdnsServerError('');
     setSaving(true);
     try {
       await onSaveSettings({
@@ -84,6 +140,9 @@ export function SettingsView({
         persistenceMode,
         cacheDir: cacheDir.trim() || '/config/cache',
         inferDeviceNames,
+        dhcpLeasesPath: pathCheck.value,
+        rdnsServer: dnsCheck.value,
+        timeFormat,
       });
       setSavedNotice('Settings saved to configuration file');
       setTimeout(() => setSavedNotice(''), 2500);
@@ -98,257 +157,418 @@ export function SettingsView({
     serverStats.activeCacheDir !== cacheDir.trim();
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6 max-w-3xl">
-      {/* Persistent Configuration File & Shared Router Agent Token */}
-      <section className="app-surface border rounded-2xl p-5 space-y-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="space-y-1 min-w-0 flex-1">
-            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-              <FileCog className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
-              <span>Persistent Configuration</span>
-            </h2>
-            <p className="text-xs app-text-muted">
-              All settings, shared agent token, device aliases, alert rules, and notification
-              channels are stored in the <span className="font-mono app-text-secondary">/config</span>{' '}
-              <TechTerm
-                label="Docker volume"
-                tip="A persistent folder mounted from your host machine into /config inside the container so settings survive restarts and image upgrades without application environment variables."
-              />
-              . The container only uses <span className="font-mono app-text-secondary">PUID</span>,{' '}
-              <span className="font-mono app-text-secondary">PGID</span>, and{' '}
-              <span className="font-mono app-text-secondary">TZ</span> and runs as non-root.
-            </p>
-          </div>
-          <div
-            data-testid="config-file-path"
-            className="font-mono text-xs app-input border rounded-xl px-3.5 py-1.5 app-text-secondary shrink-0"
-          >
-            {serverStats.configPath}
-          </div>
-        </div>
-
-        <div className="pt-3 border-t app-border space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <label
-              htmlFor="probe-token-input"
-              className="flex items-center gap-1.5 text-xs font-medium"
-            >
-              <KeyRound className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-              <span>Shared Router Agent Token</span>
-            </label>
-            <button
-              type="button"
-              data-testid="regenerate-token-btn"
-              onClick={handleGenerateToken}
-              className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-500 hover:text-sky-400 transition-colors"
-            >
-              <RefreshCw className="h-3 w-3" aria-hidden="true" />
-              <span>Regenerate random token</span>
-            </button>
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              id="probe-token-input"
-              data-testid="probe-token-input"
-              type={showToken ? 'text' : 'password'}
-              value={probeToken}
-              onChange={(e) => setProbeToken(e.target.value)}
-              placeholder="Auto-generated random token"
-              className="flex-1 min-w-0 app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
-            />
-            <button
-              type="button"
-              onClick={() => setShowToken((prev) => !prev)}
-              aria-label={showToken ? 'Hide shared agent token' : 'Show shared agent token'}
-              title={showToken ? 'Hide token' : 'Show token'}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-xl border app-border app-surface app-row-hover transition-colors shrink-0"
-            >
-              {showToken ? (
-                <EyeOff className="h-4 w-4 app-text-muted" aria-hidden="true" />
-              ) : (
-                <Eye className="h-4 w-4 app-text-muted" aria-hidden="true" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={handleCopyToken}
-              aria-label="Copy shared agent token"
-              title="Copy token"
-              className="inline-flex items-center justify-center h-9 w-9 rounded-xl border app-border app-surface app-row-hover transition-colors shrink-0"
-            >
-              {copiedToken ? (
-                <Check className="h-4 w-4 text-emerald-500" aria-hidden="true" />
-              ) : (
-                <Copy className="h-4 w-4 app-text-muted" aria-hidden="true" />
-              )}
-            </button>
-          </div>
-          <p className="text-[11px] app-text-muted leading-relaxed">
-            Authenticates traffic snapshots pushed by your router agent via the{' '}
-            <span className="font-mono app-text-secondary">X-Probe-Token</span> header so
-            unauthorized devices on your network cannot spoof traffic data. Automatically generated
-            randomly on first start and synced to the scripts in the Agent tab.
-          </p>
-        </div>
-      </section>
-
-      {/* Traffic History & Cache Storage */}
-      <section className="app-surface border rounded-2xl p-5 space-y-4">
-        <div>
-          <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-            <Database className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
-            <span>Traffic History Storage</span>
-          </h2>
-          <p className="text-xs app-text-muted mt-1">
-            Choose whether traffic snapshots stay in memory or are cached on disk inside your
-            configured storage folder.
-          </p>
-        </div>
-
-        <div className="space-y-2.5">
-          <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
-            <input
-              type="radio"
-              name="persistenceMode"
-              value="memory"
-              checked={persistenceMode === 'memory'}
-              onChange={() => setPersistenceMode('memory')}
-              className="mt-0.5 text-sky-500 focus:ring-sky-500"
-            />
-            <div>
-              <div className="text-xs font-semibold">Memory Only (Zero Disk Writes)</div>
-              <div className="text-xs app-text-muted mt-0.5">
-                Keeps 15-minute high-resolution samples and 24-hour summaries in RAM. Clears
-                traffic history on restart while preserving{' '}
-                <span className="font-mono">config.json</span>.
-              </div>
-            </div>
-          </label>
-
-          <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
-            <input
-              type="radio"
-              name="persistenceMode"
-              value="disk"
-              checked={persistenceMode === 'disk'}
-              onChange={() => setPersistenceMode('disk')}
-              className="mt-0.5 text-sky-500 focus:ring-sky-500"
-            />
-            <div>
-              <div className="text-xs font-semibold">
-                Disk Cache (
+    <div className="space-y-6 max-w-3xl">
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Persistent Configuration File & Shared Router Agent Token */}
+        <section className="app-surface border rounded-2xl p-5 space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1 min-w-0 flex-1">
+              <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+                <FileCog className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+                <span>Persistent Configuration</span>
+              </h2>
+              <p className="text-xs app-text-muted">
+                All settings, shared agent token, satellite SSH connections, device aliases, alert
+                rules, and notification channels are stored in the{' '}
+                <span className="font-mono app-text-secondary">/config</span>{' '}
                 <TechTerm
-                  label="JSONL"
-                  tip="JSON Lines — a lightweight append-only text format where each line stores one timestamped traffic snapshot, rotated automatically above 5 MB."
-                />{' '}
-                + State Snapshot)
-              </div>
-              <div className="text-xs app-text-muted mt-0.5">
-                Saves traffic history and auto-rotated snapshot logs to disk so charts remain
-                populated across restarts.
-              </div>
+                  label="Docker volume"
+                  tip="A persistent folder mounted from your host machine into /config inside the container so settings survive restarts and image upgrades without application environment variables."
+                />
+                . The container only uses <span className="font-mono app-text-secondary">PUID</span>
+                , <span className="font-mono app-text-secondary">PGID</span>, and{' '}
+                <span className="font-mono app-text-secondary">TZ</span> and runs as non-root.
+              </p>
             </div>
-          </label>
-        </div>
-
-        {/* Configurable Cache Directory */}
-        <div className="space-y-1.5 pt-1">
-          <div className="flex items-center justify-between gap-2">
-            <label
-              htmlFor="cache-dir-input"
-              className="flex items-center gap-1.5 text-xs font-medium"
+            <div
+              data-testid="config-file-path"
+              className="font-mono text-xs app-input border rounded-xl px-3.5 py-1.5 app-text-secondary shrink-0"
             >
-              <FolderOpen className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
-              Disk Storage Location
-            </label>
-            {cacheDir !== '/config/cache' && (
+              {serverStats.configPath}
+            </div>
+          </div>
+
+          <div className="pt-3 border-t app-border space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label
+                htmlFor="probe-token-input"
+                className="flex items-center gap-1.5 text-xs font-medium"
+              >
+                <KeyRound className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                <span>Shared Router Agent Token</span>
+              </label>
               <button
                 type="button"
-                onClick={() => setCacheDir('/config/cache')}
-                className="text-[11px] text-sky-500 hover:text-sky-400"
+                data-testid="regenerate-token-btn"
+                onClick={handleGenerateToken}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-500 hover:text-sky-400 transition-colors"
               >
-                Reset to /config/cache
+                <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                <span>Regenerate random token</span>
               </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                id="probe-token-input"
+                data-testid="probe-token-input"
+                type={showToken ? 'text' : 'password'}
+                value={probeToken}
+                onChange={(e) => setProbeToken(e.target.value)}
+                placeholder="Auto-generated random token"
+                className="flex-1 min-w-0 app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+              />
+              <button
+                type="button"
+                onClick={() => setShowToken((prev) => !prev)}
+                aria-label={showToken ? 'Hide shared agent token' : 'Show shared agent token'}
+                title={showToken ? 'Hide token' : 'Show token'}
+                className="inline-flex items-center justify-center h-9 w-9 rounded-xl border app-border app-surface app-row-hover transition-colors shrink-0"
+              >
+                {showToken ? (
+                  <EyeOff className="h-4 w-4 app-text-muted" aria-hidden="true" />
+                ) : (
+                  <Eye className="h-4 w-4 app-text-muted" aria-hidden="true" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyToken}
+                aria-label="Copy shared agent token"
+                title="Copy token"
+                className="inline-flex items-center justify-center h-9 w-9 rounded-xl border app-border app-surface app-row-hover transition-colors shrink-0"
+              >
+                {copiedToken ? (
+                  <Check className="h-4 w-4 text-emerald-500" aria-hidden="true" />
+                ) : (
+                  <Copy className="h-4 w-4 app-text-muted" aria-hidden="true" />
+                )}
+              </button>
+            </div>
+            <p className="text-[11px] app-text-muted leading-relaxed">
+              Authenticates traffic snapshots pushed by your router agent via the{' '}
+              <span className="font-mono app-text-secondary">X-Probe-Token</span> header so
+              unauthorized devices on your network cannot spoof traffic data. Automatically generated
+              randomly on first start and synced to the scripts in the Agent tab.
+            </p>
+          </div>
+        </section>
+
+        {/* Traffic History & Cache Storage */}
+        <section className="app-surface border rounded-2xl p-5 space-y-4">
+          <div>
+            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+              <Database className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+              <span>Traffic History Storage</span>
+            </h2>
+            <p className="text-xs app-text-muted mt-1">
+              Choose whether traffic snapshots stay in memory or are cached on disk inside your
+              configured storage folder.
+            </p>
+          </div>
+
+          <div className="space-y-2.5">
+            <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
+              <input
+                type="radio"
+                name="persistenceMode"
+                value="memory"
+                checked={persistenceMode === 'memory'}
+                onChange={() => setPersistenceMode('memory')}
+                className="mt-0.5 text-sky-500 focus:ring-sky-500"
+              />
+              <div>
+                <div className="text-xs font-semibold">Memory Only (Zero Disk Writes)</div>
+                <div className="text-xs app-text-muted mt-0.5">
+                  Keeps 15-minute high-resolution samples and 24-hour summaries in RAM. Clears
+                  traffic history on restart while preserving{' '}
+                  <span className="font-mono">config.json</span>.
+                </div>
+              </div>
+            </label>
+
+            <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
+              <input
+                type="radio"
+                name="persistenceMode"
+                value="disk"
+                checked={persistenceMode === 'disk'}
+                onChange={() => setPersistenceMode('disk')}
+                className="mt-0.5 text-sky-500 focus:ring-sky-500"
+              />
+              <div>
+                <div className="text-xs font-semibold">
+                  Disk Cache (
+                  <TechTerm
+                    label="JSONL"
+                    tip="JSON Lines — a lightweight append-only text format where each line stores one timestamped traffic snapshot, rotated automatically above 5 MB."
+                  />{' '}
+                  + State Snapshot)
+                </div>
+                <div className="text-xs app-text-muted mt-0.5">
+                  Saves traffic history and auto-rotated snapshot logs to disk so charts remain
+                  populated across restarts.
+                </div>
+              </div>
+            </label>
+          </div>
+
+          {/* Configurable Cache Directory */}
+          <div className="space-y-1.5 pt-1">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="cache-dir-input"
+                className="flex items-center gap-1.5 text-xs font-medium"
+              >
+                <FolderOpen className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
+                Disk Storage Location
+              </label>
+              {cacheDir !== '/config/cache' && (
+                <button
+                  type="button"
+                  onClick={() => setCacheDir('/config/cache')}
+                  className="text-[11px] text-sky-500 hover:text-sky-400"
+                >
+                  Reset to /config/cache
+                </button>
+              )}
+            </div>
+            <input
+              id="cache-dir-input"
+              data-testid="cache-dir-input"
+              type="text"
+              value={cacheDir}
+              onChange={(e) => setCacheDir(e.target.value)}
+              placeholder="/config/cache"
+              className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+            />
+            <p className="text-[11px] app-text-muted">
+              Default: <span className="font-mono">/config/cache</span>
+              {activeCacheDiffers && (
+                <>
+                  {' '}
+                  · Active path:{' '}
+                  <span className="font-mono app-text-secondary">
+                    {serverStats.activeCacheDir}
+                  </span>
+                </>
+              )}
+            </p>
+          </div>
+
+          <div className="pt-2 border-t app-border flex items-center justify-between text-xs font-mono app-text-muted tabular-nums">
+            <span>Snapshots recorded: {serverStats.persistedSnapshots}</span>
+            <span>Disk usage: {formatBytes(serverStats.diskLogSizeBytes)}</span>
+          </div>
+        </section>
+
+        {/* Device Naming */}
+        <section className="app-surface border rounded-2xl p-5 space-y-3">
+          <div>
+            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+              <MonitorSmartphone className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+              <span>Device Naming</span>
+            </h2>
+            <p className="text-xs app-text-muted mt-1">
+              Control how unnamed local devices (such as devices using Private Wi-Fi MAC addresses)
+              are labeled when no custom alias, LAN DNS, or DHCP hostname is found.
+            </p>
+          </div>
+
+          <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
+            <input
+              type="checkbox"
+              data-testid="infer-device-names-toggle"
+              checked={inferDeviceNames}
+              onChange={(e) => setInferDeviceNames(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
+            />
+            <div>
+              <div className="text-xs font-semibold">Inferred Device Names</div>
+              <div className="text-xs app-text-muted mt-0.5">
+                Infer device types (for example, Apple Device, Gaming Device, or Smart Home / IoT)
+                from active traffic patterns. Turn this off to show raw IP addresses for unnamed
+                devices instead.
+              </div>
+            </div>
+          </label>
+
+          {/* Configurable DHCP Leases File Location */}
+          <div className="space-y-1.5 pt-2 border-t app-border">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="dhcp-leases-path-input"
+                className="flex items-center gap-1.5 text-xs font-medium"
+              >
+                <FileText className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
+                DHCP Leases File Location
+              </label>
+              {dhcpLeasesPath && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDhcpLeasesPath('');
+                    setDhcpPathError('');
+                  }}
+                  className="text-[11px] text-sky-500 hover:text-sky-400"
+                >
+                  Use auto-detect
+                </button>
+              )}
+            </div>
+            <input
+              id="dhcp-leases-path-input"
+              data-testid="dhcp-leases-path-input"
+              type="text"
+              value={dhcpLeasesPath}
+              onChange={(e) => {
+                setDhcpLeasesPath(e.target.value);
+                if (dhcpPathError) setDhcpPathError('');
+              }}
+              placeholder="/tmp/dhcp.leases (leave blank to auto-detect)"
+              className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+            />
+            {dhcpPathError ? (
+              <p role="alert" className="text-[11px] text-rose-500 font-medium">
+                {dhcpPathError}
+              </p>
+            ) : (
+              <p className="text-[11px] app-text-muted leading-relaxed">
+                Optional router file path for DHCP hostnames (e.g.{' '}
+                <span className="font-mono app-text-secondary">/tmp/dhcp.leases</span> or{' '}
+                <span className="font-mono app-text-secondary">/var/run/dnsmasq.leases</span>).
+                Saved to <span className="font-mono">config.json</span> and synced automatically to
+                the generated router scripts in the Agent tab.
+              </p>
             )}
           </div>
-          <input
-            id="cache-dir-input"
-            data-testid="cache-dir-input"
-            type="text"
-            value={cacheDir}
-            onChange={(e) => setCacheDir(e.target.value)}
-            placeholder="/config/cache"
-            className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
-          />
-          <p className="text-[11px] app-text-muted">
-            Default: <span className="font-mono">/config/cache</span>
-            {activeCacheDiffers && (
-              <>
-                {' '}
-                · Active path:{' '}
-                <span className="font-mono app-text-secondary">
-                  {serverStats.activeCacheDir}
-                </span>
-              </>
-            )}
-          </p>
-        </div>
+        </section>
 
-        <div className="pt-2 border-t app-border flex items-center justify-between text-xs font-mono app-text-muted tabular-nums">
-          <span>Snapshots recorded: {serverStats.persistedSnapshots}</span>
-          <span>Disk usage: {formatBytes(serverStats.diskLogSizeBytes)}</span>
-        </div>
-      </section>
-
-      {/* Device Naming */}
-      <section className="app-surface border rounded-2xl p-5 space-y-3">
-        <div>
-          <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-            <MonitorSmartphone className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
-            <span>Device Naming</span>
-          </h2>
-          <p className="text-xs app-text-muted mt-1">
-            Control how unnamed local devices (such as devices using Private Wi-Fi MAC addresses)
-            are labeled when no custom alias, LAN DNS, or DHCP hostname is found.
-          </p>
-        </div>
-
-        <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
-          <input
-            type="checkbox"
-            data-testid="infer-device-names-toggle"
-            checked={inferDeviceNames}
-            onChange={(e) => setInferDeviceNames(e.target.checked)}
-            className="mt-0.5 h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
-          />
+        {/* Public Reverse DNS & Time Display */}
+        <section className="app-surface border rounded-2xl p-5 space-y-4">
           <div>
-            <div className="text-xs font-semibold">Inferred Device Names</div>
-            <div className="text-xs app-text-muted mt-0.5">
-              Infer device types (for example, Apple Device, Gaming Device, or Smart Home / IoT)
-              from active traffic patterns. Turn this off to show raw IP addresses for unnamed
-              devices instead.
+            <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+              <Globe className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+              <span>Reverse DNS &amp; Display</span>
+            </h2>
+            <p className="text-xs app-text-muted mt-1">
+              Configure a custom DNS resolver for public internet PTR lookups and choose how
+              timestamps are displayed across the dashboard.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="rdns-server-input"
+                className="flex items-center gap-1.5 text-xs font-medium"
+              >
+                <Globe className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
+                Public Reverse DNS Server (PTR Lookups)
+              </label>
+              {rdnsServer && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRdnsServer('');
+                    setRdnsServerError('');
+                  }}
+                  className="text-[11px] text-sky-500 hover:text-sky-400"
+                >
+                  Use system DNS
+                </button>
+              )}
+            </div>
+            <input
+              id="rdns-server-input"
+              data-testid="rdns-server-input"
+              type="text"
+              value={rdnsServer}
+              onChange={(e) => {
+                setRdnsServer(e.target.value);
+                if (rdnsServerError) setRdnsServerError('');
+              }}
+              placeholder="System default (e.g. 1.1.1.1, 8.8.8.8, or 9.9.9.9)"
+              className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+            />
+            {rdnsServerError ? (
+              <p role="alert" className="text-[11px] text-rose-500 font-medium">
+                {rdnsServerError}
+              </p>
+            ) : (
+              <p className="text-[11px] app-text-muted leading-relaxed">
+                Used only for reverse PTR lookups of non-private internet IP addresses. Leave blank
+                to use the container&apos;s default DNS resolver.
+              </p>
+            )}
+          </div>
+
+          <div className="pt-3 border-t app-border flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-1.5 text-xs font-medium">
+                <Clock className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
+                <span>Time Format</span>
+              </div>
+              <p className="text-[11px] app-text-muted mt-0.5">
+                Controls timestamps on graphs, alerts, and connection details.
+              </p>
+            </div>
+            <div
+              role="group"
+              aria-label="Time display format"
+              className="grid grid-cols-2 app-input border rounded-xl p-1 w-36 shrink-0"
+            >
+              {(['12h', '24h'] as TimeFormat[]).map((tf) => (
+                <button
+                  key={tf}
+                  type="button"
+                  data-testid={`settings-time-format-${tf}`}
+                  aria-pressed={timeFormat === tf}
+                  onClick={() => setTimeFormat(tf)}
+                  className={`py-1 text-xs font-medium rounded-lg transition-colors ${
+                    timeFormat === tf ? 'app-surface font-semibold' : 'app-text-muted'
+                  }`}
+                >
+                  {tf === '12h' ? '12-hour' : '24-hour'}
+                </button>
+              ))}
             </div>
           </div>
-        </label>
-      </section>
+        </section>
 
-      <div className="flex items-center justify-between gap-4">
-        <div className="text-xs font-medium text-emerald-500 min-h-[16px]">
-          {savedNotice && (
-            <span className="inline-flex items-center gap-1">
-              <Check className="h-3.5 w-3.5" aria-hidden="true" />
-              {savedNotice}
-            </span>
-          )}
+        <div className="flex items-center justify-between gap-4">
+          <div className="text-xs font-medium text-emerald-500 min-h-[16px]">
+            {savedNotice && (
+              <span className="inline-flex items-center gap-1">
+                <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                {savedNotice}
+              </span>
+            )}
+          </div>
+          <button
+            type="submit"
+            disabled={saving}
+            className="px-5 py-2.5 rounded-xl app-btn-primary disabled:opacity-60 text-xs font-semibold transition-colors"
+          >
+            {saving ? 'Saving Settings...' : 'Save Settings'}
+          </button>
         </div>
-        <button
-          type="submit"
-          disabled={saving}
-          className="px-5 py-2.5 rounded-xl app-btn-primary disabled:opacity-60 text-xs font-semibold transition-colors"
-        >
-          {saving ? 'Saving Settings...' : 'Save Settings'}
-        </button>
-      </div>
-    </form>
+      </form>
+
+      {/* Orbi Satellites (Stateless SSH Polling) — separate from main settings form so nested forms never occur */}
+      <section className="app-surface border rounded-2xl p-5 space-y-4">
+        <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+          <Radio className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+          <span>Orbi Satellites (Stateless SSH)</span>
+        </h2>
+        <SatelliteManager
+          configs={satelliteConfigs}
+          satellites={satellites}
+          unit={unit}
+          onSaveSatellite={onSaveSatellite}
+          onDeleteSatellite={onDeleteSatellite}
+          onTestSatellite={onTestSatellite}
+        />
+      </section>
+    </div>
   );
 }

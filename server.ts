@@ -9,6 +9,14 @@ import { OrbiProbeSimulator } from './server/simulator';
 import { RdnsCache } from './server/rdnsCache';
 import { LanResolver } from './server/lanResolver';
 import { NotificationDispatcher } from './server/notifications';
+import { SatelliteSshPoller, validateSatelliteInput } from './server/satellitePoller';
+import { toPublicSatelliteConfig } from './src/lib/topology';
+import {
+  DEFAULT_TABLE_PREFERENCES,
+  sanitizeTablePreferences,
+  validateDhcpLeasesPath,
+  validateDnsServer,
+} from './src/lib/tablePreferences';
 import {
   DEFAULT_CACHE_DIR,
   DEFAULT_CONFIG_DIR,
@@ -22,6 +30,8 @@ import type {
   NotificationConfig,
   PersistenceMode,
   ProbeSnapshot,
+  SatelliteConfig,
+  TimeFormat,
 } from './src/types/telemetry';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -40,6 +50,10 @@ const DEFAULT_LAN_DNS_SERVER = '';
 const DEFAULT_LAN_DNS_TTL_SEC = 300;
 const DEFAULT_STRIP_LAN_DOMAIN = true;
 const DEFAULT_INFER_DEVICE_NAMES = true;
+const DEFAULT_ISP_NAME = 'Internet';
+const DEFAULT_ISP_MAX_DOWN_MBPS = 1000;
+const DEFAULT_ISP_MAX_UP_MBPS = 200;
+const DEFAULT_TIME_FORMAT: TimeFormat = '12h';
 
 async function startServer() {
   const app = express();
@@ -70,6 +84,13 @@ async function startServer() {
   let needsInitialConfigWrite = false;
   let initialSimulatorEnabled = IS_DEV;
   let initialInferDeviceNames = DEFAULT_INFER_DEVICE_NAMES;
+  let initialDhcpLeasesPath = '';
+  let initialIspName = DEFAULT_ISP_NAME;
+  let initialIspMaxDownMbps = DEFAULT_ISP_MAX_DOWN_MBPS;
+  let initialIspMaxUpMbps = DEFAULT_ISP_MAX_UP_MBPS;
+  let initialTimeFormat: TimeFormat = DEFAULT_TIME_FORMAT;
+  let initialTablePreferences = sanitizeTablePreferences(DEFAULT_TABLE_PREFERENCES);
+  let initialSatellites: SatelliteConfig[] = [];
 
   // Load persistent user config from /config/config.json before loading cached traffic history
   const savedUserConfig = storage.loadUserConfig();
@@ -92,8 +113,13 @@ async function startServer() {
     if (typeof savedUserConfig.cacheDir === 'string' && savedUserConfig.cacheDir.trim()) {
       storage.setCacheDir(savedUserConfig.cacheDir);
     }
+    const savedRdnsServer =
+      typeof savedUserConfig.rdnsServer === 'string'
+        ? validateDnsServer(savedUserConfig.rdnsServer)
+        : { ok: true, value: '' };
     rdnsCache.updateConfig({
       enabled: true,
+      server: savedRdnsServer.ok ? savedRdnsServer.value : '',
       ttlSec:
         typeof savedUserConfig.rdnsTtlSec === 'number' ? savedUserConfig.rdnsTtlSec : undefined,
       skipPrivate:
@@ -122,6 +148,40 @@ async function startServer() {
     if (typeof savedUserConfig.inferDeviceNames === 'boolean') {
       initialInferDeviceNames = savedUserConfig.inferDeviceNames;
     }
+    if (typeof savedUserConfig.dhcpLeasesPath === 'string') {
+      const validated = validateDhcpLeasesPath(savedUserConfig.dhcpLeasesPath);
+      if (validated.ok) {
+        initialDhcpLeasesPath = validated.value;
+      }
+    }
+    if (typeof savedUserConfig.ispName === 'string' && savedUserConfig.ispName.trim()) {
+      initialIspName = savedUserConfig.ispName.trim().slice(0, 48);
+    }
+    if (
+      typeof savedUserConfig.ispMaxDownMbps === 'number' &&
+      savedUserConfig.ispMaxDownMbps >= 1 &&
+      savedUserConfig.ispMaxDownMbps <= 100_000
+    ) {
+      initialIspMaxDownMbps = Math.round(savedUserConfig.ispMaxDownMbps);
+    }
+    if (
+      typeof savedUserConfig.ispMaxUpMbps === 'number' &&
+      savedUserConfig.ispMaxUpMbps >= 1 &&
+      savedUserConfig.ispMaxUpMbps <= 100_000
+    ) {
+      initialIspMaxUpMbps = Math.round(savedUserConfig.ispMaxUpMbps);
+    }
+    if (savedUserConfig.timeFormat === '12h' || savedUserConfig.timeFormat === '24h') {
+      initialTimeFormat = savedUserConfig.timeFormat;
+    }
+    if (savedUserConfig.tablePreferences) {
+      initialTablePreferences = sanitizeTablePreferences(savedUserConfig.tablePreferences);
+    }
+    if (Array.isArray(savedUserConfig.satellites)) {
+      initialSatellites = savedUserConfig.satellites.filter(
+        (s) => s && typeof s.id === 'string' && typeof s.host === 'string'
+      );
+    }
     if (savedUserConfig.deviceAliases && typeof savedUserConfig.deviceAliases === 'object') {
       engine.setDeviceAliases(savedUserConfig.deviceAliases);
     }
@@ -145,6 +205,7 @@ async function startServer() {
     persistenceMode: storage.getMode(),
     cacheDir: storage.getConfiguredCacheDir(),
     rdnsEnabled: rdnsCache.getConfig().enabled,
+    rdnsServer: rdnsCache.getConfig().server,
     rdnsTtlSec: rdnsCache.getConfig().ttlSec,
     rdnsSkipPrivate: rdnsCache.getConfig().skipPrivate,
     lanDnsEnabled: lanResolver.getConfig().enabled,
@@ -152,6 +213,12 @@ async function startServer() {
     lanDnsTtlSec: lanResolver.getConfig().ttlSec,
     stripLanDomain: lanResolver.getConfig().stripDomain,
     inferDeviceNames: initialInferDeviceNames,
+    dhcpLeasesPath: initialDhcpLeasesPath,
+    ispName: initialIspName,
+    ispMaxDownMbps: initialIspMaxDownMbps,
+    ispMaxUpMbps: initialIspMaxUpMbps,
+    timeFormat: initialTimeFormat,
+    tablePreferences: initialTablePreferences,
   });
 
   // Restore cached traffic history if disk persistence is active
@@ -164,6 +231,29 @@ async function startServer() {
     });
   }
 
+  const server = http.createServer(app);
+  const ingestWss = new WebSocketServer({ noServer: true });
+  const dashboardWss = new WebSocketServer({ noServer: true });
+
+  const broadcastDashboard = (event: { type: string; data: unknown }) => {
+    const msg = JSON.stringify(event);
+    for (const client of dashboardWss.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(msg);
+      }
+    }
+  };
+
+  const satellitePoller = new SatelliteSshPoller((satellites) => {
+    engine.setSshSatellites(satellites);
+    broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+  });
+
+  if (initialSatellites.length > 0) {
+    satellitePoller.setConfigs(initialSatellites);
+    engine.setSatelliteConfigs(satellitePoller.getConfigs().map(toPublicSatelliteConfig));
+  }
+
   const persistUserConfig = () => {
     const snap = engine.getSnapshot();
     storage.saveUserConfig({
@@ -172,6 +262,7 @@ async function startServer() {
       persistenceMode: snap.serverConfig.persistenceMode,
       cacheDir: snap.serverConfig.cacheDir,
       rdnsEnabled: snap.serverConfig.rdnsEnabled,
+      rdnsServer: snap.serverConfig.rdnsServer,
       rdnsTtlSec: snap.serverConfig.rdnsTtlSec,
       rdnsSkipPrivate: snap.serverConfig.rdnsSkipPrivate,
       lanDnsEnabled: snap.serverConfig.lanDnsEnabled,
@@ -179,6 +270,13 @@ async function startServer() {
       lanDnsTtlSec: snap.serverConfig.lanDnsTtlSec,
       stripLanDomain: snap.serverConfig.stripLanDomain,
       inferDeviceNames: snap.serverConfig.inferDeviceNames,
+      dhcpLeasesPath: snap.serverConfig.dhcpLeasesPath,
+      ispName: snap.serverConfig.ispName,
+      ispMaxDownMbps: snap.serverConfig.ispMaxDownMbps,
+      ispMaxUpMbps: snap.serverConfig.ispMaxUpMbps,
+      timeFormat: snap.serverConfig.timeFormat,
+      tablePreferences: snap.serverConfig.tablePreferences,
+      satellites: satellitePoller.getConfigs(),
       deviceAliases: engine.getDeviceAliases(),
       notifications: notifier.getConfig(),
       rules: snap.rules,
@@ -195,11 +293,11 @@ async function startServer() {
   if (IS_DEV && simulator && engine.isSimulatorEnabled() && engine.getSnapshot().history.length === 0) {
     const now = Date.now();
     const threeHoursAgo = now - 180 * 60_000;
-    for (let m = 0; m < 179; m++) {
+    for (let m = 0; m < 174; m++) {
       engine.ingest(simulator.nextSnapshot(threeHoursAgo + m * 60_000, 60));
     }
-    const startRecent = now - 60 * 3_000;
-    for (let s = 0; s <= 60; s++) {
+    const startRecent = now - 110 * 3_000;
+    for (let s = 0; s <= 110; s++) {
       engine.ingest(
         simulator.nextSnapshot(startRecent + s * 3_000, 3),
         (ip) => rdnsCache.lookup(ip),
@@ -207,19 +305,6 @@ async function startServer() {
       );
     }
   }
-
-  const server = http.createServer(app);
-  const ingestWss = new WebSocketServer({ noServer: true });
-  const dashboardWss = new WebSocketServer({ noServer: true });
-
-  const broadcastDashboard = (event: { type: string; data: unknown }) => {
-    const msg = JSON.stringify(event);
-    for (const client of dashboardWss.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(msg);
-      }
-    }
-  };
 
   const dispatchAlertsAsync = (alerts: AlertEvent[]) => {
     for (const alert of alerts) {
@@ -419,16 +504,69 @@ async function startServer() {
     if (body.persistenceMode === 'memory' || body.persistenceMode === 'disk') {
       storage.setMode(body.persistenceMode);
     }
+    const currentCfg = engine.getSnapshot().serverConfig;
     const nextInferDeviceNames =
       typeof body.inferDeviceNames === 'boolean'
         ? body.inferDeviceNames
-        : engine.getSnapshot().serverConfig.inferDeviceNames;
+        : currentCfg.inferDeviceNames;
+
+    let nextDhcpLeasesPath = currentCfg.dhcpLeasesPath;
+    if (body.dhcpLeasesPath !== undefined) {
+      const pathCheck = validateDhcpLeasesPath(body.dhcpLeasesPath);
+      if (!pathCheck.ok) {
+        res.status(400).json({ error: pathCheck.error || 'Invalid DHCP leases path' });
+        return;
+      }
+      nextDhcpLeasesPath = pathCheck.value;
+    }
+
+    let nextRdnsServer = currentCfg.rdnsServer;
+    if (body.rdnsServer !== undefined) {
+      const dnsCheck = validateDnsServer(body.rdnsServer);
+      if (!dnsCheck.ok) {
+        res.status(400).json({ error: dnsCheck.error || 'Invalid reverse DNS server address' });
+        return;
+      }
+      nextRdnsServer = dnsCheck.value;
+      rdnsCache.updateConfig({ server: nextRdnsServer });
+    }
+
+    const nextTimeFormat: TimeFormat =
+      body.timeFormat === '12h' || body.timeFormat === '24h'
+        ? body.timeFormat
+        : currentCfg.timeFormat;
+
+    const nextIspName =
+      typeof body.ispName === 'string' && body.ispName.trim()
+        ? body.ispName.trim().slice(0, 48)
+        : currentCfg.ispName;
+    const rawDown = Number(body.ispMaxDownMbps);
+    const nextIspMaxDownMbps =
+      Number.isFinite(rawDown) && rawDown >= 1 && rawDown <= 100_000
+        ? Math.round(rawDown)
+        : currentCfg.ispMaxDownMbps;
+    const rawUp = Number(body.ispMaxUpMbps);
+    const nextIspMaxUpMbps =
+      Number.isFinite(rawUp) && rawUp >= 1 && rawUp <= 100_000
+        ? Math.round(rawUp)
+        : currentCfg.ispMaxUpMbps;
+    const nextTablePreferences =
+      body.tablePreferences !== undefined
+        ? sanitizeTablePreferences(body.tablePreferences, currentCfg.tablePreferences)
+        : currentCfg.tablePreferences;
 
     engine.updateServerConfig({
       probeToken: nextProbeToken,
       persistenceMode: storage.getMode(),
       cacheDir: storage.getConfiguredCacheDir(),
+      rdnsServer: nextRdnsServer,
       inferDeviceNames: nextInferDeviceNames,
+      dhcpLeasesPath: nextDhcpLeasesPath,
+      ispName: nextIspName,
+      ispMaxDownMbps: nextIspMaxDownMbps,
+      ispMaxUpMbps: nextIspMaxUpMbps,
+      timeFormat: nextTimeFormat,
+      tablePreferences: nextTablePreferences,
     });
     syncStatsAndPersist();
     persistUserConfig();
@@ -440,6 +578,76 @@ async function startServer() {
       serverStats: snap.serverStats,
       snapshot: snap,
     });
+  });
+
+  app.post('/api/satellites', (req, res) => {
+    const body = req.body || {};
+    const validation = validateSatelliteInput(body);
+    if (!validation.ok) {
+      res.status(400).json({ error: validation.error });
+      return;
+    }
+
+    const id =
+      typeof body.id === 'string' && body.id.trim()
+        ? body.id.trim().slice(0, 48)
+        : `sat-${Date.now().toString(36)}`;
+
+    const nextCfg: SatelliteConfig = {
+      id,
+      name: String(body.name).trim().slice(0, 48),
+      host: String(body.host).trim(),
+      port: Math.max(1, Math.min(65535, Number(body.port) || 22)),
+      username: String(body.username || 'root').trim(),
+      authMethod: body.authMethod === 'key' ? 'key' : 'password',
+      password: typeof body.password === 'string' ? body.password : undefined,
+      privateKey: typeof body.privateKey === 'string' ? body.privateKey : undefined,
+      backhaulInterface:
+        typeof body.backhaulInterface === 'string' ? body.backhaulInterface.trim() : '',
+      pollIntervalSec: Math.max(3, Math.min(60, Number(body.pollIntervalSec) || 5)),
+      enabled: body.enabled !== false,
+    };
+
+    satellitePoller.upsertSatellite(nextCfg);
+    engine.setSatelliteConfigs(satellitePoller.getConfigs().map(toPublicSatelliteConfig));
+    persistUserConfig();
+    const snap = engine.getSnapshot();
+    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    res.json({ ok: true, snapshot: snap });
+  });
+
+  app.delete('/api/satellites/:id', (req, res) => {
+    const id = decodeURIComponent(req.params.id || '').trim();
+    if (!id) {
+      res.status(400).json({ error: 'Missing satellite id' });
+      return;
+    }
+    satellitePoller.removeSatellite(id);
+    engine.setSatelliteConfigs(satellitePoller.getConfigs().map(toPublicSatelliteConfig));
+    persistUserConfig();
+    const snap = engine.getSnapshot();
+    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    res.json({ ok: true, snapshot: snap });
+  });
+
+  app.post('/api/satellites/test', async (req, res) => {
+    const body = req.body || {};
+    const cfg: SatelliteConfig = {
+      id: typeof body.id === 'string' ? body.id.trim() : 'test',
+      name: String(body.name || 'Satellite').trim(),
+      host: String(body.host || '').trim(),
+      port: Number(body.port) || 22,
+      username: String(body.username || 'root').trim(),
+      authMethod: body.authMethod === 'key' ? 'key' : 'password',
+      password: typeof body.password === 'string' ? body.password : undefined,
+      privateKey: typeof body.privateKey === 'string' ? body.privateKey : undefined,
+      backhaulInterface:
+        typeof body.backhaulInterface === 'string' ? body.backhaulInterface.trim() : '',
+      pollIntervalSec: 5,
+      enabled: true,
+    };
+    const result = await satellitePoller.testConnection(cfg);
+    res.status(result.ok ? 200 : 400).json(result);
   });
 
   app.post('/api/notifications', (req, res) => {
@@ -560,6 +768,7 @@ async function startServer() {
 
   process.on('SIGTERM', () => {
     if (simTimer) clearInterval(simTimer);
+    satellitePoller.stopAll();
     persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
     server.close();

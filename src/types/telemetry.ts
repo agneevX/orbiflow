@@ -2,6 +2,8 @@ export type TransportProtocol = 'TCP' | 'UDP' | 'ICMP' | 'OTHER';
 
 export type BandwidthUnit = 'Mb/s' | 'MB/s';
 
+export type TimeFormat = '12h' | '24h';
+
 export type TimeWindow = '1m' | '5m' | '15m' | '1h' | '6h' | '24h';
 
 export type PersistenceMode = 'memory' | 'disk';
@@ -75,6 +77,91 @@ export interface SystemMetrics {
   conntrackMax: number;
 }
 
+export interface EthernetPortMetrics {
+  id: string;
+  label: string;
+  role: 'wan' | 'lan' | 'backhaul' | 'wifi';
+  linkUp: boolean;
+  speedMbps: number;
+  duplex?: 'full' | 'half' | 'unknown';
+  rxBytes: number;
+  txBytes: number;
+  rxBps: number;
+  txBps: number;
+}
+
+export interface SatelliteClientLink {
+  mac: string;
+  ip?: string;
+  connectionType: 'ethernet' | 'wifi';
+  portOrRadio: string;
+  linkSpeedMbps: number;
+  signalDbm?: number;
+  rxBytes: number;
+  txBytes: number;
+  rxBps: number;
+  txBps: number;
+}
+
+export type SatelliteAuthMethod = 'password' | 'key';
+
+export interface SatelliteConfig {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SatelliteAuthMethod;
+  password?: string;
+  privateKey?: string;
+  backhaulInterface?: string;
+  pollIntervalSec: number;
+  enabled: boolean;
+}
+
+export interface PublicSatelliteConfig {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SatelliteAuthMethod;
+  hasPassword: boolean;
+  hasPrivateKey: boolean;
+  backhaulInterface: string;
+  pollIntervalSec: number;
+  enabled: boolean;
+}
+
+export interface SatelliteTelemetry {
+  id: string;
+  name: string;
+  host: string;
+  model?: string;
+  connected: boolean;
+  source: 'ssh' | 'simulator';
+  lastSeen: number;
+  lastError?: string;
+  uptimeSec: number;
+  backhaulType: 'ethernet' | 'wifi';
+  backhaulIface: string;
+  backhaulSpeedMbps: number;
+  rxBps: number;
+  txBps: number;
+  rxBytes: number;
+  txBytes: number;
+  ports: EthernetPortMetrics[];
+  clients: SatelliteClientLink[];
+}
+
+export interface TopologyTelemetry {
+  routerPorts: EthernetPortMetrics[];
+  routerWanSpeedMbps: number;
+  routerClients: SatelliteClientLink[];
+  satellites: SatelliteTelemetry[];
+  satelliteConfigs: PublicSatelliteConfig[];
+}
+
 export interface ProbeSnapshot {
   probeId: string;
   timestamp: number;
@@ -84,6 +171,9 @@ export interface ProbeSnapshot {
   arp: ArpEntry[];
   system?: SystemMetrics;
   rawConntrackLines?: string[];
+  ports?: EthernetPortMetrics[];
+  routerClients?: SatelliteClientLink[];
+  satellites?: SatelliteTelemetry[];
 }
 
 export interface EnrichedFlow {
@@ -117,6 +207,7 @@ export interface TrafficPoint {
   rxBps: number;
   txBps: number;
   activeFlows: number;
+  routerLoadPct?: number;
 }
 
 export type DeviceNameSource = 'alias' | 'lan-dns' | 'dhcp' | 'fingerprint' | 'ip';
@@ -247,11 +338,44 @@ export interface ProbeStatus {
   simulatorAvailable: boolean;
 }
 
+export interface ConnectionsTablePrefs {
+  showAppProtocol: boolean;
+  showProtocol: boolean;
+  showLocalDevice: boolean;
+  showLocalIp: boolean;
+  showLocalPort: boolean;
+  showDestination: boolean;
+  showDestinationRdns: boolean;
+  showDestinationIpPort: boolean;
+  showCategory: boolean;
+  showDownload: boolean;
+  showUpload: boolean;
+  showTotal: boolean;
+  showDuration: boolean;
+}
+
+export interface DevicesTablePrefs {
+  showIp: boolean;
+  showMac: boolean;
+  showVendorSource: boolean;
+  showTopServices: boolean;
+  showConnections: boolean;
+  showDownload: boolean;
+  showUpload: boolean;
+  showTotal: boolean;
+}
+
+export interface TablePreferences {
+  connections: ConnectionsTablePrefs;
+  devices: DevicesTablePrefs;
+}
+
 export interface ServerConfig {
   probeToken: string;
   persistenceMode: PersistenceMode;
   cacheDir: string;
   rdnsEnabled: boolean;
+  rdnsServer: string;
   rdnsTtlSec: number;
   rdnsSkipPrivate: boolean;
   lanDnsEnabled: boolean;
@@ -259,6 +383,12 @@ export interface ServerConfig {
   lanDnsTtlSec: number;
   stripLanDomain: boolean;
   inferDeviceNames: boolean;
+  dhcpLeasesPath: string;
+  ispName: string;
+  ispMaxDownMbps: number;
+  ispMaxUpMbps: number;
+  timeFormat: TimeFormat;
+  tablePreferences: TablePreferences;
 }
 
 export interface ServerStats {
@@ -296,6 +426,7 @@ export interface DashboardSnapshot {
   protocols: ProtocolSummary[];
   remotes: RemoteEndpointSummary[];
   clientLinks: ClientDestinationLink[];
+  topology: TopologyTelemetry;
   rules: AlertRule[];
   alerts: AlertEvent[];
   notifications: NotificationConfig;

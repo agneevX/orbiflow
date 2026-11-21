@@ -1,4 +1,11 @@
-import type { ArpEntry, ProbeSnapshot, RawConntrackFlow } from '../src/types/telemetry';
+import type {
+  ArpEntry,
+  EthernetPortMetrics,
+  ProbeSnapshot,
+  RawConntrackFlow,
+  SatelliteClientLink,
+  SatelliteTelemetry,
+} from '../src/types/telemetry';
 
 interface SimFlowState {
   id: string;
@@ -281,6 +288,10 @@ export class OrbiProbeSimulator {
   private flows: SimFlowState[];
   private ifaceRxBytes = 84_291_400_120;
   private ifaceTxBytes = 19_482_110_440;
+  private satLivingRxBytes = 38_420_000_000;
+  private satLivingTxBytes = 4_110_000_000;
+  private satOfficeRxBytes = 29_150_000_000;
+  private satOfficeTxBytes = 6_840_000_000;
   private tickCount = 0;
 
   constructor() {
@@ -300,6 +311,7 @@ export class OrbiProbeSimulator {
 
     let tickRx = 0;
     let tickTx = 0;
+    const hostTickRates = new Map<string, { rxBps: number; txBps: number; rxBytes: number; txBytes: number }>();
 
     const rawFlows: RawConntrackFlow[] = this.flows.map((f, idx) => {
       const jitter = 0.75 + ((this.tickCount * 17 + idx * 31) % 50) / 100;
@@ -312,6 +324,13 @@ export class OrbiProbeSimulator {
 
       tickRx += dRx;
       tickTx += dTx;
+
+      const cur = hostTickRates.get(f.src) || { rxBps: 0, txBps: 0, rxBytes: 0, txBytes: 0 };
+      cur.rxBps += Math.round(dRx / stepSeconds);
+      cur.txBps += Math.round(dTx / stepSeconds);
+      cur.rxBytes += f.rxBytes;
+      cur.txBytes += f.txBytes;
+      hostTickRates.set(f.src, cur);
 
       return {
         id: f.id,
@@ -331,6 +350,316 @@ export class OrbiProbeSimulator {
     this.ifaceRxBytes += tickRx;
     this.ifaceTxBytes += tickTx;
 
+    const getRate = (ip: string) =>
+      hostTickRates.get(ip) || { rxBps: 0, txBps: 0, rxBytes: 0, txBytes: 0 };
+
+    const atv = getRate('192.168.1.52');
+    const pixel = getRate('192.168.1.67');
+    const ecobee = getRate('192.168.1.84');
+    const macbook = getRate('192.168.1.24');
+    const gaming = getRate('192.168.1.105');
+    const privApple = getRate('192.168.1.91');
+    const homelab = getRate('192.168.1.10');
+    const synology = getRate('192.168.1.38');
+
+    // Include slight intra-LAN overhead on satellite backhauls
+    const satLivingRxBps = atv.rxBps + pixel.rxBps + ecobee.rxBps + 42_000;
+    const satLivingTxBps = atv.txBps + pixel.txBps + ecobee.txBps + 18_500;
+    const satOfficeRxBps = macbook.rxBps + gaming.rxBps + privApple.rxBps + 85_000;
+    const satOfficeTxBps = macbook.txBps + gaming.txBps + privApple.txBps + 64_000;
+
+    this.satLivingRxBytes += satLivingRxBps * stepSeconds;
+    this.satLivingTxBytes += satLivingTxBps * stepSeconds;
+    this.satOfficeRxBytes += satOfficeRxBps * stepSeconds;
+    this.satOfficeTxBytes += satOfficeTxBps * stepSeconds;
+
+    const routerPorts: EthernetPortMetrics[] = [
+      {
+        id: 'eth0',
+        label: 'WAN (eth0)',
+        role: 'wan',
+        linkUp: true,
+        speedMbps: 2500,
+        duplex: 'full',
+        rxBytes: this.ifaceRxBytes,
+        txBytes: this.ifaceTxBytes,
+        rxBps: Math.round(tickRx / stepSeconds),
+        txBps: Math.round(tickTx / stepSeconds),
+      },
+      {
+        id: 'lan1',
+        label: 'LAN 1 · Living Room',
+        role: 'backhaul',
+        linkUp: true,
+        speedMbps: 1000,
+        duplex: 'full',
+        rxBytes: this.satLivingTxBytes,
+        txBytes: this.satLivingRxBytes,
+        rxBps: satLivingTxBps,
+        txBps: satLivingRxBps,
+      },
+      {
+        id: 'lan2',
+        label: 'LAN 2 · Office',
+        role: 'backhaul',
+        linkUp: true,
+        speedMbps: 2500,
+        duplex: 'full',
+        rxBytes: this.satOfficeTxBytes,
+        txBytes: this.satOfficeRxBytes,
+        rxBps: satOfficeTxBps,
+        txBps: satOfficeRxBps,
+      },
+      {
+        id: 'lan3',
+        label: 'LAN 3 · Synology NAS',
+        role: 'lan',
+        linkUp: true,
+        speedMbps: 1000,
+        duplex: 'full',
+        rxBytes: synology.txBytes,
+        txBytes: synology.rxBytes,
+        rxBps: synology.txBps,
+        txBps: synology.rxBps,
+      },
+      {
+        id: 'lan4',
+        label: 'LAN 4 · Homelab',
+        role: 'lan',
+        linkUp: true,
+        speedMbps: 1000,
+        duplex: 'full',
+        rxBytes: homelab.txBytes,
+        txBytes: homelab.rxBytes,
+        rxBps: homelab.txBps,
+        txBps: homelab.rxBps,
+      },
+    ];
+
+    const routerClients: SatelliteClientLink[] = [
+      {
+        mac: '00:11:32:9e:44:7b',
+        ip: '192.168.1.38',
+        connectionType: 'ethernet',
+        portOrRadio: 'LAN 3',
+        linkSpeedMbps: 1000,
+        rxBytes: synology.rxBytes,
+        txBytes: synology.txBytes,
+        rxBps: synology.rxBps,
+        txBps: synology.txBps,
+      },
+      {
+        mac: 'e4:5f:01:8a:22:14',
+        ip: '192.168.1.10',
+        connectionType: 'ethernet',
+        portOrRadio: 'LAN 4',
+        linkSpeedMbps: 1000,
+        rxBytes: homelab.rxBytes,
+        txBytes: homelab.txBytes,
+        rxBps: homelab.rxBps,
+        txBps: homelab.txBps,
+      },
+    ];
+
+    const satellites: SatelliteTelemetry[] = [
+      {
+        id: 'sim-sat-living',
+        name: 'Living Room Satellite',
+        host: '192.168.1.2',
+        model: 'Orbi Satellite',
+        connected: true,
+        source: 'simulator',
+        lastSeen: timestamp,
+        uptimeSec: 912_400 + this.tickCount * stepSeconds,
+        backhaulType: 'ethernet',
+        backhaulIface: 'eth0',
+        backhaulSpeedMbps: 1000,
+        rxBps: satLivingRxBps,
+        txBps: satLivingTxBps,
+        rxBytes: this.satLivingRxBytes,
+        txBytes: this.satLivingTxBytes,
+        ports: [
+          {
+            id: 'port1',
+            label: 'Backhaul (Port 1)',
+            role: 'backhaul',
+            linkUp: true,
+            speedMbps: 1000,
+            duplex: 'full',
+            rxBytes: this.satLivingRxBytes,
+            txBytes: this.satLivingTxBytes,
+            rxBps: satLivingRxBps,
+            txBps: satLivingTxBps,
+          },
+          {
+            id: 'port2',
+            label: 'LAN 2 · Apple TV',
+            role: 'lan',
+            linkUp: true,
+            speedMbps: 1000,
+            duplex: 'full',
+            rxBytes: atv.txBytes,
+            txBytes: atv.rxBytes,
+            rxBps: atv.txBps,
+            txBps: atv.rxBps,
+          },
+          {
+            id: 'port3',
+            label: 'LAN 3',
+            role: 'lan',
+            linkUp: false,
+            speedMbps: 0,
+            duplex: 'unknown',
+            rxBytes: 0,
+            txBytes: 0,
+            rxBps: 0,
+            txBps: 0,
+          },
+          {
+            id: 'port4',
+            label: 'LAN 4',
+            role: 'lan',
+            linkUp: false,
+            speedMbps: 0,
+            duplex: 'unknown',
+            rxBytes: 0,
+            txBytes: 0,
+            rxBps: 0,
+            txBps: 0,
+          },
+        ],
+        clients: [
+          {
+            mac: 'b4:fb:e4:12:77:09',
+            ip: '192.168.1.52',
+            connectionType: 'ethernet',
+            portOrRadio: 'LAN 2',
+            linkSpeedMbps: 1000,
+            rxBytes: atv.rxBytes,
+            txBytes: atv.txBytes,
+            rxBps: atv.rxBps,
+            txBps: atv.txBps,
+          },
+          {
+            mac: '7c:d9:5c:31:aa:02',
+            ip: '192.168.1.67',
+            connectionType: 'wifi',
+            portOrRadio: '5 GHz',
+            linkSpeedMbps: 866,
+            signalDbm: -52,
+            rxBytes: pixel.rxBytes,
+            txBytes: pixel.txBytes,
+            rxBps: pixel.rxBps,
+            txBps: pixel.txBps,
+          },
+          {
+            mac: '18:b4:30:c9:55:1e',
+            ip: '192.168.1.84',
+            connectionType: 'wifi',
+            portOrRadio: '2.4 GHz',
+            linkSpeedMbps: 144,
+            signalDbm: -61,
+            rxBytes: ecobee.rxBytes,
+            txBytes: ecobee.txBytes,
+            rxBps: ecobee.rxBps,
+            txBps: ecobee.txBps,
+          },
+        ],
+      },
+      {
+        id: 'sim-sat-office',
+        name: 'Office Satellite',
+        host: '192.168.1.3',
+        model: 'Orbi Satellite',
+        connected: true,
+        source: 'simulator',
+        lastSeen: timestamp,
+        uptimeSec: 654_120 + this.tickCount * stepSeconds,
+        backhaulType: 'ethernet',
+        backhaulIface: 'eth0',
+        backhaulSpeedMbps: 2500,
+        rxBps: satOfficeRxBps,
+        txBps: satOfficeTxBps,
+        rxBytes: this.satOfficeRxBytes,
+        txBytes: this.satOfficeTxBytes,
+        ports: [
+          {
+            id: 'port1',
+            label: 'Backhaul (Port 1)',
+            role: 'backhaul',
+            linkUp: true,
+            speedMbps: 2500,
+            duplex: 'full',
+            rxBytes: this.satOfficeRxBytes,
+            txBytes: this.satOfficeTxBytes,
+            rxBps: satOfficeRxBps,
+            txBps: satOfficeTxBps,
+          },
+          {
+            id: 'port2',
+            label: 'LAN 2 · Gaming Rig',
+            role: 'lan',
+            linkUp: true,
+            speedMbps: 1000,
+            duplex: 'full',
+            rxBytes: gaming.txBytes,
+            txBytes: gaming.rxBytes,
+            rxBps: gaming.txBps,
+            txBps: gaming.rxBps,
+          },
+          {
+            id: 'port3',
+            label: 'LAN 3 · Dock',
+            role: 'lan',
+            linkUp: true,
+            speedMbps: 100,
+            duplex: 'full',
+            rxBytes: 12_400_000,
+            txBytes: 8_200_000,
+            rxBps: 0,
+            txBps: 0,
+          },
+        ],
+        clients: [
+          {
+            mac: 'd8:bb:c1:62:08:f4',
+            ip: '192.168.1.105',
+            connectionType: 'ethernet',
+            portOrRadio: 'LAN 2',
+            linkSpeedMbps: 1000,
+            rxBytes: gaming.rxBytes,
+            txBytes: gaming.txBytes,
+            rxBps: gaming.rxBps,
+            txBps: gaming.txBps,
+          },
+          {
+            mac: 'f0:18:98:4b:91:c0',
+            ip: '192.168.1.24',
+            connectionType: 'wifi',
+            portOrRadio: '5 GHz',
+            linkSpeedMbps: 1200,
+            signalDbm: -46,
+            rxBytes: macbook.rxBytes,
+            txBytes: macbook.txBytes,
+            rxBps: macbook.rxBps,
+            txBps: macbook.txBps,
+          },
+          {
+            mac: 'da:a1:19:4c:82:10',
+            ip: '192.168.1.91',
+            connectionType: 'wifi',
+            portOrRadio: '5 GHz',
+            linkSpeedMbps: 866,
+            signalDbm: -55,
+            rxBytes: privApple.rxBytes,
+            txBytes: privApple.txBytes,
+            rxBps: privApple.rxBps,
+            txBps: privApple.txBps,
+          },
+        ],
+      },
+    ];
+
     const includeSystem = this.tickCount === 1 || this.tickCount % 10 === 0;
 
     return {
@@ -346,6 +675,9 @@ export class OrbiProbeSimulator {
       },
       arp: LAN_DEVICES,
       flows: rawFlows,
+      ports: routerPorts,
+      routerClients,
+      satellites,
       ...(includeSystem
         ? {
             system: {

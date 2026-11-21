@@ -35,6 +35,7 @@ export interface TimeWindowAnalysis {
   status: TimeWindowDataStatus;
   points: TrafficPoint[];
   segments: TrafficPoint[][];
+  leadingAnchor: TrafficPoint | null;
   noDataRanges: TimeRange[];
   coveragePct: number;
   coveredMs: number;
@@ -65,11 +66,19 @@ export function buildWindowSeries(
       const avgFlows = Math.round(
         recentTail.reduce((s, p) => s + p.activeFlows, 0) / recentTail.length
       );
+      const loadSamples = recentTail.filter((p) => typeof p.routerLoadPct === 'number');
+      const avgLoad =
+        loadSamples.length > 0
+          ? Math.round(
+              loadSamples.reduce((s, p) => s + (p.routerLoadPct ?? 0), 0) / loadSamples.length
+            )
+          : undefined;
       merged.push({
         timestamp: recentTail[recentTail.length - 1].timestamp,
         rxBps: avgRx,
         txBps: avgTx,
         activeFlows: avgFlows,
+        ...(avgLoad !== undefined ? { routerLoadPct: avgLoad } : {}),
       });
     }
     return merged.sort((a, b) => a.timestamp - b.timestamp);
@@ -106,6 +115,21 @@ export function analyzeTimeWindow(
   const rawSeries = buildWindowSeries(window, history, rollupHistory);
   const points = rawSeries.filter((p) => p.timestamp >= windowStart && p.timestamp <= windowEnd);
 
+  // Capture the single point immediately preceding windowStart so the chart line
+  // enters flush at the left border without any empty edge gap as time shifts.
+  let leadingAnchor: TrafficPoint | null = null;
+  if (points.length > 0) {
+    for (let i = rawSeries.length - 1; i >= 0; i--) {
+      const candidate = rawSeries[i];
+      if (candidate.timestamp < windowStart) {
+        if (points[0].timestamp - candidate.timestamp <= gapThreshold) {
+          leadingAnchor = candidate;
+        }
+        break;
+      }
+    }
+  }
+
   if (points.length === 0) {
     return {
       window,
@@ -114,6 +138,7 @@ export function analyzeTimeWindow(
       status: 'empty',
       points: [],
       segments: [],
+      leadingAnchor: null,
       noDataRanges: [{ start: windowStart, end: windowEnd }],
       coveragePct: 0,
       coveredMs: 0,
@@ -126,7 +151,7 @@ export function analyzeTimeWindow(
   const segments: TrafficPoint[][] = [];
   let currentSegment: TrafficPoint[] = [points[0]];
 
-  if (points[0].timestamp - windowStart > gapThreshold) {
+  if (!leadingAnchor && points[0].timestamp - windowStart > gapThreshold) {
     noDataRanges.push({ start: windowStart, end: points[0].timestamp });
   }
 
@@ -160,6 +185,7 @@ export function analyzeTimeWindow(
       status: 'full',
       points,
       segments,
+      leadingAnchor,
       noDataRanges: [],
       coveragePct: 100,
       coveredMs: windowMs,
@@ -184,6 +210,7 @@ export function analyzeTimeWindow(
     status: 'partial',
     points,
     segments,
+    leadingAnchor,
     noDataRanges,
     coveragePct,
     coveredMs,
@@ -281,6 +308,20 @@ export function sliceAnalysisToRange(
     .map((seg) => seg.filter((p) => p.timestamp >= windowStart && p.timestamp <= windowEnd))
     .filter((seg) => seg.length > 0);
 
+  let leadingAnchor: TrafficPoint | null = null;
+  if (points.length > 0) {
+    const gapThreshold = GAP_THRESHOLD_MS[base.window];
+    for (let i = base.points.length - 1; i >= 0; i--) {
+      const candidate = base.points[i];
+      if (candidate.timestamp < windowStart) {
+        if (points[0].timestamp - candidate.timestamp <= gapThreshold) {
+          leadingAnchor = candidate;
+        }
+        break;
+      }
+    }
+  }
+
   const noDataRanges: TimeRange[] = [];
   for (const r of base.noDataRanges) {
     const s = Math.max(windowStart, r.start);
@@ -296,6 +337,7 @@ export function sliceAnalysisToRange(
       status: 'empty',
       points: [],
       segments: [],
+      leadingAnchor: null,
       noDataRanges: [{ start: windowStart, end: windowEnd }],
       coveragePct: 0,
       coveredMs: 0,
@@ -315,6 +357,7 @@ export function sliceAnalysisToRange(
     status: noDataRanges.length === 0 ? 'full' : 'partial',
     points,
     segments,
+    leadingAnchor,
     noDataRanges,
     coveragePct,
     coveredMs,

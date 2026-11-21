@@ -5,6 +5,7 @@ export interface ProbeConfigOptions {
   iface: string;
   intervalSec: number;
   probeId: string;
+  dhcpLeasesPath?: string;
 }
 
 export function generatePythonProbe(cfg: ProbeConfigOptions): string {
@@ -27,6 +28,7 @@ Options:
   --sys-interval SEC        Router uptime/load/memory polling interval in seconds (default: 30)
   --neigh-interval SEC      ARP/DHCP neighbor refresh interval in seconds (default: 15)
   --iface NAME              WAN interface name (default: ${cfg.iface})
+  --dhcp-leases PATH        Custom DHCP leases file path (auto-detect if omitted)
   --ws-url URL              Collector WebSocket URL
   --token TOKEN             Shared router agent token
   --probe-id ID             Unique probe identifier
@@ -48,6 +50,7 @@ PROBE_ID = "${cfg.probeId}"
 INTERVAL_SEC = ${cfg.intervalSec}
 SYS_INTERVAL_SEC = 30
 NEIGH_INTERVAL_SEC = 15
+DHCP_LEASES_PATH = "${(cfg.dhcpLeasesPath || '').replace(/["\\]/g, '')}"
 
 LOG_LEVELS = {"silent": 0, "error": 1, "info": 2, "debug": 3}
 
@@ -98,6 +101,7 @@ def parse_args(argv):
         "interval": float(INTERVAL_SEC),
         "sys_interval": float(SYS_INTERVAL_SEC),
         "neigh_interval": float(NEIGH_INTERVAL_SEC),
+        "dhcp_leases": DHCP_LEASES_PATH,
         "daemonize": False,
         "pid_file": None,
         "log_level": None,
@@ -143,6 +147,8 @@ def parse_args(argv):
             cfg["neigh_interval"] = max(5.0, float(need_val(arg)))
         elif arg == "--iface":
             cfg["iface"] = need_val(arg)
+        elif arg == "--dhcp-leases":
+            cfg["dhcp_leases"] = need_val(arg).strip()
         elif arg == "--ws-url":
             cfg["ws_url"] = need_val(arg)
         elif arg == "--token":
@@ -233,13 +239,139 @@ def read_iface_counters(iface):
     }
 
 
-def discover_dnsmasq_files():
+def read_swconfig_ports():
+    ports = []
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["swconfig", "dev", "switch0", "show"],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).decode("utf-8", errors="ignore")
+    except Exception:
+        return ports
+
+    cur = None
+    for raw in out.splitlines():
+        line = raw.strip()
+        if line.startswith("Port ") and line.endswith(":"):
+            if cur is not None:
+                ports.append(cur)
+            try:
+                pnum = int(line.split()[1].rstrip(":"))
+            except ValueError:
+                pnum = len(ports)
+            cur = {
+                "id": f"port{pnum}",
+                "label": f"LAN {pnum}",
+                "role": "lan",
+                "linkUp": False,
+                "speedMbps": 0,
+                "duplex": "unknown",
+                "rxBytes": 0,
+                "txBytes": 0,
+                "rxBps": 0,
+                "txBps": 0,
+                "_pnum": pnum,
+            }
+        elif cur is not None and "link:" in line:
+            parts = line.split()
+            for tok in parts:
+                if tok == "link:up":
+                    cur["linkUp"] = True
+                elif tok.startswith("speed:"):
+                    digits = ""
+                    for ch in tok[6:]:
+                        if ch.isdigit():
+                            digits += ch
+                        else:
+                            break
+                    if digits:
+                        cur["speedMbps"] = int(digits)
+                elif "full-duplex" in tok:
+                    cur["duplex"] = "full"
+                elif "half-duplex" in tok:
+                    cur["duplex"] = "half"
+        elif cur is not None and (line.startswith("RxGoodByte") or line.startswith("RxByte")):
+            val = line.split(":", 1)[-1].strip()
+            if val.isdigit():
+                cur["rxBytes"] = int(val)
+        elif cur is not None and (line.startswith("TxByte") or line.startswith("TxGoodByte")):
+            val = line.split(":", 1)[-1].strip()
+            if val.isdigit():
+                cur["txBytes"] = int(val)
+    if cur is not None:
+        ports.append(cur)
+
+    if len(ports) > 1:
+        ports = [p for p in ports if p.get("_pnum", 1) != 0]
+    for p in ports:
+        p.pop("_pnum", None)
+    return ports
+
+
+def read_router_ports(wan_iface):
+    ports = []
+    seen = set()
+    try:
+        names = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        names = [wan_iface]
+
+    for name in names:
+        if name == "lo":
+            continue
+        if name != wan_iface and not (
+            name.startswith("eth") or name.startswith("en") or name.startswith("lan") or name.startswith("wan")
+        ):
+            continue
+        base = f"/sys/class/net/{name}"
+        if os.path.isdir(f"{base}/wireless"):
+            continue
+        oper = read_text(f"{base}/operstate").strip().lower()
+        speed = read_int(f"{base}/speed")
+        if speed < 0:
+            speed = 0
+        duplex = read_text(f"{base}/duplex").strip().lower()
+        if duplex not in ("full", "half"):
+            duplex = "unknown"
+        rx_b = read_int(f"{base}/statistics/rx_bytes")
+        tx_b = read_int(f"{base}/statistics/tx_bytes")
+        is_wan = name == wan_iface
+        ports.append({
+            "id": name,
+            "label": f"WAN ({name})" if is_wan else name,
+            "role": "wan" if is_wan else "lan",
+            "linkUp": oper == "up" or speed > 0,
+            "speedMbps": speed,
+            "duplex": duplex,
+            "rxBytes": rx_b,
+            "txBytes": tx_b,
+            "rxBps": 0,
+            "txBps": 0,
+        })
+        seen.add(name)
+
+    for sp in read_swconfig_ports():
+        if sp["id"] not in seen:
+            ports.append(sp)
+            seen.add(sp["id"])
+    return ports
+
+
+def discover_dnsmasq_files(custom_lease_path=""):
     lease_paths = [
         "/tmp/dhcp.leases",
         "/tmp/udhcpd.leases",
         "/var/run/dnsmasq.leases",
         "/opt/var/lib/misc/dnsmasq.leases",
     ]
+    if custom_lease_path:
+        custom_clean = custom_lease_path.strip()
+        if custom_clean:
+            if custom_clean in lease_paths:
+                lease_paths.remove(custom_clean)
+            lease_paths.insert(0, custom_clean)
     hosts_paths = ["/etc/hosts"]
     static_hosts = {}
     conf_files = [
@@ -282,9 +414,9 @@ def discover_dnsmasq_files():
     return lease_paths, hosts_paths, static_hosts
 
 
-def read_dhcp_leases():
+def read_dhcp_leases(custom_lease_path=""):
     leases = {}
-    lease_paths, hosts_paths, static_hosts = discover_dnsmasq_files()
+    lease_paths, hosts_paths, static_hosts = discover_dnsmasq_files(custom_lease_path)
     for hpath in hosts_paths:
         for line in read_text(hpath).splitlines():
             clean = line.split("#", 1)[0].strip()
@@ -297,12 +429,17 @@ def read_dhcp_leases():
         if not content:
             continue
         for line in content.splitlines():
-            parts = line.split()
-            if len(parts) >= 4:
+            clean = line.split("#", 1)[0].strip()
+            if not clean:
+                continue
+            parts = clean.split()
+            if len(parts) >= 4 and parts[2].count(".") == 3:
                 ip = parts[2]
                 host = parts[3]
                 if host != "*" and host != ip:
                     leases[ip] = host
+            elif len(parts) >= 2 and parts[0].count(".") == 3 and not parts[0].startswith("127."):
+                leases[parts[0]] = parts[1]
     return leases
 
 
@@ -547,7 +684,7 @@ def main():
 
                 now_ts = time.time()
                 if now_ts - last_neigh_refresh >= cfg["neigh_interval"]:
-                    leases = read_dhcp_leases()
+                    leases = read_dhcp_leases(cfg["dhcp_leases"])
                     arp = read_arp_table(leases)
                     last_neigh_refresh = now_ts
                     logger.debug(f"Refreshed {len(arp)} ARP neighbors / {len(leases)} DHCP leases")
@@ -558,6 +695,7 @@ def main():
                     "timestamp": int(now_ts * 1000),
                     "source": "live",
                     "iface": read_iface_counters(cfg["iface"]),
+                    "ports": read_router_ports(cfg["iface"]),
                     "arp": arp,
                     "flows": [],
                     "rawConntrackLines": conntrack_lines,
@@ -832,7 +970,9 @@ export function generateDockerCompose(_cfg?: ProbeConfigOptions): string {
 `;
 }
 
-export function generateInitScript(): string {
+export function generateInitScript(cfg?: ProbeConfigOptions): string {
+  const leasePath = (cfg?.dhcpLeasesPath || '').trim().replace(/["`$\\]/g, '');
+  const extraFlags = leasePath ? ` --dhcp-leases "${leasePath}"` : '';
   return `#!/bin/sh /etc/rc.common
 # /opt/etc/init.d/S99orbi-probe — Router autostart service
 
@@ -844,7 +984,7 @@ PIDFILE=/var/run/orbi-probe.pid
 start() {
   echo "Starting OrbiFlow WAN monitor agent..."
   echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null || true
-  /opt/bin/python3 "$PROG" -d --pid-file "$PIDFILE"
+  /opt/bin/python3 "$PROG" -d --pid-file "$PIDFILE"${extraFlags}
 }
 
 stop() {

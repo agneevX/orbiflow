@@ -11,13 +11,14 @@ import {
   Network,
   Palette,
   Radio,
+  Share2,
   Sliders,
   Sun,
   Terminal,
   Wifi,
   X,
 } from 'lucide-react';
-import type { BandwidthUnit, ProbeStatus } from '../types/telemetry';
+import type { BandwidthUnit, ProbeStatus, TimeFormat } from '../types/telemetry';
 import {
   DARK_THEMES,
   LIGHT_THEMES,
@@ -27,7 +28,7 @@ import {
 import { formatDuration } from '../lib/formatters';
 import { TechTerm } from './TechTerm';
 
-export type NavTab = 'overview' | 'flows' | 'hosts' | 'alerts' | 'setup' | 'settings';
+export type NavTab = 'overview' | 'topology' | 'flows' | 'hosts' | 'alerts' | 'setup' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -42,6 +43,8 @@ interface SidebarProps {
   onChangeActiveTheme: (themeId: ThemeId) => void;
   unit: BandwidthUnit;
   onChangeUnit: (u: BandwidthUnit) => void;
+  timeFormat: TimeFormat;
+  onChangeTimeFormat: (tf: TimeFormat) => void;
   onToggleSimulator: (enabled: boolean) => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
@@ -49,6 +52,7 @@ interface SidebarProps {
 
 const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Home }> = [
   { id: 'overview', label: 'Home', icon: Home },
+  { id: 'topology', label: 'Traffic Map', icon: Share2 },
   { id: 'flows', label: 'Connections', icon: Layers },
   { id: 'hosts', label: 'Devices', icon: Network },
   { id: 'alerts', label: 'Alerts', icon: Bell },
@@ -75,6 +79,8 @@ export function Sidebar({
   onChangeActiveTheme,
   unit,
   onChangeUnit,
+  timeFormat,
+  onChangeTimeFormat,
   onToggleSimulator,
   mobileOpen,
   onCloseMobile,
@@ -123,7 +129,7 @@ export function Sidebar({
       </div>
 
       {/* Navigation links */}
-      <nav aria-label="Primary navigation" className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+      <nav aria-label="Primary navigation" className="flex-1 px-3 py-3 space-y-0.5 overflow-y-auto">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
@@ -136,7 +142,7 @@ export function Sidebar({
                 onCloseMobile();
               }}
               aria-current={isActive ? 'page' : undefined}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-colors whitespace-nowrap border ${
+              className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium transition-colors whitespace-nowrap border ${
                 isActive
                   ? 'app-surface app-border font-semibold'
                   : 'app-text-muted border-transparent app-row-hover'
@@ -232,26 +238,52 @@ export function Sidebar({
             </select>
           </div>
 
-          {/* Speed Unit */}
-          <div className="space-y-1.5">
-            <span className="block text-xs font-medium app-text-muted">Speed Unit</span>
-            <div
-              role="group"
-              aria-label="Bandwidth speed unit"
-              className="grid grid-cols-2 app-input border rounded-xl p-1"
-            >
-              {(['Mb/s', 'MB/s'] as BandwidthUnit[]).map((u) => (
-                <button
-                  key={u}
-                  type="button"
-                  onClick={() => onChangeUnit(u)}
-                  className={`py-1 text-xs font-mono rounded-lg transition-colors ${
-                    unit === u ? 'app-surface font-semibold' : 'app-text-muted'
-                  }`}
-                >
-                  {u}
-                </button>
-              ))}
+          {/* Speed Unit & Time Format side-by-side */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1">
+              <span className="block text-[11px] font-medium app-text-muted">Unit</span>
+              <div
+                role="group"
+                aria-label="Bandwidth speed unit"
+                className="grid grid-cols-2 app-input border rounded-xl p-0.5"
+              >
+                {(['Mb/s', 'MB/s'] as BandwidthUnit[]).map((u) => (
+                  <button
+                    key={u}
+                    type="button"
+                    onClick={() => onChangeUnit(u)}
+                    className={`py-1 text-[11px] font-mono rounded-lg transition-colors ${
+                      unit === u ? 'app-surface font-semibold' : 'app-text-muted'
+                    }`}
+                  >
+                    {u === 'Mb/s' ? 'Mb' : 'MB'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <span className="block text-[11px] font-medium app-text-muted">Clock</span>
+              <div
+                role="group"
+                aria-label="Time format"
+                className="grid grid-cols-2 app-input border rounded-xl p-0.5"
+              >
+                {(['12h', '24h'] as TimeFormat[]).map((tf) => (
+                  <button
+                    key={tf}
+                    type="button"
+                    data-testid={`sidebar-time-format-${tf}`}
+                    aria-pressed={timeFormat === tf}
+                    onClick={() => onChangeTimeFormat(tf)}
+                    className={`py-1 text-[11px] font-medium rounded-lg transition-colors ${
+                      timeFormat === tf ? 'app-surface font-semibold' : 'app-text-muted'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </div>

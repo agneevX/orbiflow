@@ -8,6 +8,7 @@ interface RdnsCacheEntry {
 
 export interface RdnsConfig {
   enabled: boolean;
+  server: string;
   ttlSec: number;
   skipPrivate: boolean;
 }
@@ -16,6 +17,7 @@ export class RdnsCache {
   private cache = new Map<string, RdnsCacheEntry>();
   private inFlight = new Set<string>();
   private config: RdnsConfig;
+  private resolver: dns.promises.Resolver | null = null;
   private hits = 0;
   private misses = 0;
   private readonly maxEntries = 4000;
@@ -24,9 +26,26 @@ export class RdnsCache {
   constructor(initial?: Partial<RdnsConfig>) {
     this.config = {
       enabled: initial?.enabled ?? true,
+      server: (initial?.server ?? '').trim(),
       ttlSec: initial?.ttlSec ?? 3600,
       skipPrivate: initial?.skipPrivate ?? true,
     };
+    this.rebuildResolver();
+  }
+
+  private rebuildResolver(): void {
+    const server = this.config.server.trim();
+    if (!server) {
+      this.resolver = null;
+      return;
+    }
+    try {
+      const r = new dns.promises.Resolver();
+      r.setServers([server]);
+      this.resolver = r;
+    } catch {
+      this.resolver = null;
+    }
   }
 
   public getConfig(): RdnsConfig {
@@ -34,11 +53,18 @@ export class RdnsCache {
   }
 
   public updateConfig(next: Partial<RdnsConfig>): RdnsConfig {
+    const prevServer = this.config.server;
+    const nextServer = next.server !== undefined ? next.server.trim() : this.config.server;
     this.config = {
       enabled: next.enabled ?? this.config.enabled,
+      server: nextServer,
       ttlSec: Math.max(60, Math.min(86400, Number(next.ttlSec) || this.config.ttlSec)),
       skipPrivate: next.skipPrivate ?? this.config.skipPrivate,
     };
+    if (nextServer !== prevServer) {
+      this.rebuildResolver();
+      this.clear();
+    }
     return this.getConfig();
   }
 
@@ -87,8 +113,11 @@ export class RdnsCache {
     const timeout = new Promise<string[]>((_, reject) =>
       setTimeout(() => reject(new Error('rDNS timeout')), 1500)
     );
+    const lookupPromise = this.resolver
+      ? this.resolver.reverse(ip)
+      : dns.promises.reverse(ip);
 
-    Promise.race([dns.promises.reverse(ip), timeout])
+    Promise.race([lookupPromise, timeout])
       .then((names) => {
         const hostname = Array.isArray(names) && names.length > 0 ? names[0] : null;
         this.setEntry(ip, hostname);

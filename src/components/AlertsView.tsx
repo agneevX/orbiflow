@@ -14,6 +14,7 @@ import type {
   AlertMetric,
   AlertRule,
   NotificationConfig,
+  TimeFormat,
 } from '../types/telemetry';
 import { formatTimestamp } from '../lib/formatters';
 
@@ -21,6 +22,7 @@ interface AlertsViewProps {
   rules: AlertRule[];
   alerts: AlertEvent[];
   notifications: NotificationConfig;
+  timeFormat?: TimeFormat;
   onSaveRules: (rules: AlertRule[]) => Promise<void>;
   onSaveNotifications: (cfg: NotificationConfig) => Promise<void>;
   onTestNotification: (
@@ -67,6 +69,7 @@ export function AlertsView({
   rules,
   alerts,
   notifications,
+  timeFormat = '12h',
   onSaveRules,
   onSaveNotifications,
   onTestNotification,
@@ -596,7 +599,7 @@ export function AlertsView({
                           </span>
                           <span className="app-text-muted">·</span>
                           <span className="font-mono app-text-muted tabular-nums">
-                            {formatTimestamp(alert.timestamp)}
+                            {formatTimestamp(alert.timestamp, false, false, timeFormat)}
                           </span>
                         </div>
                         <p className="text-xs app-text-secondary mt-1">{alert.message}</p>

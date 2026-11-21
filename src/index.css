@@ -4,8 +4,8 @@
 @layer base {
   :root,
   html[data-theme="obsidian"] {
-    --font-display: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
-    --font-sans: "Public Sans", system-ui, -apple-system, sans-serif;
+    --font-display: "Inter", system-ui, -apple-system, sans-serif;
+    --font-sans: "Inter", system-ui, -apple-system, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 
     --bg-canvas: #0b0f17;

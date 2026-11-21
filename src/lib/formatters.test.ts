@@ -3,11 +3,16 @@ import assert from 'node:assert/strict';
 import {
   classifyApplication,
   compareIpv4,
+  computePerceivedRouterLoadPct,
+  computeRouterCpuPct,
+  computeWindowPeaks,
   condenseServiceLabel,
   describeRemoteIp,
+  formatAppForProtocolFilter,
   formatBandwidth,
   formatBytes,
   formatDuration,
+  formatTimestamp,
   hasTangibleTraffic,
   isActiveConnectionState,
   isPrivateIp,
@@ -127,3 +132,62 @@ test('condenseServiceLabel and compareIpv4 format compact service labels and sor
     '192.168.1.105',
   ]);
 });
+
+test('describeRemoteIp suppresses app categories for ICMP traffic while preserving hostnames', () => {
+  const icmpCf = describeRemoteIp('1.1.1.1', null, 'ICMP', 0);
+  assert.equal(icmpCf.service, 'Cloudflare DNS');
+  assert.equal(icmpCf.category, 'Other');
+
+  const icmpRdns = describeRemoteIp('203.0.113.50', 'edge-video.nflxvideo.net', 'ICMP', 0);
+  assert.equal(icmpRdns.label, 'edge-video.nflxvideo.net');
+  assert.equal(icmpRdns.category, 'Other');
+});
+
+test('formatTimestamp defaults to 12h format and supports explicit 24h format', () => {
+  const sampleTs = new Date(2026, 4, 10, 15, 7, 9).getTime();
+  const default12 = formatTimestamp(sampleTs, false, false);
+  const explicit12 = formatTimestamp(sampleTs, false, false, '12h');
+  const explicit24 = formatTimestamp(sampleTs, false, false, '24h');
+
+  assert.equal(default12, explicit12);
+  assert.match(default12, /3:07:09\s*PM/i);
+  assert.match(explicit24, /15:07:09/);
+  assert.doesNotMatch(explicit24, /AM|PM/i);
+});
+
+test('computeRouterCpuPct, computePerceivedRouterLoadPct, and computeWindowPeaks calculate bounded metrics', () => {
+  assert.equal(computeRouterCpuPct(0, 2), 0);
+  assert.equal(computeRouterCpuPct(1.0, 2), 50);
+  assert.equal(computeRouterCpuPct(3.0, 2), 100);
+
+  // CPU 50% * 0.6 = 30, Mem 40% * 0.3 = 12, Conntrack 25% * 0.1 = 2.5 => round(44.5) = 45
+  assert.equal(
+    computePerceivedRouterLoadPct({
+      load1m: 1.0,
+      memUsedPct: 40,
+      conntrackCount: 4096,
+      conntrackMax: 16384,
+      cpuCores: 2,
+    }),
+    45
+  );
+
+  const peaks = computeWindowPeaks(
+    [
+      { timestamp: 1000, rxBps: 500, txBps: 100, activeFlows: 2, routerLoadPct: 22 },
+      { timestamp: 4000, rxBps: 2500, txBps: 400, activeFlows: 5, routerLoadPct: 68 },
+      { timestamp: 7000, rxBps: 1200, txBps: 900, activeFlows: 4, routerLoadPct: 41 },
+    ],
+    { rxBps: 1000, txBps: 200, routerLoadPct: 30 }
+  );
+  assert.deepEqual(peaks, { peakRxBps: 2500, peakTxBps: 900, peakRouterLoadPct: 68 });
+});
+
+test('formatAppForProtocolFilter removes redundant protocol labels when filtered', () => {
+  assert.equal(formatAppForProtocolFilter('TCP / 8123', 'TCP', 8123, 'TCP'), 'Port 8123');
+  assert.equal(formatAppForProtocolFilter('TCP / 8123', 'TCP', 8123, 'ALL'), 'TCP / 8123');
+  assert.equal(formatAppForProtocolFilter('DNS over TCP', 'TCP', 53, 'TCP'), 'DNS');
+  assert.equal(formatAppForProtocolFilter('ICMP Ping', 'ICMP', 0, 'ICMP'), 'Ping');
+  assert.equal(formatAppForProtocolFilter('HTTPS / TLS', 'TCP', 443, 'TCP'), 'HTTPS / TLS');
+});
+
