@@ -26,12 +26,12 @@ test('formatBytes formats bytes with 0 decimal places', () => {
   assert.equal(formatBytes(3 * 1024 * 1024 * 1024), '3 GB');
 });
 
-test('formatBandwidth formats Mb/s and MB/s with 0 decimals, and <1Mbit/s as Kbps with 0 decimals', () => {
-  assert.equal(formatBandwidth(0, 'Mb/s'), '0 Kbps');
-  assert.equal(formatBandwidth(62_500, 'Mb/s'), '500 Kbps');
+test('formatBandwidth formats Mbps and MB/s with 0 decimals, and <1Mbit/s as Kbps with 0 decimals', () => {
+  assert.equal(formatBandwidth(0, 'Mbps'), '0 Kbps');
+  assert.equal(formatBandwidth(62_500, 'Mbps'), '500 Kbps');
   assert.equal(formatBandwidth(62_500, 'MB/s'), '500 Kbps');
-  assert.equal(formatBandwidth(125_000, 'Mb/s'), '1 Mb/s');
-  assert.equal(formatBandwidth(12_500_000, 'Mb/s'), '100 Mb/s');
+  assert.equal(formatBandwidth(125_000, 'Mbps'), '1 Mbps');
+  assert.equal(formatBandwidth(12_500_000, 'Mbps'), '100 Mbps');
   assert.equal(formatBandwidth(12_500_000, 'MB/s'), '13 MB/s');
   assert.equal(formatBandwidth(250_000, 'MB/s'), '250 KB/s');
 });

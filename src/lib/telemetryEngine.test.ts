@@ -68,7 +68,7 @@ test('TrafficMonitorEngine builds client-destination flow links, 1m rollups, and
     ],
   });
 
-  // 5 seconds later: +50 MB rx => 80 Mb/s (triggers > 50 Mb/s alert)
+  // 5 seconds later: +50 MB rx => 80 Mbps (triggers > 50 Mbps alert)
   const { dashboard, newAlerts } = engine.ingest({
     probeId: 'orbi-rbk50',
     timestamp: t0 + 5_000,
@@ -350,7 +350,7 @@ test('NotificationDispatcher sends formatted payloads to ntfy and Telegram and v
     ruleId: 'r-1',
     ruleName: 'High Download Usage',
     severity: 'warning' as const,
-    message: 'Download speed reached 250 Mb/s (threshold 200 Mb/s)',
+    message: 'Download speed reached 250 Mbps (threshold 200 Mbps)',
     value: 250,
     threshold: 200,
     timestamp: 1_710_000_000_000,

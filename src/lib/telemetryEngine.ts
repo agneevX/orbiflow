@@ -1378,27 +1378,27 @@ export class TrafficMonitorEngine {
         value = rxMbps;
         shouldFire = value > rule.threshold;
         severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
-        message = `Internet download reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+        message = `Internet download reached ${value} Mbps (threshold ${rule.threshold} Mbps)`;
       } else if (rule.metric === 'wan_tx_mbps') {
         value = txMbps;
         shouldFire = value > rule.threshold;
         severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
-        message = `Internet upload reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+        message = `Internet upload reached ${value} Mbps (threshold ${rule.threshold} Mbps)`;
       } else if (rule.metric === 'wan_combined_mbps') {
         value = combinedMbps;
         shouldFire = value > rule.threshold;
         severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
-        message = `Combined bandwidth reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+        message = `Combined bandwidth reached ${value} Mbps (threshold ${rule.threshold} Mbps)`;
       } else if (rule.metric === 'host_rx_mbps' && maxRxHost) {
         value = Math.round((maxRxHost.rxBps * 8) / 1_000_000);
         shouldFire = value > rule.threshold;
         severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
-        message = `${maxRxHost.hostname} (${maxRxHost.ip}) download reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+        message = `${maxRxHost.hostname} (${maxRxHost.ip}) download reached ${value} Mbps (threshold ${rule.threshold} Mbps)`;
       } else if (rule.metric === 'host_tx_mbps' && maxTxHost) {
         value = Math.round((maxTxHost.txBps * 8) / 1_000_000);
         shouldFire = value > rule.threshold;
         severity = value > rule.threshold * 1.4 ? 'critical' : 'warning';
-        message = `${maxTxHost.hostname} (${maxTxHost.ip}) upload reached ${value} Mb/s (threshold ${rule.threshold} Mb/s)`;
+        message = `${maxTxHost.hostname} (${maxTxHost.ip}) upload reached ${value} Mbps (threshold ${rule.threshold} Mbps)`;
       } else if (rule.metric === 'host_flows' && maxFlowHost) {
         value = maxFlowHost.activeFlows;
         shouldFire = value > rule.threshold;

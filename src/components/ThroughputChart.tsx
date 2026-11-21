@@ -19,7 +19,6 @@ interface ThroughputChartProps {
   height?: number;
 }
 
-const PAD_LEFT = 76;
 const PAD_RIGHT = 6;
 const PAD_TOP = 12;
 const PAD_BOTTOM = 26;
@@ -117,6 +116,21 @@ export function ThroughputChart({
     return m * 1.18;
   }, [points, showDownload, showUpload]);
 
+  // Measure tight left gutter so Y-axis speed labels sit flush left with "Internet traffic"
+  const padLeft = useMemo(() => {
+    const labels = [0, 0.25, 0.5, 0.75, 1].map((r) => formatBandwidth(r * maxBps, unit));
+    if (typeof document !== 'undefined') {
+      const probe = document.createElement('canvas').getContext('2d');
+      if (probe) {
+        probe.font = '11px "Inter", sans-serif';
+        const maxW = Math.max(...labels.map((l) => probe.measureText(l).width));
+        return Math.max(46, Math.ceil(maxW) + 10);
+      }
+    }
+    const maxLen = Math.max(...labels.map((l) => l.length));
+    return Math.max(46, Math.ceil(maxLen * 6.5) + 10);
+  }, [maxBps, unit]);
+
   const activeSelectionRange: TimeRange | null = useMemo(() => {
     if (dragState && Math.abs(dragState.currentX - dragState.startX) >= 4) {
       return {
@@ -170,12 +184,12 @@ export function ThroughputChart({
   const clientXToPlot = useCallback(
     (clientX: number) => {
       const canvas = canvasRef.current;
-      if (!canvas) return { x: PAD_LEFT, ratio: 0, ts: windowStart };
+      if (!canvas) return { x: padLeft, ratio: 0, ts: windowStart };
       const rect = canvas.getBoundingClientRect();
       const rawX = clientX - rect.left;
-      const plotW = Math.max(40, width - PAD_LEFT - PAD_RIGHT);
-      const clampedX = Math.min(PAD_LEFT + plotW, Math.max(PAD_LEFT, rawX));
-      const ratio = (clampedX - PAD_LEFT) / plotW;
+      const plotW = Math.max(40, width - padLeft - PAD_RIGHT);
+      const clampedX = Math.min(padLeft + plotW, Math.max(padLeft, rawX));
+      const ratio = (clampedX - padLeft) / plotW;
       const span = Math.max(1, windowEnd - windowStart);
       return {
         x: clampedX,
@@ -183,7 +197,7 @@ export function ThroughputChart({
         ts: Math.round(windowStart + ratio * span),
       };
     },
-    [width, windowStart, windowEnd]
+    [width, padLeft, windowStart, windowEnd]
   );
 
   // Global mousemove/mouseup while dragging so releasing outside canvas commits cleanly
@@ -240,16 +254,16 @@ export function ThroughputChart({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, width, height);
 
-    const plotW = Math.max(40, width - PAD_LEFT - PAD_RIGHT);
+    const plotW = Math.max(40, width - padLeft - PAD_RIGHT);
     const plotH = Math.max(40, height - PAD_TOP - PAD_BOTTOM);
     const span = Math.max(1, windowEnd - windowStart);
 
     // Unclamped X projection for clipped curve segments (prevents left/right edge gaps)
-    const xForTimeRaw = (ts: number) => PAD_LEFT + ((ts - windowStart) / span) * plotW;
+    const xForTimeRaw = (ts: number) => padLeft + ((ts - windowStart) / span) * plotW;
 
     const xForTime = (ts: number) => {
       const ratio = Math.min(1, Math.max(0, (ts - windowStart) / span));
-      return PAD_LEFT + ratio * plotW;
+      return padLeft + ratio * plotW;
     };
 
     const yForBps = (bps: number) => {
@@ -257,10 +271,10 @@ export function ThroughputChart({
       return PAD_TOP + plotH - norm * plotH;
     };
 
-    // Draw horizontal gridlines + Y-axis labels
+    // Draw horizontal gridlines + left-aligned Y-axis labels flush with card heading
     const ticks = 4;
     ctx.font = '11px "Inter", sans-serif';
-    ctx.textAlign = 'right';
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
     for (let i = 0; i <= ticks; i++) {
@@ -271,12 +285,12 @@ export function ThroughputChart({
       ctx.strokeStyle = theme.gridColor;
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(PAD_LEFT, y);
-      ctx.lineTo(PAD_LEFT + plotW, y);
+      ctx.moveTo(padLeft, y);
+      ctx.lineTo(padLeft + plotW, y);
       ctx.stroke();
 
       ctx.fillStyle = theme.axisTextColor;
-      ctx.fillText(formatBandwidth(val, unit), PAD_LEFT - 10, y);
+      ctx.fillText(formatBandwidth(val, unit), 0, y);
     }
 
     // Draw shaded diagonal-hatched regions for every no-data span
@@ -316,13 +330,13 @@ export function ThroughputChart({
       ctx.strokeStyle = hatchStroke;
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
-      if (x1 > PAD_LEFT + 1) {
+      if (x1 > padLeft + 1) {
         ctx.beginPath();
         ctx.moveTo(x1, PAD_TOP);
         ctx.lineTo(x1, PAD_TOP + plotH);
         ctx.stroke();
       }
-      if (x2 < PAD_LEFT + plotW - 1) {
+      if (x2 < padLeft + plotW - 1) {
         ctx.beginPath();
         ctx.moveTo(x2, PAD_TOP);
         ctx.lineTo(x2, PAD_TOP + plotH);
@@ -361,21 +375,21 @@ export function ThroughputChart({
     ctx.textAlign = 'left';
     ctx.fillText(
       formatTimestamp(windowStart, effectiveLong, is24h, timeFormat),
-      PAD_LEFT,
+      padLeft,
       PAD_TOP + plotH + 8
     );
 
     ctx.textAlign = 'center';
     ctx.fillText(
       formatTimestamp(windowStart + span / 2, effectiveLong, is24h, timeFormat),
-      PAD_LEFT + plotW / 2,
+      padLeft + plotW / 2,
       PAD_TOP + plotH + 8
     );
 
     ctx.textAlign = 'right';
     ctx.fillText(
       formatTimestamp(windowEnd, effectiveLong, is24h, timeFormat),
-      PAD_LEFT + plotW,
+      padLeft + plotW,
       PAD_TOP + plotH + 8
     );
 
@@ -387,7 +401,7 @@ export function ThroughputChart({
       ctx.font = '600 13px "Inter", sans-serif';
       ctx.fillText(
         zoomRange ? 'No data in zoomed range' : `No data recorded for the last ${timeWindow}`,
-        PAD_LEFT + plotW / 2,
+        padLeft + plotW / 2,
         PAD_TOP + plotH / 2 - 9
       );
       ctx.font = '11px "Inter", sans-serif';
@@ -395,14 +409,14 @@ export function ThroughputChart({
         zoomRange
           ? 'Reset zoom to return to the full time window.'
           : 'Select a different period or wait for new samples from the router agent.',
-        PAD_LEFT + plotW / 2,
+        padLeft + plotW / 2,
         PAD_TOP + plotH / 2 + 11
       );
       return;
     }
 
     // Build render segments, prepending leadingAnchor to the first segment so the line
-    // seamlessly crosses PAD_LEFT and clips flush at the left border with zero empty gap.
+    // seamlessly crosses padLeft and clips flush at the left border with zero empty gap.
     const renderSegments = segments.map((seg, idx) =>
       idx === 0 && leadingAnchor ? [leadingAnchor, ...seg] : seg
     );
@@ -410,7 +424,7 @@ export function ThroughputChart({
     // Clip plotted series strictly to the chart plot area so anchored edges stay crisp
     ctx.save();
     ctx.beginPath();
-    ctx.rect(PAD_LEFT, PAD_TOP, plotW, plotH);
+    ctx.rect(padLeft, PAD_TOP, plotW, plotH);
     ctx.clip();
 
     const drawSeries = (
@@ -475,11 +489,11 @@ export function ThroughputChart({
 
       ctx.save();
       ctx.fillStyle = theme.isDark ? 'rgba(0, 0, 0, 0.24)' : 'rgba(15, 23, 42, 0.06)';
-      if (sx1 > PAD_LEFT) {
-        ctx.fillRect(PAD_LEFT, PAD_TOP, sx1 - PAD_LEFT, plotH);
+      if (sx1 > padLeft) {
+        ctx.fillRect(padLeft, PAD_TOP, sx1 - padLeft, plotH);
       }
-      if (sx2 < PAD_LEFT + plotW) {
-        ctx.fillRect(sx2, PAD_TOP, PAD_LEFT + plotW - sx2, plotH);
+      if (sx2 < padLeft + plotW) {
+        ctx.fillRect(sx2, PAD_TOP, padLeft + plotW - sx2, plotH);
       }
 
       ctx.fillStyle = theme.isDark
@@ -548,6 +562,7 @@ export function ThroughputChart({
     timeWindow,
     width,
     height,
+    padLeft,
     maxBps,
     hoverInfo,
     activeSelectionRange,
@@ -689,16 +704,16 @@ export function ThroughputChart({
         data-testid="chart-legend"
         className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-xs"
       >
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-4">
           <button
             type="button"
             data-testid="legend-toggle-download"
             aria-pressed={showDownload}
             onClick={handleToggleDownload}
-            className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-lg border transition-all text-xs font-medium ${
+            className={`inline-flex items-center gap-2 py-0.5 transition-opacity text-xs font-medium cursor-pointer ${
               showDownload
-                ? 'app-border app-input app-text-secondary'
-                : 'border-transparent app-text-muted opacity-45 hover:opacity-75'
+                ? 'app-text-secondary hover:opacity-80'
+                : 'app-text-muted opacity-40 line-through hover:opacity-75'
             }`}
           >
             <span
@@ -714,10 +729,10 @@ export function ThroughputChart({
             data-testid="legend-toggle-upload"
             aria-pressed={showUpload}
             onClick={handleToggleUpload}
-            className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-lg border transition-all text-xs font-medium ${
+            className={`inline-flex items-center gap-2 py-0.5 transition-opacity text-xs font-medium cursor-pointer ${
               showUpload
-                ? 'app-border app-input app-text-secondary'
-                : 'border-transparent app-text-muted opacity-45 hover:opacity-75'
+                ? 'app-text-secondary hover:opacity-80'
+                : 'app-text-muted opacity-40 line-through hover:opacity-75'
             }`}
           >
             <span

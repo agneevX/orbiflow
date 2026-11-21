@@ -235,7 +235,7 @@ export function TopBar({
                   htmlFor="topbar-max-down"
                   className="block text-[11px] app-text-muted mb-1"
                 >
-                  Download (Mb/s)
+                  Download (Mbps)
                 </label>
                 <input
                   id="topbar-max-down"
@@ -250,7 +250,7 @@ export function TopBar({
               </div>
               <div>
                 <label htmlFor="topbar-max-up" className="block text-[11px] app-text-muted mb-1">
-                  Upload (Mb/s)
+                  Upload (Mbps)
                 </label>
                 <input
                   id="topbar-max-up"

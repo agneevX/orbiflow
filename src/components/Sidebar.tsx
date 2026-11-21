@@ -247,16 +247,16 @@ export function Sidebar({
                 aria-label="Bandwidth speed unit"
                 className="grid grid-cols-2 app-input border rounded-xl p-0.5"
               >
-                {(['Mb/s', 'MB/s'] as BandwidthUnit[]).map((u) => (
+                {(['Mbps', 'MB/s'] as BandwidthUnit[]).map((u) => (
                   <button
                     key={u}
                     type="button"
                     onClick={() => onChangeUnit(u)}
-                    className={`py-1 text-[11px] font-mono rounded-lg transition-colors ${
+                    className={`py-1 text-[10px] font-mono rounded-lg transition-colors ${
                       unit === u ? 'app-surface font-semibold' : 'app-text-muted'
                     }`}
                   >
-                    {u === 'Mb/s' ? 'Mb' : 'MB'}
+                    {u}
                   </button>
                 ))}
               </div>

@@ -1,6 +1,6 @@
 export type TransportProtocol = 'TCP' | 'UDP' | 'ICMP' | 'OTHER';
 
-export type BandwidthUnit = 'Mb/s' | 'MB/s';
+export type BandwidthUnit = 'Mbps' | 'MB/s';
 
 export type TimeFormat = '12h' | '24h';
 

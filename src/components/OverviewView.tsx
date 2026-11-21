@@ -97,18 +97,18 @@ export function OverviewView({
         data-testid="home-kpi-cards"
         className="grid grid-cols-1 sm:grid-cols-3 gap-4"
       >
-        <div className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-2">
+        <div className="app-surface border rounded-2xl px-4 py-2.5 sm:px-4 sm:py-3 flex flex-col justify-between gap-1">
           <div className="flex items-center justify-between gap-2 text-xs app-text-muted">
             <span className="font-medium">Download</span>
-            <ArrowDownRight className="h-4 w-4 shrink-0 app-text-muted" aria-hidden="true" />
+            <ArrowDownRight className="h-3.5 w-3.5 shrink-0 app-text-muted" aria-hidden="true" />
           </div>
           <div
             data-testid="kpi-download-live"
-            className="font-display text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums"
+            className="font-display text-lg sm:text-xl font-semibold tracking-tight leading-snug tabular-nums"
           >
             {formatBandwidth(snapshot.kpis.rxBps, unit)}
           </div>
-          <div className="flex items-center justify-between gap-2 text-xs app-text-muted tabular-nums">
+          <div className="flex items-center justify-between gap-2 text-[11px] app-text-muted tabular-nums">
             <span data-testid="kpi-download-peak">
               {timeWindow} peak:{' '}
               <span className="font-medium app-text-secondary">
@@ -118,18 +118,18 @@ export function OverviewView({
           </div>
         </div>
 
-        <div className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-2">
+        <div className="app-surface border rounded-2xl px-4 py-2.5 sm:px-4 sm:py-3 flex flex-col justify-between gap-1">
           <div className="flex items-center justify-between gap-2 text-xs app-text-muted">
             <span className="font-medium">Upload</span>
-            <ArrowUpRight className="h-4 w-4 shrink-0 app-text-muted" aria-hidden="true" />
+            <ArrowUpRight className="h-3.5 w-3.5 shrink-0 app-text-muted" aria-hidden="true" />
           </div>
           <div
             data-testid="kpi-upload-live"
-            className="font-display text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums"
+            className="font-display text-lg sm:text-xl font-semibold tracking-tight leading-snug tabular-nums"
           >
             {formatBandwidth(snapshot.kpis.txBps, unit)}
           </div>
-          <div className="flex items-center justify-between gap-2 text-xs app-text-muted tabular-nums">
+          <div className="flex items-center justify-between gap-2 text-[11px] app-text-muted tabular-nums">
             <span data-testid="kpi-upload-peak">
               {timeWindow} peak:{' '}
               <span className="font-medium app-text-secondary">
@@ -143,19 +143,19 @@ export function OverviewView({
           type="button"
           data-testid="kpi-clients-online-card"
           onClick={() => onOpenHosts?.()}
-          className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-2 text-left app-row-hover transition-colors"
+          className="app-surface border rounded-2xl px-4 py-2.5 sm:px-4 sm:py-3 flex flex-col justify-between gap-1 text-left app-row-hover transition-colors"
         >
           <div className="flex items-center justify-between gap-2 text-xs app-text-muted w-full">
             <span className="font-medium">Clients Online</span>
-            <MonitorSmartphone className="h-4 w-4 shrink-0 app-text-muted" aria-hidden="true" />
+            <MonitorSmartphone className="h-3.5 w-3.5 shrink-0 app-text-muted" aria-hidden="true" />
           </div>
           <div
             data-testid="kpi-clients-online-count"
-            className="font-display text-2xl sm:text-3xl font-semibold tracking-tight tabular-nums"
+            className="font-display text-lg sm:text-xl font-semibold tracking-tight leading-snug tabular-nums"
           >
             {onlineClientsCount}
           </div>
-          <div className="flex items-center justify-between gap-2 text-xs app-text-muted tabular-nums w-full min-w-0">
+          <div className="flex items-center justify-between gap-2 text-[11px] app-text-muted tabular-nums w-full min-w-0">
             <span className="truncate">
               <span className="font-medium app-text-secondary">{activeClientsCount}</span> active
             </span>

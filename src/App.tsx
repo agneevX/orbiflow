@@ -98,7 +98,7 @@ export default function App() {
 
   const [unit, setUnit] = useState<BandwidthUnit>(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('orbiflow:unit') : null;
-    return saved === 'MB/s' ? 'MB/s' : 'Mb/s';
+    return saved === 'MB/s' ? 'MB/s' : 'Mbps';
   });
 
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);

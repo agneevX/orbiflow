@@ -659,7 +659,7 @@ export function buildTopologyGraph(
     kind: 'internet',
     icon: 'internet',
     label: ispLabel,
-    sublabel: `${snapshot.serverConfig.ispMaxDownMbps} / ${snapshot.serverConfig.ispMaxUpMbps} Mb/s`,
+    sublabel: `${snapshot.serverConfig.ispMaxDownMbps} / ${snapshot.serverConfig.ispMaxUpMbps} Mbps`,
     parentId: null,
     column: 0,
     x: COL_X[0],

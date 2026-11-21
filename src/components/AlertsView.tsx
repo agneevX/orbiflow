@@ -44,11 +44,11 @@ const METRIC_META: Record<
     max?: number;
   }
 > = {
-  wan_rx_mbps: { unit: 'Mb/s', min: 1, max: 100000 },
-  wan_tx_mbps: { unit: 'Mb/s', min: 1, max: 100000 },
-  wan_combined_mbps: { unit: 'Mb/s', min: 1, max: 100000 },
-  host_rx_mbps: { unit: 'Mb/s per device', min: 1, max: 100000 },
-  host_tx_mbps: { unit: 'Mb/s per device', min: 1, max: 100000 },
+  wan_rx_mbps: { unit: 'Mbps', min: 1, max: 100000 },
+  wan_tx_mbps: { unit: 'Mbps', min: 1, max: 100000 },
+  wan_combined_mbps: { unit: 'Mbps', min: 1, max: 100000 },
+  host_rx_mbps: { unit: 'Mbps per device', min: 1, max: 100000 },
+  host_tx_mbps: { unit: 'Mbps per device', min: 1, max: 100000 },
   host_flows: { unit: 'connections / device', min: 1, max: 100000 },
   total_flows: { unit: 'total connections', min: 1, max: 100000 },
   new_device: {

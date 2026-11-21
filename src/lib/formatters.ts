@@ -36,10 +36,10 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Formats bandwidth rate in Mb/s or MB/s with 0 decimal places.
+ * Formats bandwidth rate in Mbps or MB/s with 0 decimal places.
  * Any throughput below 1 Mbit/s (1,000,000 bits/s) is formatted in Kbps with 0 decimal places.
  */
-export function formatBandwidth(bytesPerSec: number, unit: BandwidthUnit = 'Mb/s'): string {
+export function formatBandwidth(bytesPerSec: number, unit: BandwidthUnit = 'Mbps'): string {
   if (!Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return '0 Kbps';
   const bitsPerSec = bytesPerSec * 8;
   if (bitsPerSec < 1_000_000) {
@@ -51,11 +51,11 @@ export function formatBandwidth(bytesPerSec: number, unit: BandwidthUnit = 'Mb/s
     }
     return `${Math.round(bytesPerSec / 1_000_000)} MB/s`;
   }
-  return `${Math.round(bitsPerSec / 1_000_000)} Mb/s`;
+  return `${Math.round(bitsPerSec / 1_000_000)} Mbps`;
 }
 
-/** Backwards-compatible alias defaulting to Mb/s */
-export function formatBitrate(bytesPerSec: number, unit: BandwidthUnit = 'Mb/s'): string {
+/** Backwards-compatible alias defaulting to Mbps */
+export function formatBitrate(bytesPerSec: number, unit: BandwidthUnit = 'Mbps'): string {
   return formatBandwidth(bytesPerSec, unit);
 }
 
