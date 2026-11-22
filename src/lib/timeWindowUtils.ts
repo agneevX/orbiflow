@@ -54,30 +54,48 @@ export function buildWindowSeries(
 
   if (isLongWindow) {
     if (rollupHistory.length === 0) return [...history].sort((a, b) => a.timestamp - b.timestamp);
-    const merged = [...rollupHistory];
+    const merged = [...rollupHistory].sort((a, b) => a.timestamp - b.timestamp);
     const lastRollupTs = merged[merged.length - 1].timestamp;
-    // Append recent high-res points that fall in the current minute after the last completed 1m bucket
-    const recentTail = history.filter((p) => p.timestamp > lastRollupTs + 30_000);
+    // Include ALL recent high-res points newer than the last completed 1m rollup bucket,
+    // grouped per minute so the right edge always connects smoothly on every live tick
+    // without a 30s dead zone or false gap split.
+    const recentTail = history
+      .filter((p) => p.timestamp > lastRollupTs)
+      .sort((a, b) => a.timestamp - b.timestamp);
     if (recentTail.length > 0) {
-      const avgRx = Math.round(recentTail.reduce((s, p) => s + p.rxBps, 0) / recentTail.length);
-      const avgTx = Math.round(recentTail.reduce((s, p) => s + p.txBps, 0) / recentTail.length);
-      const avgFlows = Math.round(
-        recentTail.reduce((s, p) => s + p.activeFlows, 0) / recentTail.length
-      );
-      const loadSamples = recentTail.filter((p) => typeof p.routerLoadPct === 'number');
-      const avgLoad =
-        loadSamples.length > 0
-          ? Math.round(
-              loadSamples.reduce((s, p) => s + (p.routerLoadPct ?? 0), 0) / loadSamples.length
-            )
-          : undefined;
-      merged.push({
-        timestamp: recentTail[recentTail.length - 1].timestamp,
-        rxBps: avgRx,
-        txBps: avgTx,
-        activeFlows: avgFlows,
-        ...(avgLoad !== undefined ? { routerLoadPct: avgLoad } : {}),
-      });
+      const minuteBuckets = new Map<number, TrafficPoint[]>();
+      for (const p of recentTail) {
+        const key = Math.floor(p.timestamp / 60_000) * 60_000;
+        const list = minuteBuckets.get(key);
+        if (list) list.push(p);
+        else minuteBuckets.set(key, [p]);
+      }
+      const bucketKeys = Array.from(minuteBuckets.keys()).sort((a, b) => a - b);
+      for (let i = 0; i < bucketKeys.length; i++) {
+        const group = minuteBuckets.get(bucketKeys[i])!;
+        const avgRx = Math.round(group.reduce((s, p) => s + p.rxBps, 0) / group.length);
+        const avgTx = Math.round(group.reduce((s, p) => s + p.txBps, 0) / group.length);
+        const avgFlows = Math.round(group.reduce((s, p) => s + p.activeFlows, 0) / group.length);
+        const loadSamples = group.filter((p) => typeof p.routerLoadPct === 'number');
+        const avgLoad =
+          loadSamples.length > 0
+            ? Math.round(
+                loadSamples.reduce((s, p) => s + (p.routerLoadPct ?? 0), 0) / loadSamples.length
+              )
+            : undefined;
+        // Anchor the newest partial minute to its exact latest live sample timestamp
+        const ts =
+          i === bucketKeys.length - 1
+            ? group[group.length - 1].timestamp
+            : Math.max(lastRollupTs + 1000, bucketKeys[i]);
+        merged.push({
+          timestamp: ts,
+          rxBps: avgRx,
+          txBps: avgTx,
+          activeFlows: avgFlows,
+          ...(avgLoad !== undefined ? { routerLoadPct: avgLoad } : {}),
+        });
+      }
     }
     return merged.sort((a, b) => a.timestamp - b.timestamp);
   }

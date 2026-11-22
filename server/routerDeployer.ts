@@ -220,6 +220,87 @@ function execSshCommand(
   });
 }
 
+const STOP_EXISTING_AGENT_PY = [
+  'import os, signal, sys, time',
+  'pid_file, target = sys.argv[1], sys.argv[2]',
+  'skip = {os.getpid(), os.getppid()}',
+  'pids = set()',
+  'try:',
+  '    with open(pid_file, "r") as f:',
+  '        p = int(f.read().strip())',
+  '        if p > 1 and p not in skip:',
+  '            pids.add(p)',
+  'except Exception:',
+  '    pass',
+  'try:',
+  '    entries = os.listdir("/proc")',
+  'except OSError:',
+  '    entries = []',
+  'for entry in entries:',
+  '    if not entry.isdigit():',
+  '        continue',
+  '    pid = int(entry)',
+  '    if pid <= 1 or pid in skip:',
+  '        continue',
+  '    try:',
+  '        with open("/proc/%d/cmdline" % pid, "rb") as f:',
+  '            parts = [x.decode("utf-8", "ignore") for x in f.read().split(b"\\x00") if x]',
+  '    except OSError:',
+  '        continue',
+  '    if not parts:',
+  '        continue',
+    '    exe = os.path.basename(parts[0])',
+    '    if parts[1:2] != ["-c"] and ("python" in exe or exe == target) and any(target in a for a in parts):',
+    '        pids.add(pid)',
+  'for sig in (signal.SIGTERM, signal.SIGKILL):',
+  '    alive = []',
+  '    for pid in list(pids):',
+  '        try:',
+  '            os.kill(pid, sig)',
+  '            alive.append(pid)',
+  '        except OSError:',
+  '            pass',
+  '    if not alive:',
+  '        break',
+  '    deadline = time.time() + (1.5 if sig == signal.SIGTERM else 0.5)',
+  '    while time.time() < deadline:',
+  '        still = [p for p in alive if os.path.isdir("/proc/%d" % p)]',
+  '        if not still:',
+  '            pids.clear()',
+  '            break',
+  '        time.sleep(0.1)',
+  '    else:',
+  '        pids = set(p for p in alive if os.path.isdir("/proc/%d" % p))',
+  'try:',
+  '    os.remove(pid_file)',
+  'except OSError:',
+  '    pass',
+].join('\n');
+
+export function buildRouterRestartCommand(remotePath: string, pidFile = '/var/run/orbi-probe.pid'): string {
+  const lastSlash = remotePath.lastIndexOf('/');
+  const scriptBase = lastSlash >= 0 ? remotePath.slice(lastSlash + 1) : remotePath;
+  const escapedPy = STOP_EXISTING_AGENT_PY.replace(/'/g, "'\\''");
+
+  return [
+    'PY_BIN=""',
+    'if [ -x /opt/bin/python3 ]; then PY_BIN=/opt/bin/python3; elif command -v python3 >/dev/null 2>&1; then PY_BIN=$(command -v python3); fi',
+    'if [ -z "$PY_BIN" ]; then echo "ERR_NO_PYTHON3"; exit 127; fi',
+    'echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null || true',
+    `PID_FILE='${pidFile}'`,
+    'PID_DIR=$(dirname "$PID_FILE" 2>/dev/null || echo /var/run)',
+    'mkdir -p "$PID_DIR" 2>/dev/null || true',
+    'ERR_FILE=/tmp/orbi-probe-start.err',
+    'rm -f "$ERR_FILE"',
+    `"$PY_BIN" -c '${escapedPy}' "$PID_FILE" '${scriptBase}'`,
+    `"$PY_BIN" '${remotePath}' -d --pid-file "$PID_FILE" </dev/null >/dev/null 2>"$ERR_FILE"`,
+    'for i in 1 2 3; do [ -s "$PID_FILE" ] && break; sleep 1; done',
+    'sleep 1',
+    'NEW_PID=$(cat "$PID_FILE" 2>/dev/null | tr -cd "0-9")',
+    'if [ -n "$NEW_PID" ] && [ -d "/proc/$NEW_PID" ] && kill -0 "$NEW_PID" 2>/dev/null; then rm -f "$ERR_FILE"; echo "OK_PID=$NEW_PID PY=$PY_BIN"; else ERR_DETAIL=$(head -n 6 "$ERR_FILE" 2>/dev/null | tr "\\n" " "); rm -f "$ERR_FILE"; echo "ERR_NOT_RUNNING PY=$PY_BIN DETAIL=$ERR_DETAIL"; exit 1; fi',
+  ].join('; ');
+}
+
 export async function deployAndRestartRouterAgent(
   body: Partial<RouterDeployRequest>
 ): Promise<RouterDeployResult> {
@@ -247,7 +328,6 @@ export async function deployAndRestartRouterAgent(
   const scriptContent = generatePythonProbe(probeCfg);
   const lastSlash = remotePath.lastIndexOf('/');
   const parentDir = lastSlash > 0 ? remotePath.slice(0, lastSlash) : '/';
-  const scriptBase = remotePath.slice(lastSlash + 1);
   const tmpPath = `${remotePath}.tmp.${Date.now().toString(36)}`;
   const steps: string[] = [];
 
@@ -311,31 +391,17 @@ export async function deployAndRestartRouterAgent(
       };
     }
 
-    // Enable conntrack accounting, stop any running probe instances, and start fresh daemon
-    const restartCmd = [
-      'echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null || true',
-      'PID_FILE=/var/run/orbi-probe.pid',
-      'if [ -f "$PID_FILE" ]; then OLD_PID=$(cat "$PID_FILE" 2>/dev/null); [ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null || true; fi',
-      `for p in /proc/[0-9]*; do pid=\${p#/proc/}; cmd=$(tr '\\0' ' ' < "$p/cmdline" 2>/dev/null || true); case "$cmd" in *'${scriptBase}'*) kill "$pid" 2>/dev/null || true ;; esac; done`,
-      'sleep 1',
-      `for p in /proc/[0-9]*; do pid=\${p#/proc/}; cmd=$(tr '\\0' ' ' < "$p/cmdline" 2>/dev/null || true); case "$cmd" in *'${scriptBase}'*) kill -9 "$pid" 2>/dev/null || true ;; esac; done`,
-      'PY_BIN=""',
-      'if [ -x /opt/bin/python3 ]; then PY_BIN=/opt/bin/python3; elif command -v python3 >/dev/null 2>&1; then PY_BIN=$(command -v python3); fi',
-      'if [ -z "$PY_BIN" ]; then echo "ERR_NO_PYTHON3"; exit 127; fi',
-      `"$PY_BIN" '${remotePath}' -d --pid-file "$PID_FILE" </dev/null >/dev/null 2>&1`,
-      'sleep 1',
-      'NEW_PID=$(cat "$PID_FILE" 2>/dev/null || true)',
-      'if [ -n "$NEW_PID" ] && [ -d "/proc/$NEW_PID" ]; then echo "OK_PID=$NEW_PID PY=$PY_BIN"; else echo "ERR_NOT_RUNNING PY=$PY_BIN"; exit 1; fi',
-    ].join('; ');
+    // Enable conntrack accounting, stop any running probe instances safely, and start fresh daemon
+    const restartCmd = buildRouterRestartCommand(remotePath);
 
-    const restartRes = await execSshCommand(conn, restartCmd, undefined, 15_000);
+    const restartRes = await execSshCommand(conn, restartCmd, undefined, 20_000);
     if (restartRes.stdout.includes('ERR_NO_PYTHON3')) {
       throw new Error('python3 was not found on the router (/opt/bin/python3 or PATH). Install python3-light via opkg first.');
     }
     if (restartRes.code !== 0 || !restartRes.stdout.includes('OK_PID=')) {
-      throw new Error(
-        `Script updated, but agent failed to stay running: ${restartRes.stderr || restartRes.stdout || `exit code ${restartRes.code}`}`
-      );
+      const detailMatch = restartRes.stdout.match(/DETAIL=(.*)$/);
+      const detail = detailMatch?.[1]?.trim() || restartRes.stderr || restartRes.stdout || `exit code ${restartRes.code}`;
+      throw new Error(`Script updated, but agent failed to stay running: ${detail}`);
     }
 
     const pidMatch = restartRes.stdout.match(/OK_PID=(\d+)/);

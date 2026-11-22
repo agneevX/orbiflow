@@ -7,6 +7,7 @@ import type {
 } from '../src/types/telemetry';
 import { parseSatelliteSshOutput } from '../src/lib/topology';
 import { normalizeMac } from '../src/lib/deviceIdentity';
+import { extractWifiBand } from '../src/lib/formatters';
 
 /**
  * Strictly static, read-only BusyBox shell probe executed over SSH on ephemeral Orbi satellites.
@@ -58,7 +59,7 @@ const STATIC_SATELLITE_PROBE_CMD = [
   'done',
   'echo "===SWCONFIG==="',
   'if command -v swconfig >/dev/null 2>&1; then',
-  '  swconfig dev switch0 show 2>/dev/null | grep -E "^Port [0-9]+:|link:|RxGoodByte|RxByte|TxByte|TxGoodByte" || true',
+  '  swconfig dev switch0 show 2>/dev/null | grep -E "^Port [0-9]+:|^VLAN [0-9]+:|ports:|link:|RxGoodByte|RxByte|TxByte|TxGoodByte" || true',
   'fi',
   'echo "===SWITCH_FDB==="',
   'if command -v swconfig >/dev/null 2>&1; then',
@@ -291,12 +292,18 @@ export function convertProbeToTelemetry(
   const gatewayBridgeIface =
     gatewayBridgePortNum !== undefined ? bridgeIfaceByPortNum.get(gatewayBridgePortNum) : undefined;
 
-  // Also check if switch FDB (ARL) identifies which physical switch port holds the gateway MAC
+  // Exclude internal CPU / RGMII tagged switch ports (port 0 or any port tagged 't' in VLAN config)
+  const cpuPortNums = new Set<number>(parsed.cpuPortNums || []);
   const physicalSwitchPorts = parsed.switchPorts.filter(
-    (sp) => !(sp.portNum === 0 && parsed.switchPorts.length > 1)
+    (sp) =>
+      !sp.isCpuPort &&
+      !cpuPortNums.has(sp.portNum) &&
+      !(sp.portNum === 0 && parsed.switchPorts.length > 1)
   );
   const gatewaySwitchPortNum = gatewayMac
-    ? parsed.switchFdb.find((e) => e.mac === gatewayMac && e.portNum !== 0)?.portNum
+    ? parsed.switchFdb.find(
+        (e) => e.mac === gatewayMac && e.portNum !== 0 && !cpuPortNums.has(e.portNum)
+      )?.portNum
     : undefined;
 
   // Identify wireless STA (Managed mode) backhaul interfaces & their upstream BSSIDs
@@ -575,15 +582,48 @@ export function convertProbeToTelemetry(
     return false;
   };
 
-  // 4a. Wi-Fi clients associated directly to AP-mode (Master) radios on this satellite
+  // 4a. Confirmed wired LAN clients from physical switch FDB (ARL) — strictly excluding CPU & uplink ports
+  const confirmedWiredMacs = new Set<string>();
+  if (parsed.switchFdb.length > 0) {
+    for (const entry of parsed.switchFdb) {
+      if (entry.portNum === 0 || cpuPortNums.has(entry.portNum)) continue;
+      if (backhaulType === 'ethernet' && entry.portNum === uplinkSwitchPortNum) continue;
+      const mac = normalizeMac(entry.mac);
+      if (isExcludedInfrastructureMac(mac)) continue;
+      const matchingPort = ports.find((p) => p.id === `port${entry.portNum}`);
+      if (!matchingPort) continue;
+      confirmedWiredMacs.add(mac);
+      clientsByMac.set(mac, {
+        mac,
+        ip: ipByMac.get(mac),
+        connectionType: 'ethernet',
+        portOrRadio: matchingPort.label || `LAN ${entry.portNum}`,
+        linkSpeedMbps: matchingPort.speedMbps || 0,
+        rxBytes: 0,
+        txBytes: 0,
+        rxBps: 0,
+        txBps: 0,
+      });
+    }
+  }
+
+  // 4b. Wi-Fi clients associated directly to AP-mode (Master) radios on this satellite
   for (const sta of parsed.wifiStations) {
     const mac = normalizeMac(sta.mac);
     if (isExcludedInfrastructureMac(mac)) continue;
+    // Never let a stale/WDS Wi-Fi table entry override a confirmed physical switch-port wired device
+    if (confirmedWiredMacs.has(mac)) continue;
 
     // Skip STA/Managed backhaul radio (its "station" entry is the upstream main router AP!)
     const wifiMeta = wifiInfoByIface.get(sta.iface);
     if (wifiMeta?.mode === 'managed') continue;
+    if (wifiMeta?.isBackhaul) continue;
     if (backhaulType === 'wifi' && sta.iface === backhaulIface) continue;
+
+    const wifiTxMbps = sta.txRateMbps || 0;
+    const wifiRxMbps = sta.rxRateMbps || 0;
+    // Skip inactive/ghost station entries with zero link rates and zero counters
+    if (wifiTxMbps <= 0 && wifiRxMbps <= 0 && sta.rxBytes <= 0 && sta.txBytes <= 0) continue;
 
     const prevC = prev?.clientBytes.get(mac);
     const rxBps = computeCounterDeltaBps(sta.rxBytes, prevC?.rx, dtSec);
@@ -592,21 +632,15 @@ export function convertProbeToTelemetry(
       nextClientBytes.set(mac, { rx: sta.rxBytes, tx: sta.txBytes });
     }
 
-    const bandTag =
-      wifiMeta?.freqGhz !== undefined
-        ? wifiMeta.freqGhz >= 4.9
-          ? `5 GHz (${sta.iface})`
-          : `2.4 GHz (${sta.iface})`
-        : sta.iface;
-
-    const wifiTxMbps = sta.txRateMbps || 0;
-    const wifiRxMbps = sta.rxRateMbps || 0;
+    const wifiBand = extractWifiBand(sta.iface, wifiMeta?.freqGhz, sta.channel);
+    const bandTag = wifiBand || sta.iface;
 
     clientsByMac.set(mac, {
       mac,
       ip: ipByMac.get(mac),
       connectionType: 'wifi',
       portOrRadio: bandTag,
+      wifiBand,
       linkSpeedMbps: Math.max(wifiTxMbps, wifiRxMbps),
       wifiRxMbps,
       wifiTxMbps,
@@ -618,33 +652,9 @@ export function convertProbeToTelemetry(
     });
   }
 
-  // 4b. Wired LAN clients physically connected to downstream Ethernet ports on this satellite
-  if (parsed.switchFdb.length > 0) {
-    // Best source: per-physical-port switch FDB (ARL), strictly excluding CPU port 0 and uplink backhaul port
-    for (const entry of parsed.switchFdb) {
-      if (entry.portNum === 0) continue;
-      if (backhaulType === 'ethernet' && entry.portNum === uplinkSwitchPortNum) continue;
-      const mac = normalizeMac(entry.mac);
-      if (isExcludedInfrastructureMac(mac) || clientsByMac.has(mac)) continue;
-      const matchingPort = ports.find((p) => p.id === `port${entry.portNum}`);
-      clientsByMac.set(mac, {
-        mac,
-        ip: ipByMac.get(mac),
-        connectionType: 'ethernet',
-        portOrRadio: matchingPort?.label || `LAN ${entry.portNum}`,
-        linkSpeedMbps: 0,
-        rxBytes: 0,
-        txBytes: 0,
-        rxBps: 0,
-        txBps: 0,
-      });
-    }
-  } else if (parsed.bridgeMacs.length > 0 && parsed.bridgeIfaces.length > 0) {
-    // Bridge FDB with exact brif port->iface mapping:
-    // STRICTLY exclude the backhaul bridge port AND all wireless bridge ports!
-    // - On Wi-Fi backhaul (backhaul on ath2): eth0 contains ONLY devices plugged into the satellite's LAN ports!
-    // - On Ethernet backhaul (backhaul on eth0): eth0 is excluded so main-AP devices NEVER leak onto the satellite;
-    //   any separate wired LAN bridge ports (eth1, lan2, ...) are accurately included!
+  // 4c. Wired LAN clients from bridge FDB when switchFdb wasn't available:
+  // STRICTLY exclude the backhaul bridge port AND all wireless bridge ports!
+  if (parsed.switchFdb.length === 0 && parsed.bridgeMacs.length > 0 && parsed.bridgeIfaces.length > 0) {
     for (const bm of parsed.bridgeMacs) {
       const mac = normalizeMac(bm.mac);
       if (isExcludedInfrastructureMac(mac) || clientsByMac.has(mac)) continue;
@@ -654,11 +664,9 @@ export function convertProbeToTelemetry(
       const brIfaceName = bridgeIfaceByPortNum.get(bm.portNum);
       if (!brIfaceName) continue;
       const brIfaceObj = ifaceByName.get(brIfaceName);
-      // Wireless clients come strictly from wifiStations (never misclassify wireless bridge MACs as Ethernet!)
       if (brIfaceObj?.isWireless || /^(ath|wlan|wl|ra|wifi)/i.test(brIfaceName)) {
         continue;
       }
-      // If backhaul is Ethernet and this is the backhaul interface, never attribute its MACs to the satellite
       if (backhaulType === 'ethernet' && brIfaceName === backhaulIface) {
         continue;
       }
@@ -670,7 +678,7 @@ export function convertProbeToTelemetry(
         ip: ipByMac.get(mac),
         connectionType: 'ethernet',
         portOrRadio: matchingPort?.label || brIfaceName,
-        linkSpeedMbps: 0,
+        linkSpeedMbps: matchingPort?.speedMbps || 0,
         rxBytes: 0,
         txBytes: 0,
         rxBps: 0,

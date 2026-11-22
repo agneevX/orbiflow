@@ -9,7 +9,7 @@ import type {
   SatelliteTelemetry,
   WanDetails,
 } from '../types/telemetry';
-import { compareIpv4, hasTangibleTraffic } from './formatters';
+import { compareIpv4, extractWifiBand, hasTangibleTraffic } from './formatters';
 import { normalizeMac } from './deviceIdentity';
 
 export type UtilizationHealth = 'optimal' | 'moderate' | 'high' | 'saturated';
@@ -151,7 +151,9 @@ export interface ParsedSatelliteProbe {
     duplex: 'full' | 'half' | 'unknown';
     rxBytes: number;
     txBytes: number;
+    isCpuPort?: boolean;
   }>;
+  cpuPortNums?: number[];
   switchFdb: Array<{
     portNum: number;
     mac: string;
@@ -164,6 +166,8 @@ export interface ParsedSatelliteProbe {
   wifiIfaces: Array<{
     iface: string;
     mode: 'master' | 'managed' | 'unknown';
+    essid?: string;
+    isBackhaul?: boolean;
     bssid?: string;
     associated: boolean;
     bitRateMbps: number;
@@ -172,6 +176,7 @@ export interface ParsedSatelliteProbe {
   wifiStations: Array<{
     iface: string;
     mac: string;
+    channel?: number;
     txRateMbps: number;
     rxRateMbps?: number;
     signalDbm?: number;
@@ -392,6 +397,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
     bridgeIfaces: [],
     interfaces: [],
     switchPorts: [],
+    cpuPortNums: [],
     switchFdb: [],
     bridgeMacs: [],
     wifiIfaces: [],
@@ -401,6 +407,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
 
   let section = '';
   const satelliteInfoLines: string[] = [];
+  const taggedCpuPorts = new Set<number>();
   let currentSwitchPort: {
     portNum: number;
     linkUp: boolean;
@@ -408,10 +415,13 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
     duplex: 'full' | 'half' | 'unknown';
     rxBytes: number;
     txBytes: number;
+    isCpuPort?: boolean;
   } | null = null;
   let currentWifiInfo: {
     iface: string;
     mode: 'master' | 'managed' | 'unknown';
+    essid?: string;
+    isBackhaul?: boolean;
     bssid?: string;
     associated: boolean;
     bitRateMbps: number;
@@ -554,6 +564,23 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
     }
 
     if (section === 'SWCONFIG') {
+      // Detect VLAN tagged CPU ports (e.g. "ports: 0t 1 2 3 4" or "ports: 0t 5 6t")
+      if (/^VLAN\s+\d+:/i.test(line)) {
+        flushSwitchPort();
+        continue;
+      }
+      const vlanPortsMatch = line.match(/^ports:\s*(.+)$/i);
+      if (vlanPortsMatch) {
+        flushSwitchPort();
+        for (const tok of vlanPortsMatch[1].trim().split(/\s+/)) {
+          const tagged = tok.match(/^(\d+)t$/i);
+          if (tagged) {
+            taggedCpuPorts.add(parseInt(tagged[1], 10));
+          }
+        }
+        continue;
+      }
+
       // Example: "Port 1:" followed by "link: port:1 link:up speed:1000baseT full-duplex" and MIB counters
       const portHeader = line.match(/^Port\s+(\d+):/i);
       if (portHeader) {
@@ -683,6 +710,15 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
       }
 
       if (currentWifiInfo) {
+        const essidMatch = line.match(/ESSID:"([^"]*)"/i);
+        if (essidMatch) {
+          currentWifiInfo.essid = essidMatch[1];
+          if (/orbi_hidden|backhaul|bh_/i.test(essidMatch[1])) {
+            currentWifiInfo.isBackhaul = true;
+          }
+        } else if (/ESSID:off\/any/i.test(line)) {
+          currentWifiInfo.isBackhaul = true;
+        }
         const modeMatch = line.match(/\bMode:(Master|Managed|AP|STA)\b/i) || line.match(/^type\s+(AP|managed)\b/i);
         if (modeMatch) {
           const m = modeMatch[1].toLowerCase();
@@ -765,15 +801,17 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
       // Orbi QCA wlanconfig athX list sta format:
       // ADDR AID CHAN TXRATE RXRATE RSSI ...
       const qca = line.match(
-        /^([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s+\d+\s+\d+\s+(\d+)M\s+(\d+)M\s+(\d+)/i
+        /^([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s+\d+\s+(\d+)\s+(\d+)M\s+(\d+)M\s+(-?\d+)/i
       );
       if (qca) {
-        const txRate = parseInt(qca[2], 10) || 0;
-        const rxRate = parseInt(qca[3], 10) || 0;
-        const rssi = parseInt(qca[4], 10) || 0;
+        const chan = parseInt(qca[2], 10) || undefined;
+        const txRate = parseInt(qca[3], 10) || 0;
+        const rxRate = parseInt(qca[4], 10) || 0;
+        const rssi = parseInt(qca[5], 10) || 0;
         result.wifiStations.push({
           iface: currentWifiIface,
           mac: normalizeMac(qca[1]),
+          channel: chan,
           txRateMbps: txRate,
           rxRateMbps: rxRate,
           signalDbm: rssi > 0 ? -95 + rssi : rssi,
@@ -787,6 +825,14 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
   flushSwitchPort();
   flushWifiInfo();
   flushIwStation();
+  if (taggedCpuPorts.size > 0) {
+    result.cpuPortNums = Array.from(taggedCpuPorts);
+    for (const sp of result.switchPorts) {
+      if (taggedCpuPorts.has(sp.portNum)) {
+        sp.isCpuPort = true;
+      }
+    }
+  }
   if (satelliteInfoLines.length > 0) {
     result.satelliteInfo = parseSatelliteInfoWifi(satelliteInfoLines.join('\n'));
   }
@@ -888,10 +934,10 @@ export interface BuildTopologyOptions {
   searchQuery?: string;
 }
 
-const COL_X = [95, 385, 735, 1105];
-const LEAF_SPACING_Y = 124;
-const TOP_PAD = 64;
-const BOTTOM_PAD = 84;
+const ROW_Y = [76, 232, 408, 584];
+const LEAF_SPACING_X = 166;
+const LEFT_PAD = 110;
+const RIGHT_PAD = 110;
 
 export function buildTopologyGraph(
   snapshot: DashboardSnapshot,
@@ -917,15 +963,17 @@ export function buildTopologyGraph(
     hostByIp.set(h.ip, h);
   }
 
-  // Router direct link metadata by MAC / IP (checked first so main-AP Wi-Fi clients aren't stolen by satellites)
+  // Router direct link metadata by MAC / IP
   const routerClientByMac = new Map<string, SatelliteClientLink>();
   const routerClientByIp = new Map<string, SatelliteClientLink>();
   const routerWifiMacs = new Set<string>();
+  const routerWiredMacs = new Set<string>();
   for (const rc of topology.routerClients || []) {
     const m = normalizeMac(rc.mac);
     if (m) {
       routerClientByMac.set(m, rc);
       if (rc.connectionType === 'wifi') routerWifiMacs.add(m);
+      else if (rc.connectionType === 'ethernet') routerWiredMacs.add(m);
     }
     if (rc.ip) routerClientByIp.set(rc.ip, rc);
   }
@@ -944,8 +992,11 @@ export function buildTopologyGraph(
     const entries: Array<{ host: HostSummary; link?: SatelliteClientLink }> = [];
     for (const cLink of sat.clients || []) {
       const m = normalizeMac(cLink.mac);
-      // Never attribute a client that is directly associated to the main router's Wi-Fi radio to a satellite's L2 bridge
+      // Never attribute a client that is directly attached to the main router's wired switch port or Wi-Fi radio to a satellite's L2 bridge
       if (m && routerWifiMacs.has(m) && cLink.connectionType !== 'wifi') {
+        continue;
+      }
+      if (m && routerWiredMacs.has(m) && cLink.connectionType !== 'ethernet') {
         continue;
       }
       const matched =
@@ -1001,8 +1052,8 @@ export function buildTopologyGraph(
   const internetId = 'internet';
   const routerId = 'router';
 
-  // Determine Column 2 items (Satellites + Direct Router Clients)
-  type Col2Item =
+  // Determine Row 2 items (Satellites + Direct Router Clients)
+  type Row2Item =
     | {
         kind: 'satellite';
         sat: SatelliteTelemetry;
@@ -1014,7 +1065,7 @@ export function buildTopologyGraph(
         entry: { host: HostSummary; link?: SatelliteClientLink };
       };
 
-  const col2Items: Col2Item[] = [];
+  const row2Items: Row2Item[] = [];
   for (const sat of satellites) {
     const allChildren = satHostsMap.get(sat.id) || [];
     const visibleChildren = allChildren.filter(filterHostEntry);
@@ -1023,7 +1074,7 @@ export function buildTopologyGraph(
       matchesSearch(sat.name, sat.host, undefined, sat.model) ||
       visibleChildren.length > 0
     ) {
-      col2Items.push({
+      row2Items.push({
         kind: 'satellite',
         sat,
         children: visibleChildren,
@@ -1034,47 +1085,61 @@ export function buildTopologyGraph(
 
   for (const entry of routerDirectClients) {
     if (filterHostEntry(entry)) {
-      col2Items.push({ kind: 'client', entry });
+      row2Items.push({ kind: 'client', entry });
     }
   }
 
   const routerCollapsed = collapsedIds.has(routerId);
-  const visibleCol2 = routerCollapsed ? [] : col2Items;
+  const visibleRow2 = routerCollapsed ? [] : row2Items;
 
-  // Layout Y positions bottom-up from leaves so branches never collide
-  let cursorY = TOP_PAD;
-  const col2Placed: Array<{
-    item: Col2Item;
-    y: number;
-    childYs: number[];
+  // Layout X positions left-to-right across leaves so vertical branches never collide
+  let cursorX = LEFT_PAD;
+  const row2Placed: Array<{
+    item: Row2Item;
+    x: number;
+    childXs: number[];
   }> = [];
 
-  for (const item of visibleCol2) {
+  for (const item of visibleRow2) {
     if (item.kind === 'satellite') {
       const satCollapsed = collapsedIds.has(`sat:${item.sat.id}`);
       if (!satCollapsed && item.children.length > 0) {
-        const childYs: number[] = [];
+        const childXs: number[] = [];
         for (let i = 0; i < item.children.length; i++) {
-          childYs.push(cursorY);
-          cursorY += LEAF_SPACING_Y;
+          childXs.push(cursorX);
+          cursorX += LEAF_SPACING_X;
         }
-        const midY = (childYs[0] + childYs[childYs.length - 1]) / 2;
-        col2Placed.push({ item, y: midY, childYs });
+        const midX = Math.round((childXs[0] + childXs[childXs.length - 1]) / 2);
+        row2Placed.push({ item, x: midX, childXs });
       } else {
-        col2Placed.push({ item, y: cursorY, childYs: [] });
-        cursorY += LEAF_SPACING_Y;
+        row2Placed.push({ item, x: cursorX, childXs: [] });
+        cursorX += LEAF_SPACING_X;
       }
     } else {
-      col2Placed.push({ item, y: cursorY, childYs: [] });
-      cursorY += LEAF_SPACING_Y;
+      row2Placed.push({ item, x: cursorX, childXs: [] });
+      cursorX += LEAF_SPACING_X;
     }
   }
 
-  const totalHeight = Math.max(460, cursorY - LEAF_SPACING_Y + TOP_PAD + BOTTOM_PAD);
-  const rootY =
-    col2Placed.length > 0
-      ? Math.round((col2Placed[0].y + col2Placed[col2Placed.length - 1].y) / 2)
-      : Math.round(totalHeight / 2);
+  const rawContentWidth =
+    row2Placed.length > 0 ? cursorX - LEAF_SPACING_X + LEFT_PAD + RIGHT_PAD : 820;
+  const totalWidth = Math.max(820, rawContentWidth);
+  // Center the tree horizontally if narrower than minimum viewport width
+  const shiftX =
+    row2Placed.length > 0 && rawContentWidth < totalWidth
+      ? Math.round((totalWidth - rawContentWidth) / 2)
+      : 0;
+  for (const placed of row2Placed) {
+    placed.x += shiftX;
+    for (let i = 0; i < placed.childXs.length; i++) {
+      placed.childXs[i] += shiftX;
+    }
+  }
+
+  const rootX =
+    row2Placed.length > 0
+      ? Math.round((row2Placed[0].x + row2Placed[row2Placed.length - 1].x) / 2)
+      : Math.round(totalWidth / 2);
 
   const wanDetails = topology.wan;
   const wanSpeed = wanDetails?.linkSpeedMbps || topology.routerWanSpeedMbps || 1000;
@@ -1094,8 +1159,8 @@ export function buildTopologyGraph(
     mac: wanDetails?.mac,
     parentId: null,
     column: 0,
-    x: COL_X[0],
-    y: rootY,
+    x: rootX,
+    y: ROW_Y[0],
     rxBps: snapshot.kpis.rxBps,
     txBps: snapshot.kpis.txBps,
     active: wanActive,
@@ -1117,8 +1182,8 @@ export function buildTopologyGraph(
     sublabel: `WAN ${formatLinkSpeed(wanSpeed, 'ethernet', snapshot.probe.connected)}`,
     parentId: internetId,
     column: 1,
-    x: COL_X[1],
-    y: rootY,
+    x: rootX,
+    y: ROW_Y[1],
     rxBps: snapshot.kpis.rxBps,
     txBps: snapshot.kpis.txBps,
     active: wanActive,
@@ -1127,7 +1192,7 @@ export function buildTopologyGraph(
     linkSpeedMbps: wanSpeed,
     linkSpeedLabel: formatLinkSpeed(wanSpeed, 'ethernet', snapshot.probe.connected),
     portLabel: snapshot.probe.iface || 'eth0',
-    childCount: col2Items.length,
+    childCount: row2Items.length,
     collapsed: routerCollapsed,
     ports: topology.routerPorts,
   });
@@ -1136,10 +1201,10 @@ export function buildTopologyGraph(
     id: `${internetId}->${routerId}`,
     sourceId: internetId,
     targetId: routerId,
-    x1: COL_X[0] + 28,
-    y1: rootY,
-    x2: COL_X[1] - 52,
-    y2: rootY,
+    x1: rootX,
+    y1: ROW_Y[0] + 54,
+    x2: rootX,
+    y2: ROW_Y[1] - 28,
     rxBps: snapshot.kpis.rxBps,
     txBps: snapshot.kpis.txBps,
     active: wanActive,
@@ -1149,25 +1214,52 @@ export function buildTopologyGraph(
     portLabel: snapshot.probe.iface || 'eth0',
   });
 
-  if (col2Items.length > 0) {
+  const routerJunctionY = ROW_Y[1] + 76;
+  if (row2Items.length > 0) {
     junctions.push({
       parentId: routerId,
-      x: COL_X[1] + 68,
-      y: rootY,
+      x: rootX,
+      y: routerJunctionY,
       collapsed: routerCollapsed,
-      hiddenCount: col2Items.length,
+      hiddenCount: row2Items.length,
     });
   }
 
-  let hasColumn3 = false;
+  let hasRow3 = false;
 
-  for (const placed of col2Placed) {
+  const resolveClientDisplay = (host: HostSummary, link?: SatelliteClientLink) => {
+    const connType: 'ethernet' | 'wifi' =
+      link?.connectionType === 'wifi' || host.connectionType === 'wifi'
+        ? 'wifi'
+        : 'ethernet';
+    const wifiRxMbps = connType === 'wifi' ? (link?.wifiRxMbps ?? host.wifiRxMbps) : undefined;
+    const wifiTxMbps = connType === 'wifi' ? (link?.wifiTxMbps ?? host.wifiTxMbps) : undefined;
+    const wifiSignalDbm = connType === 'wifi' ? (link?.signalDbm ?? host.wifiSignalDbm) : undefined;
+    const wifiBand =
+      connType === 'wifi'
+        ? (link?.wifiBand || host.wifiBand || extractWifiBand(link?.portOrRadio || host.linkRadioOrPort))
+        : undefined;
+    const speedMbps =
+      connType === 'wifi'
+        ? Math.max(wifiRxMbps || 0, wifiTxMbps || 0, link?.linkSpeedMbps || 0)
+        : 0;
+    const speedLabel =
+      connType === 'wifi'
+        ? formatWifiRatesLabel(wifiRxMbps, wifiTxMbps, link?.linkSpeedMbps)
+        : 'Ethernet';
+    const portLabel =
+      connType === 'wifi'
+        ? wifiBand || 'Wi-Fi'
+        : link?.portOrRadio || 'Ethernet';
+    return { connType, wifiRxMbps, wifiTxMbps, wifiSignalDbm, wifiBand, speedMbps, speedLabel, portLabel };
+  };
+
+  for (const placed of row2Placed) {
     if (placed.item.kind === 'satellite') {
       const sat = placed.item.sat;
       const satNodeId = `sat:${sat.id}`;
       const satCollapsed = collapsedIds.has(satNodeId);
 
-      // Compute satellite throughput: prefer measured SSH backhaul counters, else sum of its client flows
       const childRxSum = placed.item.children.reduce((acc, c) => acc + c.host.rxBps, 0);
       const childTxSum = placed.item.children.reduce((acc, c) => acc + c.host.txBps, 0);
       const satRx = sat.rxBps > 0 ? sat.rxBps : childRxSum;
@@ -1188,8 +1280,8 @@ export function buildTopologyGraph(
         ip: sat.host,
         parentId: routerId,
         column: 2,
-        x: COL_X[2],
-        y: placed.y,
+        x: placed.x,
+        y: ROW_Y[2],
         rxBps: satRx,
         txBps: satTx,
         active: satActive,
@@ -1208,10 +1300,10 @@ export function buildTopologyGraph(
         id: `${routerId}->${satNodeId}`,
         sourceId: routerId,
         targetId: satNodeId,
-        x1: COL_X[1] + 68,
-        y1: rootY,
-        x2: COL_X[2] - 28,
-        y2: placed.y,
+        x1: rootX,
+        y1: routerJunctionY,
+        x2: placed.x,
+        y2: ROW_Y[2] - 32,
         rxBps: satRx,
         txBps: satTx,
         active: satActive,
@@ -1221,11 +1313,12 @@ export function buildTopologyGraph(
         portLabel: sat.backhaulIface,
       });
 
+      const satJunctionY = ROW_Y[2] + 84;
       if (placed.item.children.length > 0) {
         junctions.push({
           parentId: satNodeId,
-          x: COL_X[2] + 48,
-          y: placed.y,
+          x: placed.x,
+          y: satJunctionY,
           collapsed: satCollapsed,
           hiddenCount: placed.item.children.length,
         });
@@ -1233,25 +1326,10 @@ export function buildTopologyGraph(
 
       if (!satCollapsed) {
         placed.item.children.forEach((child, idx) => {
-          hasColumn3 = true;
-          const cy = placed.childYs[idx];
+          hasRow3 = true;
+          const cx = placed.childXs[idx];
           const clientNodeId = `client:${child.host.ip}`;
-          const connType = child.link?.connectionType;
-          const wifiRxMbps = connType === 'wifi' ? child.link?.wifiRxMbps : undefined;
-          const wifiTxMbps = connType === 'wifi' ? child.link?.wifiTxMbps : undefined;
-          const wifiSignalDbm = connType === 'wifi' ? child.link?.signalDbm : undefined;
-          // Per-client Ethernet port speed cannot be reliably ascertained on L2 bridges;
-          // show Wi-Fi RX/TX PHY rates for wireless clients and plain "Ethernet" for wired clients.
-          const speedMbps =
-            connType === 'wifi'
-              ? Math.max(wifiRxMbps || 0, wifiTxMbps || 0, child.link?.linkSpeedMbps || 0)
-              : 0;
-          const speedLabel =
-            connType === 'wifi'
-              ? formatWifiRatesLabel(wifiRxMbps, wifiTxMbps, child.link?.linkSpeedMbps)
-              : connType === 'ethernet'
-                ? 'Ethernet'
-                : '';
+          const info = resolveClientDisplay(child.host, child.link);
           const clientRx =
             child.host.rxBps > 0 ? child.host.rxBps : child.link?.rxBps || 0;
           const clientTx =
@@ -1263,29 +1341,27 @@ export function buildTopologyGraph(
             kind: 'client',
             icon: inferTopologyDeviceIcon(child.host),
             label: child.host.hostname,
-            sublabel: child.link?.portOrRadio
-              ? speedLabel
-                ? `${child.link.portOrRadio} · ${speedLabel}`
-                : child.link.portOrRadio
-              : speedLabel || undefined,
+            sublabel: info.connType === 'wifi'
+              ? (info.wifiBand ? `${info.wifiBand} · ${info.speedLabel}` : info.speedLabel)
+              : 'Ethernet',
             ip: child.host.ip,
             mac: child.host.mac,
             vendor: child.host.vendor,
             parentId: satNodeId,
             column: 3,
-            x: COL_X[3],
-            y: cy,
+            x: cx,
+            y: ROW_Y[3],
             rxBps: clientRx,
             txBps: clientTx,
             active: clientActive,
             connected: true,
-            connectionType: connType,
-            linkSpeedMbps: speedMbps,
-            linkSpeedLabel: speedLabel || undefined,
-            wifiRxMbps,
-            wifiTxMbps,
-            wifiSignalDbm,
-            portLabel: child.link?.portOrRadio,
+            connectionType: info.connType,
+            linkSpeedMbps: info.speedMbps,
+            linkSpeedLabel: info.speedLabel,
+            wifiRxMbps: info.wifiRxMbps,
+            wifiTxMbps: info.wifiTxMbps,
+            wifiSignalDbm: info.wifiSignalDbm,
+            portLabel: info.portLabel,
             childCount: 0,
             collapsed: false,
             host: child.host,
@@ -1295,37 +1371,24 @@ export function buildTopologyGraph(
             id: `${satNodeId}->${clientNodeId}`,
             sourceId: satNodeId,
             targetId: clientNodeId,
-            x1: COL_X[2] + 48,
-            y1: placed.y,
-            x2: COL_X[3] - 28,
-            y2: cy,
+            x1: placed.x,
+            y1: satJunctionY,
+            x2: cx,
+            y2: ROW_Y[3] - 28,
             rxBps: clientRx,
             txBps: clientTx,
             active: clientActive,
-            connectionType: connType,
-            linkSpeedMbps: speedMbps,
-            linkSpeedLabel: speedLabel,
-            portLabel: child.link?.portOrRadio,
+            connectionType: info.connType,
+            linkSpeedMbps: info.speedMbps,
+            linkSpeedLabel: info.speedLabel,
+            portLabel: info.portLabel,
           });
         });
       }
     } else {
       const { host, link } = placed.item.entry;
       const clientNodeId = `client:${host.ip}`;
-      const connType = link?.connectionType;
-      const wifiRxMbps = connType === 'wifi' ? link?.wifiRxMbps : undefined;
-      const wifiTxMbps = connType === 'wifi' ? link?.wifiTxMbps : undefined;
-      const wifiSignalDbm = connType === 'wifi' ? link?.signalDbm : undefined;
-      const speedMbps =
-        connType === 'wifi'
-          ? Math.max(wifiRxMbps || 0, wifiTxMbps || 0, link?.linkSpeedMbps || 0)
-          : 0;
-      const speedLabel =
-        connType === 'wifi'
-          ? formatWifiRatesLabel(wifiRxMbps, wifiTxMbps, link?.linkSpeedMbps)
-          : connType === 'ethernet'
-            ? 'Ethernet'
-            : '';
+      const info = resolveClientDisplay(host, link);
       const clientActive = hasTangibleTraffic(host.rxBps, host.txBps);
 
       nodes.push({
@@ -1333,29 +1396,27 @@ export function buildTopologyGraph(
         kind: 'client',
         icon: inferTopologyDeviceIcon(host),
         label: host.hostname,
-        sublabel: link?.portOrRadio
-          ? speedLabel
-            ? `${link.portOrRadio} · ${speedLabel}`
-            : link.portOrRadio
-          : speedLabel || undefined,
+        sublabel: info.connType === 'wifi'
+          ? (info.wifiBand ? `${info.wifiBand} · ${info.speedLabel}` : info.speedLabel)
+          : 'Ethernet',
         ip: host.ip,
         mac: host.mac,
         vendor: host.vendor,
         parentId: routerId,
         column: 2,
-        x: COL_X[2],
-        y: placed.y,
+        x: placed.x,
+        y: ROW_Y[2],
         rxBps: host.rxBps,
         txBps: host.txBps,
         active: clientActive,
         connected: true,
-        connectionType: connType,
-        linkSpeedMbps: speedMbps,
-        linkSpeedLabel: speedLabel || undefined,
-        wifiRxMbps,
-        wifiTxMbps,
-        wifiSignalDbm,
-        portLabel: link?.portOrRadio,
+        connectionType: info.connType,
+        linkSpeedMbps: info.speedMbps,
+        linkSpeedLabel: info.speedLabel,
+        wifiRxMbps: info.wifiRxMbps,
+        wifiTxMbps: info.wifiTxMbps,
+        wifiSignalDbm: info.wifiSignalDbm,
+        portLabel: info.portLabel,
         childCount: 0,
         collapsed: false,
         host,
@@ -1365,27 +1426,27 @@ export function buildTopologyGraph(
         id: `${routerId}->${clientNodeId}`,
         sourceId: routerId,
         targetId: clientNodeId,
-        x1: COL_X[1] + 68,
-        y1: rootY,
-        x2: COL_X[2] - 28,
-        y2: placed.y,
+        x1: rootX,
+        y1: routerJunctionY,
+        x2: placed.x,
+        y2: ROW_Y[2] - 28,
         rxBps: host.rxBps,
         txBps: host.txBps,
         active: clientActive,
-        connectionType: connType,
-        linkSpeedMbps: speedMbps,
-        linkSpeedLabel: speedLabel,
-        portLabel: link?.portOrRadio,
+        connectionType: info.connType,
+        linkSpeedMbps: info.speedMbps,
+        linkSpeedLabel: info.speedLabel,
+        portLabel: info.portLabel,
       });
     }
   }
 
-  const width = hasColumn3 ? 1250 : 900;
+  const totalHeight = hasRow3 ? 710 : 540;
 
   return {
     nodes,
     edges,
-    width,
+    width: totalWidth,
     height: totalHeight,
     junctions,
   };

@@ -54,6 +54,19 @@ export function formatBandwidth(bytesPerSec: number, unit: BandwidthUnit = 'Mbps
   return `${Math.round(bitsPerSec / 1_000_000)} Mbps`;
 }
 
+/**
+ * Always formats throughput in Mbps (never Kbps or bps), used on Home DL/UL cards.
+ * Uses 1 decimal place for small non-zero speeds (< 10 Mbps) so sub-1 Mbps traffic stays readable,
+ * and integer Mbps at >= 10 Mbps (and "0 Mbps" at zero).
+ */
+export function formatMbpsAlways(bytesPerSec: number): string {
+  if (!Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return '0 Mbps';
+  const mbps = (bytesPerSec * 8) / 1_000_000;
+  if (mbps < 0.05) return '0 Mbps';
+  if (mbps < 10) return `${mbps.toFixed(1)} Mbps`;
+  return `${Math.round(mbps)} Mbps`;
+}
+
 /** Backwards-compatible alias defaulting to Mbps */
 export function formatBitrate(bytesPerSec: number, unit: BandwidthUnit = 'Mbps'): string {
   return formatBandwidth(bytesPerSec, unit);
@@ -294,13 +307,18 @@ const RDNS_CATEGORY_RULES: RemoteMatchRule[] = [
   { patterns: ['bunnycdn', 'b-cdn.net'], service: 'Bunny CDN', category: 'CDN & Web' },
 
   // Apple & Devices / Ecosystem Services
-  { patterns: ['apple.com', 'icloud.com', 'aaplimg.com', 'mzstatic.com', 'cdn-apple'], service: 'Apple', category: 'Apple & Devices' },
-  { patterns: ['1e100.net', 'google.com', 'googleapis', 'gstatic'], service: 'Google', category: 'Apple & Devices' },
-  { patterns: ['microsoft', 'msedge', 'office.com', 'office365', 'live.com', 'msn.com'], service: 'Microsoft', category: 'Apple & Devices' },
+  { patterns: ['apple.com', 'icloud.com', 'aaplimg.com', 'mzstatic.com', 'cdn-apple', 'apple-dns', 'me.com'], service: 'Apple', category: 'Apple & Devices' },
+  { patterns: ['1e100.net', 'google.com', 'googleapis', 'gstatic', 'gvt1.com', 'gvt2.com', 'ggpht.com'], service: 'Google', category: 'Apple & Devices' },
+  { patterns: ['microsoft', 'msedge', 'office.com', 'office365', 'live.com', 'msn.com', 'bing.com', 'windowsupdate', 'sfx.ms'], service: 'Microsoft', category: 'Apple & Devices' },
+  { patterns: ['amazon.com', 'amazontrust', 'media-amazon', 'images-amazon', 'primevideo', 'aiv-cdn'], service: 'Amazon', category: 'Streaming' },
+  { patterns: ['openai.com', 'chatgpt.com', 'oaiusercontent'], service: 'OpenAI', category: 'Cloud & Hosting' },
+  { patterns: ['anthropic.com', 'claude.ai'], service: 'Anthropic', category: 'Cloud & Hosting' },
   { patterns: ['ecobee'], service: 'Ecobee IoT', category: 'Apple & Devices' },
   { patterns: ['ring.com'], service: 'Ring IoT', category: 'Apple & Devices' },
   { patterns: ['sonos'], service: 'Sonos', category: 'Apple & Devices' },
-  { patterns: ['samsung'], service: 'Samsung', category: 'Apple & Devices' },
+  { patterns: ['samsung', 'samsungcloud'], service: 'Samsung', category: 'Apple & Devices' },
+  { patterns: ['nest.com', 'dropcam'], service: 'Google Nest', category: 'Apple & Devices' },
+  { patterns: ['hue.philips', 'meethue'], service: 'Philips Hue', category: 'Apple & Devices' },
 ];
 
 const KNOWN_REMOTE_PREFIXES: Array<{
@@ -318,29 +336,59 @@ const KNOWN_REMOTE_PREFIXES: Array<{
   { prefix: '142.250.', label: '1e100.net', service: 'YouTube / Google', category: 'Streaming' },
   { prefix: '142.251.', label: '1e100.net', service: 'Google', category: 'Apple & Devices' },
   { prefix: '172.217.', label: '1e100.net', service: 'Google', category: 'Apple & Devices' },
+  { prefix: '172.253.', label: '1e100.net', service: 'Google', category: 'Apple & Devices' },
   { prefix: '216.58.', label: '1e100.net', service: 'Google', category: 'Apple & Devices' },
+  { prefix: '74.125.', label: '1e100.net', service: 'Google', category: 'Apple & Devices' },
+  { prefix: '34.', label: 'googleusercontent.com', service: 'Google Cloud', category: 'Cloud & Hosting' },
+  { prefix: '35.190.', label: 'googleusercontent.com', service: 'Google Cloud', category: 'Cloud & Hosting' },
+  { prefix: '35.201.', label: 'googleusercontent.com', service: 'Google Cloud', category: 'Cloud & Hosting' },
   { prefix: '17.253.', label: 'edge.icloud.com', service: 'Apple', category: 'Apple & Devices' },
   { prefix: '17.57.', label: 'push.apple.com', service: 'Apple', category: 'Apple & Devices' },
   { prefix: '17.', label: 'apple.com', service: 'Apple', category: 'Apple & Devices' },
   { prefix: '52.94.', label: 's3.amazonaws.com', service: 'AWS S3', category: 'File & Downloads' },
+  { prefix: '52.', label: 'amazonaws.com', service: 'Amazon', category: 'Cloud & Hosting' },
   { prefix: '54.239.', label: 'cloudfront.net', service: 'AWS CloudFront', category: 'CDN & Web' },
+  { prefix: '54.', label: 'amazonaws.com', service: 'Amazon', category: 'Cloud & Hosting' },
+  { prefix: '18.', label: 'amazonaws.com', service: 'Amazon', category: 'Cloud & Hosting' },
+  { prefix: '3.', label: 'amazonaws.com', service: 'Amazon', category: 'Cloud & Hosting' },
+  { prefix: '13.224.', label: 'cloudfront.net', service: 'AWS CloudFront', category: 'CDN & Web' },
+  { prefix: '13.32.', label: 'cloudfront.net', service: 'AWS CloudFront', category: 'CDN & Web' },
   { prefix: '104.16.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '104.17.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
   { prefix: '104.18.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '104.19.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '104.20.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '104.21.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '104.26.', label: 'cloudflare.com', service: 'Cloudflare', category: 'CDN & Web' },
   { prefix: '172.64.', label: 'cloudflare-edge.net', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '172.65.', label: 'cloudflare-edge.net', service: 'Cloudflare', category: 'CDN & Web' },
+  { prefix: '172.66.', label: 'cloudflare-edge.net', service: 'Cloudflare', category: 'CDN & Web' },
   { prefix: '172.67.', label: 'cloudflare-edge.net', service: 'Cloudflare', category: 'CDN & Web' },
   { prefix: '140.82.', label: 'github.com', service: 'GitHub', category: 'Cloud & Hosting' },
   { prefix: '185.199.', label: 'objects.githubusercontent.com', service: 'GitHub', category: 'Cloud & Hosting' },
   { prefix: '151.101.', label: 'fastly.net', service: 'Fastly CDN', category: 'CDN & Web' },
+  { prefix: '199.232.', label: 'fastly.net', service: 'Fastly CDN', category: 'CDN & Web' },
   { prefix: '23.246.', label: 'nflxvideo.net', service: 'Netflix', category: 'Streaming' },
   { prefix: '45.57.', label: 'nflxso.net', service: 'Netflix', category: 'Streaming' },
+  { prefix: '198.38.', label: 'nflxvideo.net', service: 'Netflix', category: 'Streaming' },
+  { prefix: '198.45.', label: 'nflxvideo.net', service: 'Netflix', category: 'Streaming' },
+  { prefix: '23.32.', label: 'akamaiedge.net', service: 'Akamai CDN', category: 'CDN & Web' },
+  { prefix: '23.64.', label: 'akamaiedge.net', service: 'Akamai CDN', category: 'CDN & Web' },
+  { prefix: '104.64.', label: 'akamaiedge.net', service: 'Akamai CDN', category: 'CDN & Web' },
+  { prefix: '184.24.', label: 'akamaiedge.net', service: 'Akamai CDN', category: 'CDN & Web' },
   { prefix: '162.159.', label: 'discord.gg', service: 'Discord', category: 'Social & Messaging' },
   { prefix: '31.13.', label: 'fbcdn.net', service: 'Meta / Facebook', category: 'Social & Messaging' },
   { prefix: '157.240.', label: 'fbcdn.net', service: 'Meta / Facebook', category: 'Social & Messaging' },
+  { prefix: '69.171.', label: 'fbcdn.net', service: 'Meta / Facebook', category: 'Social & Messaging' },
   { prefix: '155.133.', label: 'valve.net', service: 'Valve / Steam', category: 'Gaming' },
   { prefix: '162.254.', label: 'valve.net', service: 'Valve / Steam', category: 'Gaming' },
   { prefix: '13.107.', label: 'msedge.net', service: 'Microsoft', category: 'Apple & Devices' },
   { prefix: '20.190.', label: 'login.microsoftonline.com', service: 'Microsoft', category: 'Apple & Devices' },
+  { prefix: '40.', label: 'microsoft.com', service: 'Microsoft', category: 'Apple & Devices' },
+  { prefix: '52.109.', label: 'office.com', service: 'Microsoft', category: 'Apple & Devices' },
   { prefix: '170.114.', label: 'zoom.us', service: 'Zoom', category: 'Communication' },
+  { prefix: '35.186.224.', label: 'spotify.com', service: 'Spotify', category: 'Streaming' },
+  { prefix: '104.199.', label: 'spotify.com', service: 'Spotify', category: 'Streaming' },
 ];
 
 const MULTI_PART_TLDS = new Set([
@@ -491,21 +539,143 @@ const APP_SHORT_LABELS: Record<string, string> = {
   'VoIP / RTP': 'VoIP',
 };
 
+const GENERIC_NON_SERVICES = new Set([
+  'external ip',
+  'local network',
+  'other',
+  'https',
+  'http',
+  'https / tls',
+  'quic',
+  'quic / http3',
+  'tls',
+  'dns',
+  'dns over tcp',
+  'dns over tls',
+  'dot',
+  'tcp',
+  'udp',
+  'icmp',
+  'icmp ping',
+  'ntp',
+  'ssh',
+  'smb',
+  'web',
+  'web proxy / alt',
+  'voip',
+  'voip / rtp',
+  'webrtc',
+  'stun / webrtc',
+]);
+
+const GENERIC_ISP_DOMAIN_HINTS = [
+  'in-addr.arpa',
+  'ip6.arpa',
+  'home.arpa',
+  'lan',
+  'local',
+  'comcast.net',
+  'verizon.net',
+  'att.net',
+  'rr.com',
+  'spectrum.com',
+  'cox.net',
+  'charter.com',
+  'fios.verizon.net',
+  'sbcglobal.net',
+];
+
+function prettifyDomainBrand(domain: string): string | null {
+  const clean = domain.trim().toLowerCase().replace(/\.+$/, '');
+  if (!clean || !clean.includes('.')) return null;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(clean)) return null;
+  if (GENERIC_ISP_DOMAIN_HINTS.some((hint) => clean === hint || clean.endsWith(`.${hint}`))) {
+    return null;
+  }
+  const root = extractRootDomain(clean);
+  const base = root.split('.')[0];
+  if (!base || base.length < 2 || /^\d+$/.test(base) || /^(?:ip|host|node|srv|ns|gw|cpe|dyn|pool|static|rev|ptr)-?\d*/i.test(base)) {
+    return null;
+  }
+  return base.charAt(0).toUpperCase() + base.slice(1);
+}
+
 /**
- * Produces a concise service/protocol label suitable for compact wrapped lists in the Devices table.
+ * Extracts a real human-readable service/brand name (e.g. "Apple", "Netflix", "Google", "Amazon")
+ * for the Devices "Top Services" column. Returns null for generic transport protocols (HTTPS, QUIC,
+ * DNS, TCP/UDP ports) or unresolved IPs so they never clutter Top Services.
  */
-export function condenseServiceLabel(service: string, app: string): string {
+export function extractNamedService(service?: string, dstHost?: string): string | null {
   const trimmedService = (service || '').trim();
+  const lower = trimmedService.toLowerCase();
+
   if (
     trimmedService &&
-    trimmedService !== 'External IP' &&
-    trimmedService !== 'Local Network'
+    !GENERIC_NON_SERVICES.has(lower) &&
+    !/^(?:tcp|udp|icmp)\s*\/\s*\d+$/i.test(trimmedService) &&
+    !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(trimmedService)
   ) {
     if (SERVICE_SHORT_LABELS[trimmedService]) {
       return SERVICE_SHORT_LABELS[trimmedService];
     }
+    if (trimmedService.includes('.')) {
+      const pretty = prettifyDomainBrand(trimmedService);
+      if (pretty) return pretty;
+      return null;
+    }
     return trimmedService.length > 18 ? `${trimmedService.slice(0, 17)}…` : trimmedService;
   }
+
+  if (dstHost) {
+    const hostLower = dstHost.trim().toLowerCase();
+    for (const rule of RDNS_CATEGORY_RULES) {
+      if (rule.patterns.some((p) => hostLower.includes(p))) {
+        return SERVICE_SHORT_LABELS[rule.service] || rule.service;
+      }
+    }
+    const pretty = prettifyDomainBrand(hostLower);
+    if (pretty) return pretty;
+  }
+
+  return null;
+}
+
+/**
+ * Normalizes a radio name, frequency (GHz), or Wi-Fi channel into a clean band label.
+ */
+export function extractWifiBand(
+  portOrRadio?: string,
+  freqGhz?: number,
+  channel?: number
+): '2.4 GHz' | '5 GHz' | '6 GHz' | undefined {
+  if (typeof freqGhz === 'number' && Number.isFinite(freqGhz) && freqGhz > 0) {
+    if (freqGhz >= 5.9) return '6 GHz';
+    if (freqGhz >= 4.9) return '5 GHz';
+    if (freqGhz >= 2.3) return '2.4 GHz';
+  }
+  if (typeof channel === 'number' && Number.isFinite(channel) && channel > 0) {
+    if (channel <= 14) return '2.4 GHz';
+    if (channel <= 177) return '5 GHz';
+    return '6 GHz';
+  }
+  const raw = (portOrRadio || '').toLowerCase();
+  if (!raw) return undefined;
+  if (raw.includes('6g') || raw.includes('6 ghz') || raw.includes('6.0')) return '6 GHz';
+  if (raw.includes('2.4') || raw.includes('2g') || raw.includes('24g') || raw === 'ath0' || raw === 'wifi0' || raw === 'wl0' || raw === 'wlan0') {
+    return '2.4 GHz';
+  }
+  if (raw.includes('5g') || raw.includes('5 ghz') || raw === 'ath1' || raw === 'ath01' || raw === 'ath2' || raw === 'wifi1' || raw === 'wl1' || raw === 'wlan1') {
+    return '5 GHz';
+  }
+  return undefined;
+}
+
+/**
+ * Produces a concise service/protocol label suitable for compact wrapped lists in the Devices table.
+ */
+export function condenseServiceLabel(service: string, app: string): string {
+  const named = extractNamedService(service);
+  if (named) return named;
 
   const trimmedApp = (app || '').trim();
   if (APP_SHORT_LABELS[trimmedApp]) {

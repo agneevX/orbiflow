@@ -50,8 +50,8 @@ interface Particle {
   edgeIdx: number;
   t: number;
   speed: number;
-  direction: 1 | -1; // 1 = download (left->right), -1 = upload (right->left)
-  offsetY: number;
+  direction: 1 | -1; // 1 = download (top->bottom), -1 = upload (bottom->top)
+  offsetX: number;
   radius: number;
   alpha: number;
   fixedWired?: boolean;
@@ -68,21 +68,21 @@ function cubicBezierPoint(
   y2: number,
   t: number
 ): { x: number; y: number } {
-  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
   const u = 1 - t;
   const tt = t * t;
   const uu = u * u;
   const uuu = uu * u;
   const ttt = tt * t;
 
-  const x = uuu * x1 + 3 * uu * t * mx + 3 * u * tt * mx + ttt * x2;
-  const y = uuu * y1 + 3 * uu * t * y1 + 3 * u * tt * y2 + ttt * y2;
+  const x = uuu * x1 + 3 * uu * t * x1 + 3 * u * tt * x2 + ttt * x2;
+  const y = uuu * y1 + 3 * uu * t * my + 3 * u * tt * my + ttt * y2;
   return { x, y };
 }
 
 function buildEdgePath(e: TopologyEdge): string {
-  const mx = (e.x1 + e.x2) / 2;
-  return `M ${e.x1} ${e.y1} C ${mx} ${e.y1}, ${mx} ${e.y2}, ${e.x2} ${e.y2}`;
+  const my = (e.y1 + e.y2) / 2;
+  return `M ${e.x1} ${e.y1} C ${e.x1} ${my}, ${e.x2} ${my}, ${e.x2} ${e.y2}`;
 }
 
 function HardwareGlyph({
@@ -529,7 +529,7 @@ export function TrafficMapView({
               t: i / fixedCount,
               speed: 0.0026,
               direction: 1,
-              offsetY: 0,
+              offsetX: 0,
               radius: 1.5,
               alpha: 0.72,
               fixedWired: true,
@@ -554,7 +554,7 @@ export function TrafficMapView({
             t: (i / rxCount + (seed % 17) * 0.004) % 1,
             speed: 0.0022 + rxScore * 0.0042 + ((seed % 11) * 0.00018),
             direction: 1,
-            offsetY: (((seed % 200) / 100) - 1) * spread,
+            offsetX: (((seed % 200) / 100) - 1) * spread,
             radius: 1.15 + ((seed % 5) * 0.25),
             alpha: 0.45 + ((seed % 55) / 100),
           });
@@ -566,7 +566,7 @@ export function TrafficMapView({
             t: (i / txCount + (seed % 19) * 0.004) % 1,
             speed: 0.0018 + txScore * 0.0036 + ((seed % 9) * 0.00016),
             direction: -1,
-            offsetY: (((seed % 200) / 100) - 1) * (spread * 0.85),
+            offsetX: (((seed % 200) / 100) - 1) * (spread * 0.85),
             radius: 1.1 + ((seed % 4) * 0.24),
             alpha: 0.4 + ((seed % 50) / 100),
           });
@@ -610,14 +610,14 @@ export function TrafficMapView({
       const dark = isDarkRef.current;
       const shouldMove = animateRef.current && !prefersReduced;
 
-      // Soft luminous ribbon glow under active splines and wired Ethernet links
+      // Soft luminous ribbon glow under active vertical splines and wired Ethernet links
       for (const e of edges) {
         const wiredClient = isWiredClientEdge(e);
         if (!e.active && !wiredClient) continue;
-        const mx = (e.x1 + e.x2) / 2;
+        const my = (e.y1 + e.y2) / 2;
         ctx.beginPath();
         ctx.moveTo(e.x1, e.y1);
-        ctx.bezierCurveTo(mx, e.y1, mx, e.y2, e.x2, e.y2);
+        ctx.bezierCurveTo(e.x1, my, e.x2, my, e.x2, e.y2);
         if (wiredClient) {
           ctx.strokeStyle = dark ? 'rgba(56, 189, 248, 0.10)' : 'rgba(14, 165, 233, 0.11)';
           ctx.lineWidth = 6;
@@ -629,7 +629,7 @@ export function TrafficMapView({
         ctx.stroke();
       }
 
-      // Draw UniFi-style shimmering flow particles (and fixed steady particles on wired clients)
+      // Draw shimmering flow particles (and fixed steady particles on wired clients)
       for (const p of particles) {
         const edge = edges[p.edgeIdx];
         if (!edge) continue;
@@ -639,12 +639,12 @@ export function TrafficMapView({
           if (p.t < 0) p.t += 1;
         }
         const pt = cubicBezierPoint(edge.x1, edge.y1, edge.x2, edge.y2, p.t);
-        // Taper ribbon slightly near node endpoints for crisp entry/exit
+        // Taper ribbon slightly near node endpoints for crisp vertical entry/exit
         const taper = Math.sin(p.t * Math.PI);
-        const py = pt.y + p.offsetY * (0.35 + 0.65 * taper);
+        const px = pt.x + p.offsetX * (0.35 + 0.65 * taper);
 
         ctx.beginPath();
-        ctx.arc(pt.x, py, p.radius, 0, Math.PI * 2);
+        ctx.arc(px, pt.y, p.radius, 0, Math.PI * 2);
         if (p.fixedWired) {
           ctx.fillStyle = dark
             ? `rgba(56, 189, 248, ${p.alpha})`
@@ -892,16 +892,16 @@ export function TrafficMapView({
             className="absolute inset-0 pointer-events-none overflow-visible"
             aria-hidden="true"
           >
-            {/* Stem connectors from parent hardware icon to its blue collapse junction */}
+            {/* Vertical stem connectors from parent hardware card down to its blue collapse junction */}
             {graph.junctions.map((j) => {
               const parent = graph.nodes.find((n) => n.id === j.parentId);
               if (!parent) return null;
-              const startX = parent.x + (parent.kind === 'router' ? 44 : 22);
+              const startY = parent.y + (parent.kind === 'router' ? 54 : 60);
               return (
                 <line
                   key={`stem-${j.parentId}`}
-                  x1={startX}
-                  y1={j.y}
+                  x1={j.x}
+                  y1={startY}
                   x2={j.x}
                   y2={j.y}
                   stroke={
@@ -943,30 +943,29 @@ export function TrafficMapView({
 
                   {showPortSpeeds && edge.linkSpeedLabel && (() => {
                     const isClientEdge = edge.targetId.startsWith('client:');
-                    // Keep client edge badges concise: "Wi-Fi" for wireless, "Ethernet" for wired
                     const displayLabel = isClientEdge
                       ? edge.connectionType === 'wifi'
-                        ? 'Wi-Fi'
-                        : edge.connectionType === 'ethernet'
-                          ? 'Ethernet'
-                          : edge.linkSpeedLabel
+                        ? edge.portLabel && edge.portLabel !== 'Wi-Fi'
+                          ? edge.portLabel
+                          : 'Wi-Fi'
+                        : 'Ethernet'
                       : edge.linkSpeedLabel;
-                    const labelWidth = Math.max(38, displayLabel.length * 6.4 + 12);
+                    const labelWidth = Math.max(42, displayLabel.length * 6.4 + 12);
                     return (
-                      <g transform={`translate(${mid.x}, ${mid.y - 12})`}>
+                      <g transform={`translate(${mid.x}, ${mid.y})`}>
                         <rect
                           x={-labelWidth / 2}
-                          y={-11}
+                          y={-8}
                           width={labelWidth}
                           height={16}
                           rx={5}
-                          fill={theme.isDark ? 'rgba(15, 23, 42, 0.85)' : 'rgba(255, 255, 255, 0.90)'}
-                          stroke={theme.isDark ? 'rgba(148, 163, 184, 0.22)' : 'rgba(148, 163, 184, 0.28)'}
+                          fill={theme.isDark ? 'rgba(15, 23, 42, 0.90)' : 'rgba(255, 255, 255, 0.94)'}
+                          stroke={theme.isDark ? 'rgba(148, 163, 184, 0.24)' : 'rgba(148, 163, 184, 0.30)'}
                           strokeWidth="0.75"
                         />
                         <text
                           textAnchor="middle"
-                          y={0}
+                          y={3.5}
                           className="font-mono"
                           fontSize="10"
                           fontWeight={edge.active ? '600' : '500'}

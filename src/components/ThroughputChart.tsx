@@ -525,7 +525,7 @@ export function ThroughputChart({
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(padLeft, PAD_TOP, plotW, plotH);
+    ctx.rect(padLeft, PAD_TOP - 2, plotW + 2, plotH + 4);
     ctx.clip();
 
     const drawSeries = (
@@ -770,7 +770,7 @@ export function ThroughputChart({
           <div
             data-testid="chart-hover-tooltip"
             style={{ left: `${tooltipLeftPct}%` }}
-            className="pointer-events-none absolute top-2 -translate-x-1/2 px-2.5 py-1.5 rounded-xl border app-border app-surface/95 shadow-lg text-[11px] tabular-nums flex items-center gap-2.5 whitespace-nowrap z-10"
+            className="pointer-events-none absolute top-2 -translate-x-1/2 px-3 py-1.5 rounded-xl border app-floating-bar text-[11px] tabular-nums flex items-center gap-2.5 whitespace-nowrap z-10"
           >
             <span className="app-text-muted">
               {formatTimestamp(

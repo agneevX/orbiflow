@@ -975,4 +975,66 @@ test('TrafficMonitorEngine excludes public WAN IPs and WAN-interface ARP entries
   assert.equal(updatedCfg.featureVisibility.trafficMap, true);
 });
 
+test('buildRouterRestartCommand stops previous agent without self-killing shell or emitting /proc stderr errors', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { buildRouterRestartCommand } = await import('../../server/routerDeployer');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbiflow-restart-'));
+  const scriptPath = path.join(tmpDir, 'orbi_probe_test.py');
+  const pidPath = path.join(tmpDir, 'orbi-probe-test.pid');
+  let spawnedPid = 0;
+
+  try {
+    // Minimal daemon script matching orbi_probe.py -d --pid-file behavior
+    fs.writeFileSync(
+      scriptPath,
+      [
+        'import os, signal, sys, time',
+        'pid_file = sys.argv[sys.argv.index("--pid-file") + 1]',
+        'if os.fork() > 0: os._exit(0)',
+        'os.setsid()',
+        'if os.fork() > 0: os._exit(0)',
+        'devnull = os.open(os.devnull, os.O_RDWR)',
+        'for fd in (0, 1, 2): os.dup2(devnull, fd)',
+        'if devnull > 2: os.close(devnull)',
+        'with open(pid_file, "w") as f: f.write(f"{os.getpid()}\\n")',
+        'running = True',
+        'def stop(_s, _f):',
+        '    global running',
+        '    running = False',
+        'signal.signal(signal.SIGTERM, stop)',
+        'while running: time.sleep(0.2)',
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+
+    const cmd = buildRouterRestartCommand(scriptPath, pidPath);
+    // First start
+    const out1 = execFileSync('/bin/sh', ['-c', cmd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const m1 = out1.match(/OK_PID=(\d+)/);
+    assert.ok(m1, `Expected OK_PID in first start output: ${out1}`);
+    const pid1 = Number(m1[1]);
+    spawnedPid = pid1;
+
+    // Second start (replaces running agent cleanly without self-kill)
+    const out2 = execFileSync('/bin/sh', ['-c', cmd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const m2 = out2.match(/OK_PID=(\d+)/);
+    assert.ok(m2, `Expected OK_PID in restart output: ${out2}`);
+    const pid2 = Number(m2[1]);
+    spawnedPid = pid2;
+    assert.notEqual(pid2, pid1);
+    assert.equal(fs.existsSync(`/proc/${pid1}`), false);
+    assert.equal(fs.existsSync(`/proc/${pid2}`), true);
+  } finally {
+    if (spawnedPid > 1) {
+      try {
+        process.kill(spawnedPid, 'SIGKILL');
+      } catch {
+        // already exited
+      }
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
 

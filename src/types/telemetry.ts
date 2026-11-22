@@ -90,11 +90,14 @@ export interface EthernetPortMetrics {
   txBps: number;
 }
 
+export type WifiBand = '2.4 GHz' | '5 GHz' | '6 GHz';
+
 export interface SatelliteClientLink {
   mac: string;
   ip?: string;
   connectionType: 'ethernet' | 'wifi';
   portOrRadio: string;
+  wifiBand?: WifiBand;
   linkSpeedMbps: number;
   wifiRxMbps?: number;
   wifiTxMbps?: number;
@@ -197,6 +200,7 @@ export interface ProbeSnapshot {
   timestamp: number;
   source: 'live' | 'simulator';
   iface: InterfaceCounters;
+  lanIfaces?: InterfaceCounters[];
   flows: RawConntrackFlow[];
   arp: ArpEntry[];
   system?: SystemMetrics;
@@ -274,6 +278,8 @@ export interface HostSummary {
   lastSeen: number;
   connectionType?: 'ethernet' | 'wifi';
   linkRadioOrPort?: string;
+  wifiBand?: WifiBand;
+  apName?: string;
   wifiRxMbps?: number;
   wifiTxMbps?: number;
   wifiSignalDbm?: number;
@@ -460,6 +466,16 @@ export interface ServerStats {
   randomizedMacCount: number;
 }
 
+export interface LanTrafficSummary {
+  iface: string;
+  rxBps: number;
+  txBps: number;
+  totalBps: number;
+  rxBytes: number;
+  txBytes: number;
+  activeInterfaces?: string[];
+}
+
 export interface DashboardSnapshot {
   probe: ProbeStatus;
   kpis: {
@@ -473,6 +489,7 @@ export interface DashboardSnapshot {
     peakRxBps: number;
     peakTxBps: number;
   };
+  lanSummary?: LanTrafficSummary;
   history: TrafficPoint[];
   rollupHistory: TrafficPoint[];
   flows: EnrichedFlow[];
