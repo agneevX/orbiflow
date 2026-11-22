@@ -319,6 +319,10 @@ export class OrbiProbeSimulator {
   private flows: SimFlowState[];
   private ifaceRxBytes = 84_291_400_120;
   private ifaceTxBytes = 19_482_110_440;
+  private eth1RxBytes = 42_180_500_000;
+  private eth1TxBytes = 118_940_200_000;
+  private br0RxBytes = 48_900_000_000;
+  private br0TxBytes = 126_400_000_000;
   private satLivingRxBytes = 38_420_000_000;
   private satLivingTxBytes = 4_110_000_000;
   private satOfficeRxBytes = 29_150_000_000;
@@ -380,6 +384,13 @@ export class OrbiProbeSimulator {
 
     this.ifaceRxBytes += tickRx;
     this.ifaceTxBytes += tickTx;
+    // eth1 carries routed WAN traffic (direction swapped) + local intra-LAN traffic
+    const lanIntraRx = Math.round(4_150_000 * wave * stepSeconds);
+    const lanIntraTx = Math.round(2_350_000 * wave * stepSeconds);
+    this.eth1RxBytes += tickTx + lanIntraRx;
+    this.eth1TxBytes += tickRx + lanIntraTx;
+    this.br0RxBytes += tickTx + lanIntraRx + Math.round(320_000 * wave * stepSeconds);
+    this.br0TxBytes += tickRx + lanIntraTx + Math.round(240_000 * wave * stepSeconds);
 
     const getRate = (ip: string) =>
       hostTickRates.get(ip) || { rxBps: 0, txBps: 0, rxBytes: 0, txBytes: 0 };
@@ -576,6 +587,7 @@ export class OrbiProbeSimulator {
             ip: '192.168.1.67',
             connectionType: 'wifi',
             portOrRadio: '5 GHz',
+            wifiBand: '5 GHz',
             linkSpeedMbps: 866,
             wifiRxMbps: 780,
             wifiTxMbps: 866,
@@ -590,6 +602,7 @@ export class OrbiProbeSimulator {
             ip: '192.168.1.84',
             connectionType: 'wifi',
             portOrRadio: '2.4 GHz',
+            wifiBand: '2.4 GHz',
             linkSpeedMbps: 144,
             wifiRxMbps: 130,
             wifiTxMbps: 144,
@@ -672,6 +685,7 @@ export class OrbiProbeSimulator {
             ip: '192.168.1.24',
             connectionType: 'wifi',
             portOrRadio: '5 GHz',
+            wifiBand: '5 GHz',
             linkSpeedMbps: 1200,
             wifiRxMbps: 1080,
             wifiTxMbps: 1200,
@@ -686,6 +700,7 @@ export class OrbiProbeSimulator {
             ip: '192.168.1.91',
             connectionType: 'wifi',
             portOrRadio: '5 GHz',
+            wifiBand: '5 GHz',
             linkSpeedMbps: 866,
             wifiRxMbps: 780,
             wifiTxMbps: 866,
@@ -712,6 +727,22 @@ export class OrbiProbeSimulator {
         rxErrors: 0,
         txErrors: 0,
       },
+      lanIfaces: [
+        {
+          iface: 'eth1',
+          rxBytes: this.eth1RxBytes,
+          txBytes: this.eth1TxBytes,
+          rxErrors: 0,
+          txErrors: 0,
+        },
+        {
+          iface: 'br0',
+          rxBytes: this.br0RxBytes,
+          txBytes: this.br0TxBytes,
+          rxErrors: 0,
+          txErrors: 0,
+        },
+      ],
       arp: LAN_DEVICES,
       flows: rawFlows,
       ports: routerPorts,

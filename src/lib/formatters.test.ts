@@ -8,10 +8,13 @@ import {
   computeWindowPeaks,
   condenseServiceLabel,
   describeRemoteIp,
+  extractNamedService,
+  extractWifiBand,
   formatAppForProtocolFilter,
   formatBandwidth,
   formatBytes,
   formatDuration,
+  formatMbpsAlways,
   formatTimestamp,
   hasTangibleTraffic,
   isActiveConnectionState,
@@ -189,5 +192,38 @@ test('formatAppForProtocolFilter removes redundant protocol labels when filtered
   assert.equal(formatAppForProtocolFilter('DNS over TCP', 'TCP', 53, 'TCP'), 'DNS');
   assert.equal(formatAppForProtocolFilter('ICMP Ping', 'ICMP', 0, 'ICMP'), 'Ping');
   assert.equal(formatAppForProtocolFilter('HTTPS / TLS', 'TCP', 443, 'TCP'), 'HTTPS / TLS');
+});
+
+test('formatMbpsAlways always formats in Mbps and never falls back to Kbps', () => {
+  assert.equal(formatMbpsAlways(0), '0 Mbps');
+  assert.equal(formatMbpsAlways(12_500), '0.1 Mbps');
+  assert.equal(formatMbpsAlways(62_500), '0.5 Mbps');
+  assert.equal(formatMbpsAlways(1_250_000), '10 Mbps');
+  assert.equal(formatMbpsAlways(125_000_000), '1000 Mbps');
+  assert.equal(formatMbpsAlways(12_500).includes('Kbps'), false);
+});
+
+test('extractNamedService returns recognized brands and rejects generic protocols', () => {
+  assert.equal(extractNamedService('Apple', '17.253.144.10'), 'Apple');
+  assert.equal(extractNamedService('Netflix', 'edge.nflxvideo.net'), 'Netflix');
+  assert.equal(extractNamedService('External IP', 'rr1---sn-abc.googlevideo.com'), 'YouTube');
+  assert.equal(extractNamedService('Google', '142.250.1.1'), 'Google');
+  assert.equal(extractNamedService('Google Cloud', '142.250.1.1'), 'GCP');
+  assert.equal(extractNamedService('AWS CloudFront', 'd111111abcdef8.cloudfront.net'), 'CloudFront');
+  assert.equal(extractNamedService('HTTPS', undefined), null);
+  assert.equal(extractNamedService('QUIC', undefined), null);
+  assert.equal(extractNamedService('DNS', undefined), null);
+  assert.equal(extractNamedService('External IP', undefined), null);
+  assert.equal(extractNamedService('Local Network', '192.168.1.50'), null);
+});
+
+test('extractWifiBand detects 2.4 GHz, 5 GHz, and 6 GHz bands', () => {
+  assert.equal(extractWifiBand('2.4 GHz (ath0)'), '2.4 GHz');
+  assert.equal(extractWifiBand('5 GHz (ath1)'), '5 GHz');
+  assert.equal(extractWifiBand(undefined, 2.437), '2.4 GHz');
+  assert.equal(extractWifiBand(undefined, 5.18), '5 GHz');
+  assert.equal(extractWifiBand(undefined, 6.155), '6 GHz');
+  assert.equal(extractWifiBand(undefined, undefined, 6), '2.4 GHz');
+  assert.equal(extractWifiBand(undefined, undefined, 36), '5 GHz');
 });
 

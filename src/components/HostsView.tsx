@@ -108,6 +108,17 @@ export function HostsView({
   const [columnsOpen, setColumnsOpen] = useState(false);
   const columnsRef = useRef<HTMLDivElement>(null);
 
+  const [localPrefs, setLocalPrefs] = useState<DevicesTablePrefs>(prefs);
+  const prefsSignature = useMemo(() => JSON.stringify(prefs), [prefs]);
+  const lastSyncedPrefsRef = useRef<string>(prefsSignature);
+
+  useEffect(() => {
+    if (prefsSignature !== lastSyncedPrefsRef.current) {
+      lastSyncedPrefsRef.current = prefsSignature;
+      setLocalPrefs(prefs);
+    }
+  }, [prefs, prefsSignature]);
+
   useEffect(() => {
     if (!columnsOpen) return;
     const onDocClick = (e: MouseEvent) => {
@@ -177,8 +188,11 @@ export function HostsView({
       }
 
       if (!q) return true;
-      const services = (h.topServices?.length ? h.topServices : h.topApps).join(' ');
-      const connHint = h.connectionType === 'wifi' ? `wifi wi-fi ${h.linkRadioOrPort || ''}` : h.connectionType === 'ethernet' ? 'ethernet wired' : '';
+      const services = (h.topServices || []).join(' ');
+      const connHint =
+        h.connectionType === 'wifi'
+          ? `wifi wi-fi ${h.wifiBand || ''} ${h.apName || 'main ap'}`
+          : `ethernet wired ${h.apName || 'main ap'}`;
       const haystack = `${h.hostname} ${h.ip} ${h.mac} ${h.vendor} ${services} ${connHint} ${h.ptrHostname || ''}`.toLowerCase();
       return haystack.includes(q);
     });
@@ -227,29 +241,33 @@ export function HostsView({
   };
 
   const togglePref = (key: keyof DevicesTablePrefs) => {
-    void onUpdatePrefs({ ...prefs, [key]: !prefs[key] });
+    const next: DevicesTablePrefs = { ...localPrefs, [key]: !localPrefs[key] };
+    setLocalPrefs(next);
+    void onUpdatePrefs(next);
   };
 
   const resetColumnDefaults = () => {
-    void onUpdatePrefs({ ...DEFAULT_DEVICES_TABLE_PREFS });
+    const next = { ...DEFAULT_DEVICES_TABLE_PREFS };
+    setLocalPrefs(next);
+    void onUpdatePrefs(next);
   };
 
   const visibleColCount =
     2 +
     [
-      prefs.showIp,
-      prefs.showMac,
-      prefs.showConnection,
-      prefs.showTopServices,
-      prefs.showConnections,
-      prefs.showDownload,
-      prefs.showUpload,
-      prefs.showTotal,
+      localPrefs.showIp,
+      localPrefs.showMac,
+      localPrefs.showConnection,
+      localPrefs.showTopServices,
+      localPrefs.showConnections,
+      localPrefs.showDownload,
+      localPrefs.showUpload,
+      localPrefs.showTotal,
     ].filter(Boolean).length;
 
   const isCustomized = (
     Object.keys(DEFAULT_DEVICES_TABLE_PREFS) as Array<keyof DevicesTablePrefs>
-  ).some((k) => prefs[k] !== DEFAULT_DEVICES_TABLE_PREFS[k]);
+  ).some((k) => localPrefs[k] !== DEFAULT_DEVICES_TABLE_PREFS[k]);
 
   return (
     <div className="space-y-4">
@@ -351,7 +369,7 @@ export function HostsView({
                     <input
                       type="checkbox"
                       data-testid={`hosts-col-${item.key}`}
-                      checked={prefs[item.key]}
+                      checked={localPrefs[item.key]}
                       onChange={() => togglePref(item.key)}
                       className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
                     />
@@ -372,7 +390,7 @@ export function HostsView({
                     <input
                       type="checkbox"
                       data-testid={`hosts-col-${item.key}`}
-                      checked={prefs[item.key]}
+                      checked={localPrefs[item.key]}
                       onChange={() => togglePref(item.key)}
                       className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
                     />
@@ -418,7 +436,7 @@ export function HostsView({
                     {renderSortIcon('hostname')}
                   </button>
                 </th>
-                {prefs.showIp && (
+                {localPrefs.showIp && (
                   <th className="py-2.5 px-3 whitespace-nowrap">
                     <button
                       type="button"
@@ -431,7 +449,7 @@ export function HostsView({
                     </button>
                   </th>
                 )}
-                {prefs.showMac && (
+                {localPrefs.showMac && (
                   <th className="py-2.5 px-3 whitespace-nowrap">
                     <TechTerm
                       label="MAC Address"
@@ -439,18 +457,18 @@ export function HostsView({
                     />
                   </th>
                 )}
-                {prefs.showConnection && (
+                {localPrefs.showConnection && (
                   <th className="py-2.5 px-3 whitespace-nowrap">
                     <TechTerm
                       label="Connection"
-                      tip="Wi-Fi clients show live RX/TX PHY link rates reported by the router or satellite radio. Ethernet clients show Ethernet because per-client wired port speed cannot be reliably determined across L2 bridges."
+                      tip="Wi-Fi clients display live RX/TX PHY link rates, band (2.4 GHz, 5 GHz, or 6 GHz), and connected AP (Main AP or satellite). Non-Wi-Fi clients are designated as Ethernet."
                     />
                   </th>
                 )}
-                {prefs.showTopServices && (
+                {localPrefs.showTopServices && (
                   <th className="py-2.5 px-3 min-w-[160px] max-w-[260px]">Top Services</th>
                 )}
-                {prefs.showConnections && (
+                {localPrefs.showConnections && (
                   <th className="py-2.5 px-2 text-right whitespace-nowrap">
                     <button
                       type="button"
@@ -463,7 +481,7 @@ export function HostsView({
                     </button>
                   </th>
                 )}
-                {prefs.showDownload && (
+                {localPrefs.showDownload && (
                   <th className="py-2.5 px-2 text-right whitespace-nowrap">
                     <button
                       type="button"
@@ -476,7 +494,7 @@ export function HostsView({
                     </button>
                   </th>
                 )}
-                {prefs.showUpload && (
+                {localPrefs.showUpload && (
                   <th className="py-2.5 px-2 text-right whitespace-nowrap">
                     <button
                       type="button"
@@ -489,7 +507,7 @@ export function HostsView({
                     </button>
                   </th>
                 )}
-                {prefs.showTotal && (
+                {localPrefs.showTotal && (
                   <th className="py-2.5 px-2 text-right whitespace-nowrap">
                     <button
                       type="button"
@@ -533,11 +551,8 @@ export function HostsView({
                   const isEditing = editingIp === host.ip;
                   const sourceMeta = SOURCE_META[host.nameSource] || SOURCE_META.ip;
                   const hasValidMac = host.mac && host.mac !== '00:00:00:00:00:00';
-                  const serviceList =
-                    host.topServices && host.topServices.length > 0
-                      ? host.topServices
-                      : host.topApps;
-                  const serviceText = serviceList.length > 0 ? serviceList.join(', ') : 'Idle';
+                  const serviceList = host.topServices || [];
+                  const serviceText = serviceList.length > 0 ? serviceList.join(', ') : '—';
 
                   return (
                     <tr
@@ -641,7 +656,7 @@ export function HostsView({
                                 <Pencil className="h-3 w-3" aria-hidden="true" />
                               </button>
                             </div>
-                            {prefs.showVendorSource && (
+                            {localPrefs.showVendorSource && (
                               <div className="text-[11px] app-text-muted flex items-center gap-1.5 min-w-0 leading-4">
                                 <span className="truncate" title={host.vendor}>
                                   {host.vendor}
@@ -665,13 +680,13 @@ export function HostsView({
                         )}
                       </td>
 
-                      {prefs.showIp && (
+                      {localPrefs.showIp && (
                         <td className="py-2.5 px-3 align-middle whitespace-nowrap tabular-nums">
                           {host.ip}
                         </td>
                       )}
 
-                      {prefs.showMac && (
+                      {localPrefs.showMac && (
                         <td className="py-2.5 px-3 align-middle font-mono text-[11px] app-text-muted whitespace-nowrap">
                           <div title={host.mac}>{host.mac}</div>
                           {host.isRandomizedMac && (
@@ -685,7 +700,7 @@ export function HostsView({
                         </td>
                       )}
 
-                      {prefs.showConnection && (
+                      {localPrefs.showConnection && (
                         <td
                           data-testid={`host-connection-${host.ip}`}
                           className="py-2.5 px-3 align-middle whitespace-nowrap"
@@ -698,34 +713,30 @@ export function HostsView({
                                   {formatWifiRatesLabel(host.wifiRxMbps, host.wifiTxMbps)}
                                 </span>
                               </div>
-                              {(host.linkRadioOrPort || host.wifiSignalDbm !== undefined) && (
-                                <div className="text-[11px] app-text-muted font-mono tabular-nums pl-5 leading-4">
-                                  {[
-                                    host.linkRadioOrPort,
-                                    host.wifiSignalDbm !== undefined
-                                      ? `${host.wifiSignalDbm} dBm`
-                                      : null,
-                                  ]
-                                    .filter(Boolean)
-                                    .join(' · ')}
-                                </div>
-                              )}
-                            </div>
-                          ) : host.connectionType === 'ethernet' ? (
-                            <div className="inline-flex items-center gap-1.5 text-xs app-text-secondary">
-                              <Cable
-                                className="h-3.5 w-3.5 text-emerald-500 shrink-0"
-                                aria-hidden="true"
-                              />
-                              <span>Ethernet</span>
+                              <div className="text-[11px] app-text-muted pl-5 leading-4">
+                                {[host.wifiBand || 'Wi-Fi', host.apName || 'Main AP']
+                                  .filter(Boolean)
+                                  .join(' · ')}
+                              </div>
                             </div>
                           ) : (
-                            <span className="app-text-muted">—</span>
+                            <div className="space-y-0.5">
+                              <div className="inline-flex items-center gap-1.5 text-xs app-text-secondary">
+                                <Cable
+                                  className="h-3.5 w-3.5 text-emerald-500 shrink-0"
+                                  aria-hidden="true"
+                                />
+                                <span>Ethernet</span>
+                              </div>
+                              <div className="text-[11px] app-text-muted pl-5 leading-4">
+                                {host.apName || 'Main AP'}
+                              </div>
+                            </div>
                           )}
                         </td>
                       )}
 
-                      {prefs.showTopServices && (
+                      {localPrefs.showTopServices && (
                         <td
                           className="py-2.5 px-3 align-middle app-text-secondary max-w-[240px]"
                           title={serviceText}
@@ -736,13 +747,13 @@ export function HostsView({
                         </td>
                       )}
 
-                      {prefs.showConnections && (
+                      {localPrefs.showConnections && (
                         <td className="py-2.5 px-2 align-middle text-right font-medium tabular-nums whitespace-nowrap">
                           {host.activeFlows}
                         </td>
                       )}
 
-                      {prefs.showDownload && (
+                      {localPrefs.showDownload && (
                         <td
                           className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums"
                           style={{ color: theme.rxColor }}
@@ -751,7 +762,7 @@ export function HostsView({
                         </td>
                       )}
 
-                      {prefs.showUpload && (
+                      {localPrefs.showUpload && (
                         <td
                           className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums"
                           style={{ color: theme.txColor }}
@@ -760,7 +771,7 @@ export function HostsView({
                         </td>
                       )}
 
-                      {prefs.showTotal && (
+                      {localPrefs.showTotal && (
                         <td className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums">
                           {formatBytes(host.totalBytes)}
                         </td>

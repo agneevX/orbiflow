@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { List, Waypoints } from 'lucide-react';
 import { Sidebar, type NavTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { OverviewView } from './components/OverviewView';
@@ -19,6 +20,7 @@ import {
   normalizeThemeMode,
   resolveEffectiveIsDark,
   resolveThemeId,
+  type AutoThemePair,
   type ThemeId,
   type ThemeMode,
 } from './lib/themes';
@@ -41,6 +43,7 @@ import type {
   HostSummary,
   NotificationConfig,
   ServerConfig,
+  TablePreferences,
   TimeWindow,
 } from './types/telemetry';
 
@@ -89,10 +92,12 @@ function loadInitialThemeState(): {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('overview');
+  const [devicesSubTab, setDevicesSubTab] = useState<'list' | 'map'>('list');
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('5m');
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
   const latestSnapshotRef = useRef<DashboardSnapshot | null>(null);
+  const pendingTablePrefsRef = useRef<{ prefs: TablePreferences; until: number } | null>(null);
 
   const initialTheme = useMemo(() => loadInitialThemeState(), []);
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialTheme.mode);
@@ -130,6 +135,11 @@ export default function App() {
     } else {
       setLightThemeId(normalizeLightTheme(themeId));
     }
+  };
+
+  const handleSelectAutoThemePair = (pair: AutoThemePair) => {
+    setDarkThemeId(normalizeDarkTheme(pair.darkThemeId));
+    setLightThemeId(normalizeLightTheme(pair.lightThemeId));
   };
 
   useEffect(() => {
@@ -178,12 +188,35 @@ export default function App() {
     let ws: WebSocket | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
+    const mergePendingPrefs = (incoming: DashboardSnapshot): DashboardSnapshot => {
+      const pending = pendingTablePrefsRef.current;
+      if (!pending) return incoming;
+      if (Date.now() > pending.until) {
+        pendingTablePrefsRef.current = null;
+        return incoming;
+      }
+      const incomingSig = JSON.stringify(incoming.serverConfig?.tablePreferences || null);
+      const pendingSig = JSON.stringify(pending.prefs);
+      if (incomingSig === pendingSig) {
+        pendingTablePrefsRef.current = null;
+        return incoming;
+      }
+      return {
+        ...incoming,
+        serverConfig: {
+          ...incoming.serverConfig,
+          tablePreferences: pending.prefs,
+        },
+      };
+    };
+
     fetch('/api/state')
       .then((res) => (res.ok ? res.json() : null))
       .then((data: DashboardSnapshot | null) => {
         if (active && data) {
-          latestSnapshotRef.current = data;
-          setSnapshot(data);
+          const merged = mergePendingPrefs(data);
+          latestSnapshotRef.current = merged;
+          setSnapshot(merged);
         }
       })
       .catch(() => {});
@@ -199,15 +232,17 @@ export default function App() {
         try {
           const msg = JSON.parse(evt.data);
           if (msg.type === 'traffic:init') {
-            latestSnapshotRef.current = msg.data;
+            const merged = mergePendingPrefs(msg.data);
+            latestSnapshotRef.current = merged;
             if (!pausedRef.current) {
-              setSnapshot(msg.data);
+              setSnapshot(merged);
             }
           } else if (msg.type === 'traffic:tick') {
             // Always retain the latest background-collected snapshot even when UI display is paused
-            latestSnapshotRef.current = msg.data;
+            const merged = mergePendingPrefs(msg.data);
+            latestSnapshotRef.current = merged;
             if (!pausedRef.current) {
-              setSnapshot(msg.data);
+              setSnapshot(merged);
             }
           }
         } catch {
@@ -293,24 +328,59 @@ export default function App() {
     }
   };
 
+  const applyOptimisticTablePrefs = (nextTablePrefs: TablePreferences) => {
+    pendingTablePrefsRef.current = {
+      prefs: nextTablePrefs,
+      until: Date.now() + 8000,
+    };
+    if (latestSnapshotRef.current) {
+      latestSnapshotRef.current = {
+        ...latestSnapshotRef.current,
+        serverConfig: {
+          ...latestSnapshotRef.current.serverConfig,
+          tablePreferences: nextTablePrefs,
+        },
+      };
+    }
+    setSnapshot((prev) =>
+      prev
+        ? {
+            ...prev,
+            serverConfig: {
+              ...prev.serverConfig,
+              tablePreferences: nextTablePrefs,
+            },
+          }
+        : prev
+    );
+  };
+
   const handleUpdateConnectionsPrefs = async (next: ConnectionsTablePrefs) => {
-    const current = snapshot?.serverConfig.tablePreferences || DEFAULT_TABLE_PREFERENCES;
-    await handleSaveSettings({
-      tablePreferences: {
-        ...current,
-        connections: next,
-      },
-    });
+    const base =
+      pendingTablePrefsRef.current?.prefs ||
+      latestSnapshotRef.current?.serverConfig.tablePreferences ||
+      snapshot?.serverConfig.tablePreferences ||
+      DEFAULT_TABLE_PREFERENCES;
+    const nextTablePrefs: TablePreferences = {
+      ...base,
+      connections: next,
+    };
+    applyOptimisticTablePrefs(nextTablePrefs);
+    await handleSaveSettings({ tablePreferences: nextTablePrefs });
   };
 
   const handleUpdateDevicesPrefs = async (next: DevicesTablePrefs) => {
-    const current = snapshot?.serverConfig.tablePreferences || DEFAULT_TABLE_PREFERENCES;
-    await handleSaveSettings({
-      tablePreferences: {
-        ...current,
-        devices: next,
-      },
-    });
+    const base =
+      pendingTablePrefsRef.current?.prefs ||
+      latestSnapshotRef.current?.serverConfig.tablePreferences ||
+      snapshot?.serverConfig.tablePreferences ||
+      DEFAULT_TABLE_PREFERENCES;
+    const nextTablePrefs: TablePreferences = {
+      ...base,
+      devices: next,
+    };
+    applyOptimisticTablePrefs(nextTablePrefs);
+    await handleSaveSettings({ tablePreferences: nextTablePrefs });
   };
 
   const handleSaveNotifications = async (notifications: NotificationConfig) => {
@@ -404,17 +474,30 @@ export default function App() {
     [snapshot?.serverConfig.featureVisibility]
   );
 
+  const devicesPageEnabled = featureVisibility.devices || featureVisibility.trafficMap;
+
   useEffect(() => {
     const tabDisabled =
-      (activeTab === 'topology' && !featureVisibility.trafficMap) ||
       (activeTab === 'flows' && !featureVisibility.connections) ||
-      (activeTab === 'hosts' && !featureVisibility.devices) ||
+      (activeTab === 'hosts' && !devicesPageEnabled) ||
       (activeTab === 'alerts' && !featureVisibility.alerts) ||
       (activeTab === 'setup' && !featureVisibility.agent);
     if (tabDisabled) {
       setActiveTab('overview');
     }
-  }, [activeTab, featureVisibility]);
+  }, [activeTab, featureVisibility, devicesPageEnabled]);
+
+  useEffect(() => {
+    if (devicesSubTab === 'list' && !featureVisibility.devices && featureVisibility.trafficMap) {
+      setDevicesSubTab('map');
+    } else if (
+      devicesSubTab === 'map' &&
+      !featureVisibility.trafficMap &&
+      featureVisibility.devices
+    ) {
+      setDevicesSubTab('list');
+    }
+  }, [devicesSubTab, featureVisibility.devices, featureVisibility.trafficMap]);
 
   const handleFilterConnections = (query: string) => {
     if (!featureVisibility.connections) return;
@@ -475,16 +558,15 @@ export default function App() {
   const windowAvailability = useMemo(() => {
     const history = snapshot?.history ?? [];
     const rollupHistory = snapshot?.rollupHistory ?? [];
+    const lastHistoryTs = history.length > 0 ? history[history.length - 1].timestamp : 0;
+    const lastRollupTs =
+      rollupHistory.length > 0 ? rollupHistory[rollupHistory.length - 1].timestamp : 0;
     const latestTs =
-      history.length > 0
-        ? history[history.length - 1].timestamp
-        : rollupHistory.length > 0
-          ? rollupHistory[rollupHistory.length - 1].timestamp
-          : nowTick;
+      lastHistoryTs > 0 || lastRollupTs > 0 ? Math.max(lastHistoryTs, lastRollupTs) : nowTick;
     // Anchor the right edge of live graphs to the latest incoming sample timestamp
     // so there is zero empty gap on the right; only advance with wall-clock if data stops.
     const referenceNow =
-      history.length > 0 || rollupHistory.length > 0
+      lastHistoryTs > 0 || lastRollupTs > 0
         ? nowTick - latestTs > 20_000
           ? nowTick
           : latestTs
@@ -529,8 +611,7 @@ export default function App() {
         activeThemeId={effectiveThemeId}
         onChangeThemeMode={setThemeMode}
         onChangeActiveTheme={handleChangeActiveTheme}
-        unit={unit}
-        onChangeUnit={setUnit}
+        onSelectAutoThemePair={handleSelectAutoThemePair}
         onToggleSimulator={handleToggleSimulator}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
@@ -576,23 +657,10 @@ export default function App() {
                 setActiveTab('flows');
               }}
               onOpenHosts={() => {
-                if (!featureVisibility.devices) return;
+                if (!devicesPageEnabled) return;
+                setDevicesSubTab(featureVisibility.devices ? 'list' : 'map');
                 setActiveTab('hosts');
               }}
-            />
-          )}
-
-          {activeTab === 'topology' && featureVisibility.trafficMap && (
-            <TrafficMapView
-              snapshot={snapshot}
-              unit={unit}
-              theme={activeTheme}
-              paused={paused}
-              connectionsEnabled={featureVisibility.connections}
-              onInspectHostFlows={handleSelectHost}
-              onSaveSatellite={handleSaveSatellite}
-              onDeleteSatellite={handleDeleteSatellite}
-              onTestSatellite={handleTestSatellite}
             />
           )}
 
@@ -612,20 +680,78 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'hosts' && featureVisibility.devices && (
-            <HostsView
-              hosts={snapshot.hosts}
-              unit={unit}
-              theme={activeTheme}
-              prefs={
-                snapshot.serverConfig.tablePreferences?.devices ||
-                DEFAULT_TABLE_PREFERENCES.devices
-              }
-              onUpdatePrefs={handleUpdateDevicesPrefs}
-              onInspectHostFlows={handleSelectHost}
-              onSaveAlias={handleSaveDeviceAlias}
-              onDeleteAlias={handleDeleteDeviceAlias}
-            />
+          {activeTab === 'hosts' && devicesPageEnabled && (
+            <div className="space-y-4">
+              {featureVisibility.devices && featureVisibility.trafficMap && (
+                <div
+                  role="tablist"
+                  aria-label="Devices view mode"
+                  data-testid="devices-subtabs"
+                  className="inline-flex items-center p-1 rounded-xl border app-border app-input gap-1"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    data-testid="devices-tab-list"
+                    aria-selected={devicesSubTab === 'list'}
+                    onClick={() => setDevicesSubTab('list')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                      devicesSubTab === 'list'
+                        ? 'app-surface font-semibold shadow-sm'
+                        : 'app-text-muted hover:opacity-85'
+                    }`}
+                  >
+                    <List className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Device List</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    data-testid="devices-tab-map"
+                    aria-selected={devicesSubTab === 'map'}
+                    onClick={() => setDevicesSubTab('map')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                      devicesSubTab === 'map'
+                        ? 'app-surface font-semibold shadow-sm'
+                        : 'app-text-muted hover:opacity-85'
+                    }`}
+                  >
+                    <Waypoints className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Network Map</span>
+                  </button>
+                </div>
+              )}
+
+              {devicesSubTab === 'list' && featureVisibility.devices && (
+                <HostsView
+                  hosts={snapshot.hosts}
+                  unit={unit}
+                  theme={activeTheme}
+                  prefs={
+                    snapshot.serverConfig.tablePreferences?.devices ||
+                    DEFAULT_TABLE_PREFERENCES.devices
+                  }
+                  onUpdatePrefs={handleUpdateDevicesPrefs}
+                  onInspectHostFlows={handleSelectHost}
+                  onSaveAlias={handleSaveDeviceAlias}
+                  onDeleteAlias={handleDeleteDeviceAlias}
+                />
+              )}
+
+              {devicesSubTab === 'map' && featureVisibility.trafficMap && (
+                <TrafficMapView
+                  snapshot={snapshot}
+                  unit={unit}
+                  theme={activeTheme}
+                  paused={paused}
+                  connectionsEnabled={featureVisibility.connections}
+                  onInspectHostFlows={handleSelectHost}
+                  onSaveSatellite={handleSaveSatellite}
+                  onDeleteSatellite={handleDeleteSatellite}
+                  onTestSatellite={handleTestSatellite}
+                />
+              )}
+            </div>
           )}
 
           {activeTab === 'alerts' && featureVisibility.alerts && (
@@ -656,6 +782,7 @@ export default function App() {
               satellites={snapshot.topology?.satellites || []}
               satelliteConfigs={snapshot.topology?.satelliteConfigs || []}
               unit={unit}
+              onChangeUnit={setUnit}
               onSaveSettings={handleSaveSettings}
               onSaveSatellite={handleSaveSatellite}
               onDeleteSatellite={handleDeleteSatellite}

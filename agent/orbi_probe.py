@@ -231,26 +231,40 @@ def ensure_conntrack_acct():
         pass
 
 
-def read_iface_counters(iface):
-    # Single-open /proc/net/dev read avoids 4 sysfs opens on every fast tick
-    prefix = f"{iface}:"
+def read_proc_net_dev():
+    devs = {}
     try:
         with open("/proc/net/dev", "r") as f:
             for line in f:
-                stripped = line.lstrip()
-                if stripped.startswith(prefix):
-                    fields = stripped[len(prefix):].split()
-                    if len(fields) >= 11:
-                        return {
-                            "iface": iface,
-                            "rxBytes": int(fields[0]),
-                            "rxErrors": int(fields[2]),
-                            "txBytes": int(fields[8]),
-                            "txErrors": int(fields[10]),
-                        }
-                    break
+                if ":" not in line:
+                    continue
+                name_part, rest = line.split(":", 1)
+                fields = rest.split()
+                if len(fields) >= 11:
+                    devs[name_part.strip()] = (
+                        int(fields[0]),
+                        int(fields[2]),
+                        int(fields[8]),
+                        int(fields[10]),
+                    )
     except (OSError, ValueError):
         pass
+    return devs
+
+
+def read_iface_counters(iface, dev_map=None):
+    # Single-open /proc/net/dev read avoids 4 sysfs opens on every fast tick
+    if dev_map is None:
+        dev_map = read_proc_net_dev()
+    if iface in dev_map:
+        rx_b, rx_e, tx_b, tx_e = dev_map[iface]
+        return {
+            "iface": iface,
+            "rxBytes": rx_b,
+            "rxErrors": rx_e,
+            "txBytes": tx_b,
+            "txErrors": tx_e,
+        }
     base = f"/sys/class/net/{iface}/statistics"
     return {
         "iface": iface,
@@ -261,10 +275,47 @@ def read_iface_counters(iface):
     }
 
 
+def read_lan_iface_counters(wan_iface, dev_map=None):
+    if dev_map is None:
+        dev_map = read_proc_net_dev()
+    ifaces = []
+    for name, (rx_b, rx_e, tx_b, tx_e) in dev_map.items():
+        if name == "lo" or name == wan_iface:
+            continue
+        is_primary_lan = name in ("eth1", "br0", "br-lan") or name.startswith("lan")
+        is_wifi_lan = name.startswith("ath") or name.startswith("wlan")
+        if not (is_primary_lan or is_wifi_lan):
+            continue
+        if not is_primary_lan and rx_b == 0 and tx_b == 0:
+            continue
+        ifaces.append({
+            "iface": name,
+            "rxBytes": rx_b,
+            "rxErrors": rx_e,
+            "txBytes": tx_b,
+            "txErrors": tx_e,
+        })
+
+    def _sort_key(item):
+        n = item["iface"]
+        if n == "eth1":
+            return (0, n)
+        if n in ("br0", "br-lan"):
+            return (1, n)
+        if n.startswith("lan"):
+            return (2, n)
+        return (3, n)
+
+    ifaces.sort(key=_sort_key)
+    return ifaces[:8]
+
+
 def read_swconfig_ports(swconfig_bin):
     ports = []
+    cpu_ports = set()
+    wan_ports = set()
     if not swconfig_bin:
-        return ports
+        return ports, cpu_ports, wan_ports
     try:
         out = subprocess.check_output(
             [swconfig_bin, "dev", "switch0", "show"],
@@ -272,14 +323,17 @@ def read_swconfig_ports(swconfig_bin):
             timeout=2,
         ).decode("utf-8", errors="ignore")
     except Exception:
-        return ports
+        return ports, cpu_ports, wan_ports
 
     cur = None
+    cur_vlan = None
+    vlan_members = {}
     for raw in out.splitlines():
         line = raw.strip()
         if line.startswith("Port ") and line.endswith(":"):
             if cur is not None:
                 ports.append(cur)
+            cur_vlan = None
             try:
                 pnum = int(line.split()[1].rstrip(":"))
             except ValueError:
@@ -297,6 +351,27 @@ def read_swconfig_ports(swconfig_bin):
                 "txBps": 0,
                 "_pnum": pnum,
             }
+        elif line.startswith("VLAN ") and line.endswith(":"):
+            if cur is not None:
+                ports.append(cur)
+                cur = None
+            try:
+                cur_vlan = int(line.split()[1].rstrip(":"))
+            except ValueError:
+                cur_vlan = None
+        elif cur_vlan is not None and line.startswith("ports:"):
+            members = []
+            for tok in line.split(":", 1)[1].split():
+                is_tagged = tok.endswith("t")
+                num_str = tok.rstrip("tu*")
+                if num_str.isdigit():
+                    pnum = int(num_str)
+                    if is_tagged:
+                        cpu_ports.add(pnum)
+                    else:
+                        members.append(pnum)
+            if members:
+                vlan_members[cur_vlan] = members
         elif cur is not None and "link:" in line:
             for tok in line.split():
                 if tok == "link:up":
@@ -325,45 +400,42 @@ def read_swconfig_ports(swconfig_bin):
     if cur is not None:
         ports.append(cur)
 
-    # Filter out internal switch CPU port 0 when physical ports exist
-    if len(ports) > 1:
-        ports = [p for p in ports if p.get("_pnum", 1) != 0]
-    for p in ports:
+    if len(vlan_members) >= 2:
+        single_port_vlans = [m for m in vlan_members.values() if len(m) == 1]
+        multi_port_vlans = [m for m in vlan_members.values() if len(m) > 1]
+        if single_port_vlans and multi_port_vlans:
+            for members in single_port_vlans:
+                wan_ports.add(members[0])
+
+    if not cpu_ports and len(ports) > 1:
+        cpu_ports.add(0)
+    filtered = [p for p in ports if p.get("_pnum", -1) not in cpu_ports]
+
+    lan_idx = 1
+    for p in filtered:
+        pnum = p.get("_pnum", -1)
+        if pnum in wan_ports:
+            p["role"] = "wan"
+            p["label"] = "WAN"
+        else:
+            p["role"] = "lan"
+            p["label"] = f"LAN {lan_idx}"
+            lan_idx += 1
         p.pop("_pnum", None)
-    return ports
+    return filtered, cpu_ports, wan_ports
 
 
 def read_router_ports(wan_iface, swconfig_bin):
+    dev_map = read_proc_net_dev()
+    sw_ports, cpu_ports, wan_switch_ports = read_swconfig_ports(swconfig_bin)
+    sw_lan_ports = [p for p in sw_ports if p.get("role") != "wan"]
+    sw_wan_ports = [p for p in sw_ports if p.get("role") == "wan"]
+
     ports = []
     seen = set()
-    dev_bytes = {}
-    try:
-        with open("/proc/net/dev", "r") as f:
-            for line in f:
-                if ":" not in line:
-                    continue
-                name_part, rest = line.split(":", 1)
-                fields = rest.split()
-                if len(fields) >= 9:
-                    dev_bytes[name_part.strip()] = (int(fields[0]), int(fields[8]))
-    except (OSError, ValueError):
-        pass
 
-    try:
-        names = sorted(os.listdir("/sys/class/net"))
-    except OSError:
-        names = [wan_iface]
-
-    for name in names:
-        if name == "lo":
-            continue
-        if name != wan_iface and not (
-            name.startswith("eth") or name.startswith("en") or name.startswith("lan") or name.startswith("wan")
-        ):
-            continue
+    def build_sysfs_port(name, force_wan=False):
         base = f"/sys/class/net/{name}"
-        if os.path.isdir(f"{base}/wireless"):
-            continue
         oper = read_text(f"{base}/operstate").strip().lower()
         speed = read_int(f"{base}/speed")
         if speed < 0:
@@ -371,9 +443,9 @@ def read_router_ports(wan_iface, swconfig_bin):
         duplex = read_text(f"{base}/duplex").strip().lower()
         if duplex not in ("full", "half"):
             duplex = "unknown"
-        rx_b, tx_b = dev_bytes.get(name, (0, 0))
-        is_wan = name == wan_iface
-        ports.append({
+        rx_b, _, tx_b, _ = dev_map.get(name, (0, 0, 0, 0))
+        is_wan = force_wan or name == wan_iface
+        return {
             "id": name,
             "label": f"WAN ({name})" if is_wan else name,
             "role": "wan" if is_wan else "lan",
@@ -384,14 +456,45 @@ def read_router_ports(wan_iface, swconfig_bin):
             "txBytes": tx_b,
             "rxBps": 0,
             "txBps": 0,
-        })
+        }
+
+    wan_port = build_sysfs_port(wan_iface, force_wan=True)
+    if sw_wan_ports:
+        sw_wan = sw_wan_ports[0]
+        if wan_port["speedMbps"] <= 0 and sw_wan.get("speedMbps", 0) > 0:
+            wan_port["speedMbps"] = sw_wan["speedMbps"]
+        if wan_port["duplex"] == "unknown" and sw_wan.get("duplex") in ("full", "half"):
+            wan_port["duplex"] = sw_wan["duplex"]
+        if sw_wan.get("linkUp"):
+            wan_port["linkUp"] = True
+    ports.append(wan_port)
+    seen.add(wan_iface)
+
+    if sw_lan_ports:
+        for sp in sw_lan_ports:
+            if sp["id"] not in seen:
+                ports.append(sp)
+                seen.add(sp["id"])
+        return ports, cpu_ports, wan_switch_ports, sw_lan_ports
+
+    try:
+        names = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        names = []
+
+    for name in names:
+        if name == "lo" or name in seen:
+            continue
+        if not (
+            name.startswith("eth") or name.startswith("en") or name.startswith("lan") or name.startswith("wan")
+        ):
+            continue
+        if os.path.isdir(f"/sys/class/net/{name}/wireless"):
+            continue
+        ports.append(build_sysfs_port(name))
         seen.add(name)
 
-    for sp in read_swconfig_ports(swconfig_bin):
-        if sp["id"] not in seen:
-            ports.append(sp)
-            seen.add(sp["id"])
-    return ports
+    return ports, cpu_ports, wan_switch_ports, sw_lan_ports
 
 
 def discover_dnsmasq_files(custom_lease_path=""):
@@ -862,12 +965,123 @@ def discover_wifi_ifaces():
     ]
 
 
-def read_router_wifi_clients(wifi_ifaces, wifi_tool):
+def _channel_to_band(chan):
+    if 1 <= chan <= 14:
+        return "2.4 GHz"
+    if 32 <= chan <= 177:
+        return "5 GHz"
+    if chan > 177:
+        return "6 GHz"
+    return None
+
+
+def _freq_to_band(freq_ghz):
+    if 2.3 <= freq_ghz <= 2.6:
+        return "2.4 GHz"
+    if 4.9 <= freq_ghz < 5.925:
+        return "5 GHz"
+    if freq_ghz >= 5.925:
+        return "6 GHz"
+    return None
+
+
+def read_wifi_iface_meta(wifi_ifaces, iwconfig_bin, iw_bin):
+    meta = {}
+    for wif in wifi_ifaces:
+        meta[wif] = {"mode": "", "essid": "", "band": None, "is_backhaul": False}
+    if iwconfig_bin and wifi_ifaces:
+        try:
+            out = subprocess.check_output(
+                [iwconfig_bin],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            cur_if = None
+            for raw in out.splitlines():
+                if not raw.strip():
+                    cur_if = None
+                    continue
+                if not raw[0].isspace():
+                    tok = raw.split()[0]
+                    cur_if = tok if tok in meta else None
+                if not cur_if:
+                    continue
+                low = raw.lower()
+                if "essid:" in low:
+                    idx = low.find("essid:")
+                    val = raw[idx + 6:].strip()
+                    if val.startswith('"'):
+                        end_q = val.find('"', 1)
+                        essid = val[1:end_q] if end_q > 0 else val.strip('"')
+                    else:
+                        essid = val.split()[0] if val else ""
+                    meta[cur_if]["essid"] = essid
+                if "mode:" in low:
+                    idx = low.find("mode:")
+                    mode_tok = low[idx + 5:].split()[0].strip()
+                    meta[cur_if]["mode"] = mode_tok
+                if "frequency:" in low:
+                    idx = low.find("frequency:")
+                    freq_tok = low[idx + 10:].split()[0].strip()
+                    try:
+                        band = _freq_to_band(float(freq_tok))
+                        if band:
+                            meta[cur_if]["band"] = band
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+    elif iw_bin and wifi_ifaces:
+        try:
+            out = subprocess.check_output(
+                [iw_bin, "dev"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            cur_if = None
+            for raw in out.splitlines():
+                line = raw.strip()
+                if line.startswith("Interface "):
+                    cand = line.split()[1]
+                    cur_if = cand if cand in meta else None
+                elif cur_if:
+                    if line.startswith("type "):
+                        meta[cur_if]["mode"] = line.split()[1].lower()
+                    elif line.startswith("ssid "):
+                        meta[cur_if]["essid"] = line[5:].strip()
+                    elif line.startswith("channel "):
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            meta[cur_if]["band"] = _channel_to_band(int(parts[1]))
+        except Exception:
+            pass
+
+    for wif, info in meta.items():
+        mode = (info["mode"] or "").lower()
+        essid = (info["essid"] or "").strip()
+        essid_low = essid.lower()
+        if mode in ("managed", "repeater", "monitor", "mesh", "wds"):
+            info["is_backhaul"] = True
+        elif essid_low in ("off/any", ""):
+            if mode and mode not in ("master", "ap"):
+                info["is_backhaul"] = True
+        elif any(tok in essid_low for tok in ("backhaul", "orbi_bh", "bh_", "_bh", "mesh_bh", "__orbi")):
+            info["is_backhaul"] = True
+    return meta
+
+
+def read_router_wifi_clients(wifi_ifaces, wifi_tool, wifi_meta=None, satellite_macs=None):
     if not wifi_ifaces or not wifi_tool:
         return []
     tool_kind, tool_bin = wifi_tool
+    sat_macs = satellite_macs or set()
+    meta_map = wifi_meta or {}
     clients = {}
     for wif in wifi_ifaces:
+        info = meta_map.get(wif, {})
+        if info.get("is_backhaul"):
+            continue
+        iface_band = info.get("band")
         if tool_kind == "wlanconfig":
             try:
                 out = subprocess.check_output(
@@ -875,19 +1089,44 @@ def read_router_wifi_clients(wifi_ifaces, wifi_tool):
                     stderr=subprocess.DEVNULL,
                     timeout=2,
                 ).decode("utf-8", errors="ignore")
+                chan_idx = 2
+                tx_idx = 3
+                rx_idx = 4
+                rssi_idx = 5
                 for raw in out.splitlines():
                     parts = raw.split()
+                    if not parts:
+                        continue
+                    if parts[0].upper() == "ADDR":
+                        upper_cols = [c.upper() for c in parts]
+                        if "CHAN" in upper_cols:
+                            chan_idx = upper_cols.index("CHAN")
+                        if "TXRATE" in upper_cols:
+                            tx_idx = upper_cols.index("TXRATE")
+                        if "RXRATE" in upper_cols:
+                            rx_idx = upper_cols.index("RXRATE")
+                        if "RSSI" in upper_cols:
+                            rssi_idx = upper_cols.index("RSSI")
+                        continue
                     if len(parts) >= 6 and parts[0].count(":") == 5:
                         mac = parts[0].lower()
-                        tx_tok = parts[3].rstrip("Mm")
-                        rx_tok = parts[4].rstrip("Mm")
+                        if mac in sat_macs:
+                            continue
+                        tx_tok = parts[tx_idx].rstrip("Mm") if tx_idx < len(parts) else "0"
+                        rx_tok = parts[rx_idx].rstrip("Mm") if rx_idx < len(parts) else "0"
                         tx_m = int(tx_tok) if tx_tok.isdigit() else 0
                         rx_m = int(rx_tok) if rx_tok.isdigit() else 0
-                        rssi = int(parts[5]) if parts[5].lstrip("-").isdigit() else 0
-                        clients[mac] = {
+                        if tx_m == 0 and rx_m == 0:
+                            continue
+                        rssi_tok = parts[rssi_idx] if rssi_idx < len(parts) else "0"
+                        rssi = int(rssi_tok) if rssi_tok.lstrip("-").isdigit() else 0
+                        chan_tok = parts[chan_idx] if chan_idx < len(parts) else ""
+                        chan_band = _channel_to_band(int(chan_tok)) if chan_tok.isdigit() else None
+                        band = iface_band or chan_band
+                        entry = {
                             "mac": mac,
                             "connectionType": "wifi",
-                            "portOrRadio": wif,
+                            "portOrRadio": band or wif,
                             "linkSpeedMbps": max(tx_m, rx_m),
                             "wifiTxMbps": tx_m,
                             "wifiRxMbps": rx_m,
@@ -897,6 +1136,9 @@ def read_router_wifi_clients(wifi_ifaces, wifi_tool):
                             "rxBps": 0,
                             "txBps": 0,
                         }
+                        if band:
+                            entry["wifiBand"] = band
+                        clients[mac] = entry
             except Exception:
                 pass
         elif tool_kind == "iw":
@@ -913,10 +1155,13 @@ def read_router_wifi_clients(wifi_ifaces, wifi_tool):
                         parts = line.split()
                         if len(parts) >= 2 and parts[1].count(":") == 5:
                             mac = parts[1].lower()
+                            if mac in sat_macs:
+                                cur = None
+                                continue
                             cur = {
                                 "mac": mac,
                                 "connectionType": "wifi",
-                                "portOrRadio": wif,
+                                "portOrRadio": iface_band or wif,
                                 "linkSpeedMbps": 0,
                                 "wifiTxMbps": 0,
                                 "wifiRxMbps": 0,
@@ -925,6 +1170,8 @@ def read_router_wifi_clients(wifi_ifaces, wifi_tool):
                                 "rxBps": 0,
                                 "txBps": 0,
                             }
+                            if iface_band:
+                                cur["wifiBand"] = iface_band
                             clients[mac] = cur
                     elif cur is not None:
                         if line.startswith("rx bytes:"):
@@ -957,7 +1204,127 @@ def read_router_wifi_clients(wifi_ifaces, wifi_tool):
                                 pass
             except Exception:
                 pass
-    return list(clients.values())
+    return [
+        c for c in clients.values()
+        if c.get("wifiTxMbps", 0) > 0 or c.get("wifiRxMbps", 0) > 0 or c.get("rxBytes", 0) > 0 or c.get("txBytes", 0) > 0
+    ]
+
+
+def read_router_wired_clients(swconfig_bin, brctl_bin, cpu_ports, wan_switch_ports, sw_lan_ports, wifi_ifaces, satellite_macs=None):
+    sat_macs = satellite_macs or set()
+    port_label_by_id = {p["id"]: p["label"] for p in (sw_lan_ports or [])}
+    wired_by_mac = {}
+
+    if swconfig_bin:
+        try:
+            out = subprocess.check_output(
+                [swconfig_bin, "dev", "switch0", "get", "dump_arl"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            port_macs = {}
+            for raw in out.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                mac_found = None
+                pnum_found = None
+                tokens = line.replace(",", " ").split()
+                for idx_t, tok in enumerate(tokens):
+                    clean_t = tok.strip("[]()")
+                    if clean_t.count(":") == 5 and len(clean_t) == 17:
+                        mac_found = clean_t.lower()
+                    elif clean_t.upper().startswith("0X") and idx_t > 0 and "PORT" in tokens[idx_t - 1].upper():
+                        try:
+                            mask = int(clean_t, 16)
+                            bits = [b for b in range(10) if mask & (1 << b)]
+                            if len(bits) == 1:
+                                pnum_found = bits[0]
+                        except ValueError:
+                            pass
+                    elif clean_t.isdigit() and idx_t > 0 and tokens[idx_t - 1].rstrip(":").lower() == "port":
+                        pnum_found = int(clean_t)
+                if mac_found and pnum_found is not None:
+                    if pnum_found in cpu_ports or pnum_found in wan_switch_ports:
+                        continue
+                    port_macs.setdefault(pnum_found, set()).add(mac_found)
+
+            for pnum, macs in port_macs.items():
+                if any(m in sat_macs for m in macs):
+                    continue
+                label = port_label_by_id.get(f"port{pnum}", f"LAN {pnum}")
+                for mac in macs:
+                    wired_by_mac[mac] = {
+                        "mac": mac,
+                        "connectionType": "ethernet",
+                        "portOrRadio": label,
+                        "linkSpeedMbps": 0,
+                        "rxBytes": 0,
+                        "txBytes": 0,
+                        "rxBps": 0,
+                        "txBps": 0,
+                    }
+        except Exception:
+            pass
+
+    if not wired_by_mac and brctl_bin:
+        try:
+            wifi_set = set(wifi_ifaces or [])
+            port_no_to_if = {}
+            brif_dir = "/sys/class/net/br0/brif"
+            if os.path.isdir(brif_dir):
+                for ifname in os.listdir(brif_dir):
+                    pno_txt = read_text(f"{brif_dir}/{ifname}/port_no").strip()
+                    if pno_txt:
+                        try:
+                            pno = int(pno_txt, 16) if pno_txt.startswith("0x") else int(pno_txt)
+                            port_no_to_if[pno] = ifname
+                        except ValueError:
+                            pass
+            out = subprocess.check_output(
+                [brctl_bin, "showmacs", "br0"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            for raw in out.splitlines()[1:]:
+                parts = raw.split()
+                if len(parts) >= 4 and parts[0].isdigit() and parts[1].count(":") == 5:
+                    if parts[2].lower() == "yes":
+                        continue
+                    pno = int(parts[0])
+                    ifname = port_no_to_if.get(pno, "")
+                    if not ifname or ifname in wifi_set or ifname.startswith("ath") or ifname.startswith("wlan"):
+                        continue
+                    mac = parts[1].lower()
+                    if mac in sat_macs:
+                        continue
+                    wired_by_mac[mac] = {
+                        "mac": mac,
+                        "connectionType": "ethernet",
+                        "portOrRadio": "Ethernet",
+                        "linkSpeedMbps": 0,
+                        "rxBytes": 0,
+                        "txBytes": 0,
+                        "rxBps": 0,
+                        "txBps": 0,
+                    }
+        except Exception:
+            pass
+
+    return list(wired_by_mac.values())
+
+
+def merge_router_clients(wifi_clients, wired_clients):
+    by_mac = {}
+    for wc in wired_clients:
+        by_mac[wc["mac"]] = wc
+    for wf in wifi_clients:
+        mac = wf["mac"]
+        existing = by_mac.get(mac)
+        if existing and existing.get("portOrRadio", "").startswith("LAN "):
+            continue
+        by_mac[mac] = wf
+    return list(by_mac.values())
 
 
 def detect_conntrack_path():
@@ -967,11 +1334,26 @@ def detect_conntrack_path():
     return None
 
 
+def _is_private_conntrack_line(line):
+    src_ip = ""
+    dst_ip = ""
+    for tok in line.split():
+        if tok.startswith("src=") and not src_ip:
+            src_ip = tok[4:]
+        elif tok.startswith("dst=") and not dst_ip:
+            dst_ip = tok[4:]
+            if src_ip:
+                break
+    return is_private_lan_ip(src_ip) and is_private_lan_ip(dst_ip)
+
+
 def read_conntrack_lines(ct_path, limit=500):
     if not ct_path:
         return []
-    lines = []
-    append = lines.append
+    wan_lines = []
+    lan_lines = []
+    wan_cap = max(100, limit - 100)
+    lan_cap = 100
     try:
         with open(ct_path, "r") as f:
             for line in f:
@@ -988,12 +1370,18 @@ def read_conntrack_lines(ct_path, limit=500):
                     or "src=127.0.0.1 " in line
                 ):
                     continue
-                append(line.strip())
-                if len(lines) >= limit:
+                stripped = line.strip()
+                if _is_private_conntrack_line(stripped):
+                    if len(lan_lines) < lan_cap:
+                        lan_lines.append(stripped)
+                else:
+                    if len(wan_lines) < wan_cap:
+                        wan_lines.append(stripped)
+                if len(wan_lines) >= wan_cap and len(lan_lines) >= lan_cap:
                     break
     except OSError:
         pass
-    return lines
+    return lan_lines + wan_lines
 
 
 def read_static_host_info():
@@ -1181,7 +1569,9 @@ def main():
     static_info = read_static_host_info()
     ct_path = detect_conntrack_path()
     swconfig_bin = find_binary("swconfig")
+    brctl_bin = find_binary("brctl")
     wlanconfig_bin = find_binary("wlanconfig")
+    iwconfig_bin = find_binary("iwconfig")
     iw_bin = find_binary("iw")
     ip_bin = find_binary("ip")
     ifconfig_bin = find_binary("ifconfig")
@@ -1189,6 +1579,7 @@ def main():
     satinfo_bin = "/usr/sbin/satelliteinfo" if (os.path.isfile("/usr/sbin/satelliteinfo") and os.access("/usr/sbin/satelliteinfo", os.X_OK)) else find_binary("satelliteinfo")
     wifi_tool = ("wlanconfig", wlanconfig_bin) if wlanconfig_bin else (("iw", iw_bin) if iw_bin else None)
     wifi_ifaces = discover_wifi_ifaces()
+    wifi_meta = read_wifi_iface_meta(wifi_ifaces, iwconfig_bin, iw_bin)
     lease_cache = LeaseCache(cfg["dhcp_leases"])
 
     ws = MiniWebSocket(cfg["ws_url"], cfg["token"])
@@ -1196,6 +1587,9 @@ def main():
     router_clients = []
     wan_details = None
     satellite_info = []
+    cpu_ports = set()
+    wan_switch_ports = set()
+    sw_lan_ports = []
     last_neigh_refresh = 0.0
     last_ports_refresh = 0.0
     last_sys_refresh = 0.0
@@ -1223,35 +1617,47 @@ def main():
                 now_ts = time.time()
                 if now_ts - last_wifi_iface_scan >= 60.0:
                     wifi_ifaces = discover_wifi_ifaces()
+                    wifi_meta = read_wifi_iface_meta(wifi_ifaces, iwconfig_bin, iw_bin)
                     last_wifi_iface_scan = now_ts
 
+                ports_payload = None
                 if now_ts - last_ports_refresh >= cfg["ports_interval"]:
                     wan_details = read_wan_details(cfg["iface"], ip_bin, ifconfig_bin, nvram_bin)
                     satellite_info = read_satelliteinfo_wifi(satinfo_bin)
+                    ports_payload, cpu_ports, wan_switch_ports, sw_lan_ports = read_router_ports(
+                        cfg["iface"], swconfig_bin
+                    )
 
                 if now_ts - last_neigh_refresh >= cfg["neigh_interval"]:
                     leases, active_dhcp = lease_cache.read(now_ts)
                     arp = read_arp_table(leases, active_dhcp, cfg["iface"], wan_details)
-                    router_clients = read_router_wifi_clients(wifi_ifaces, wifi_tool)
+                    sat_macs = {s["mac"].lower() for s in satellite_info if s.get("mac")}
+                    wifi_clients = read_router_wifi_clients(wifi_ifaces, wifi_tool, wifi_meta, sat_macs)
+                    wired_clients = read_router_wired_clients(
+                        swconfig_bin, brctl_bin, cpu_ports, wan_switch_ports, sw_lan_ports, wifi_ifaces, sat_macs
+                    )
+                    router_clients = merge_router_clients(wifi_clients, wired_clients)
                     last_neigh_refresh = now_ts
                     logger.debug(
-                        f"Refreshed {len(arp)} ARP/DHCP devices, {len(router_clients)} Wi-Fi clients"
+                        f"Refreshed {len(arp)} ARP/DHCP devices, {len(wifi_clients)} Wi-Fi, {len(wired_clients)} wired"
                     )
 
+                dev_map = read_proc_net_dev()
                 conntrack_lines = read_conntrack_lines(ct_path)
                 data = {
                     "probeId": cfg["probe_id"],
                     "timestamp": int(now_ts * 1000),
                     "source": "live",
-                    "iface": read_iface_counters(cfg["iface"]),
+                    "iface": read_iface_counters(cfg["iface"], dev_map),
+                    "lanIfaces": read_lan_iface_counters(cfg["iface"], dev_map),
                     "routerClients": router_clients,
                     "arp": arp,
                     "flows": [],
                     "rawConntrackLines": conntrack_lines,
                 }
 
-                if now_ts - last_ports_refresh >= cfg["ports_interval"]:
-                    data["ports"] = read_router_ports(cfg["iface"], swconfig_bin)
+                if ports_payload is not None:
+                    data["ports"] = ports_payload
                     if wan_details:
                         data["wan"] = wan_details
                     if satellite_info:

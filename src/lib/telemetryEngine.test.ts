@@ -797,10 +797,13 @@ test('TrafficMonitorEngine attaches Wi-Fi RX/TX rates and Ethernet connection ty
   assert.equal(wifiHost.wifiRxMbps, 1080);
   assert.equal(wifiHost.wifiTxMbps, 1200);
   assert.equal(wifiHost.wifiSignalDbm, -48);
-  assert.equal(wifiHost.linkRadioOrPort, '5 GHz (ath1)');
+  assert.equal(wifiHost.linkRadioOrPort, '5 GHz');
+  assert.equal(wifiHost.wifiBand, '5 GHz');
+  assert.equal(wifiHost.apName, 'Main AP');
 
   assert.ok(wiredHost);
   assert.equal(wiredHost.connectionType, 'ethernet');
+  assert.equal(wiredHost.apName, 'Main AP');
   assert.equal(wiredHost.wifiRxMbps, undefined);
   assert.equal(wiredHost.wifiTxMbps, undefined);
 });
@@ -1034,6 +1037,63 @@ test('buildRouterRestartCommand stops previous agent without self-killing shell 
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('TrafficMonitorEngine computes pure LAN traffic from eth1 minus WAN and restricts host.topServices to named brands', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_760_000_000_000;
+  const arp = [
+    { ip: '192.168.1.40', mac: 'aa:bb:cc:00:00:40', device: 'br0', hostname: 'studio-mac' },
+  ];
+
+  // Tick 1 baseline
+  engine.ingest({
+    probeId: 'orbi-main',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 1_000_000, txBytes: 500_000 },
+    lanIfaces: [{ iface: 'eth1', rxBytes: 2_000_000, txBytes: 3_000_000 }],
+    arp,
+    flows: [
+      // Unknown public IP over HTTPS (should NOT appear as "HTTPS" in host.topServices)
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.40', dst: '203.0.113.55', sport: 51000, dport: 443, rxBytes: 50_000, txBytes: 10_000 },
+      // Recognized Apple IP
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.40', dst: '17.253.144.10', sport: 51001, dport: 443, rxBytes: 20_000, txBytes: 5_000 },
+    ],
+  });
+
+  // Tick 2 (+5s):
+  // WAN rx = +5 MB (1 MB/s), WAN tx = +1 MB (200 KB/s)
+  // eth1 rx = +6 MB (WAN tx 1 MB + 5 MB pure LAN rx = 1 MB/s LAN rx)
+  // eth1 tx = +10 MB (WAN rx 5 MB + 5 MB pure LAN tx = 1 MB/s LAN tx)
+  const { dashboard } = engine.ingest({
+    probeId: 'orbi-main',
+    timestamp: t0 + 5_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 6_000_000, txBytes: 1_500_000 },
+    lanIfaces: [{ iface: 'eth1', rxBytes: 8_000_000, txBytes: 13_000_000 }],
+    arp,
+    flows: [
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.40', dst: '203.0.113.55', sport: 51000, dport: 443, rxBytes: 550_000, txBytes: 60_000 },
+      { proto: 'tcp', state: 'ESTABLISHED', src: '192.168.1.40', dst: '17.253.144.10', sport: 51001, dport: 443, rxBytes: 220_000, txBytes: 25_000 },
+    ],
+  });
+
+  assert.ok(dashboard.lanSummary);
+  assert.equal(dashboard.lanSummary.iface, 'eth1');
+  assert.equal(dashboard.lanSummary.rxBps, 1_000_000);
+  assert.equal(dashboard.lanSummary.txBps, 1_000_000);
+  assert.equal(dashboard.lanSummary.totalBps, 2_000_000);
+
+  // Switched LAN traffic without conntrack entries synthesizes a LAN-scoped link
+  const lanLinks = dashboard.clientLinks.filter((l) => l.scope === 'lan');
+  assert.equal(lanLinks.length, 1);
+  assert.equal(lanLinks[0].totalBps, 2_000_000);
+
+  // Host topServices includes Apple and NEVER includes HTTPS / QUIC / External IP
+  const host = dashboard.hosts.find((h) => h.ip === '192.168.1.40');
+  assert.ok(host);
+  assert.deepEqual(host.topServices, ['Apple']);
 });
 
 

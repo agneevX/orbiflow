@@ -361,6 +361,17 @@ test('buildTopologyGraph builds 4-tier hierarchy and handles collapse + idle fil
   assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.20')?.linkSpeedLabel, 'Ethernet');
   assert.equal(full.nodes.find((n) => n.id === 'client:192.168.1.20')?.linkSpeedMbps, 0);
 
+  // Verify top-to-bottom vertical layout (Internet -> Router -> Satellite/Direct -> Satellite Clients)
+  const internetNode = full.nodes.find((n) => n.id === 'internet')!;
+  const routerNode = full.nodes.find((n) => n.id === 'router')!;
+  const satNode = full.nodes.find((n) => n.id === 'sat:sat-living')!;
+  const directClient = full.nodes.find((n) => n.id === 'client:192.168.1.20')!;
+  const satClient = full.nodes.find((n) => n.id === 'client:192.168.1.10')!;
+  assert.ok(internetNode.y < routerNode.y, 'Internet should be above Main Router');
+  assert.ok(routerNode.y < satNode.y, 'Main Router should be above Satellite');
+  assert.ok(routerNode.y < directClient.y, 'Main Router should be above direct clients');
+  assert.ok(satNode.y < satClient.y, 'Satellite should be above its connected clients');
+
   // Collapse satellite hides its 2 clients
   const collapsedSat = buildTopologyGraph(snap, {
     collapsedIds: new Set(['sat:sat-living']),
@@ -495,7 +506,8 @@ test('convertProbeToTelemetry detects Wi-Fi backhaul via gateway MAC + brif and 
   assert.deepEqual(clientMacs, ['7c:d9:5c:31:aa:02', 'b4:fb:e4:12:77:09']);
   const wifiClient = telemetry.clients.find((c) => c.mac === '7c:d9:5c:31:aa:02');
   assert.equal(wifiClient?.connectionType, 'wifi');
-  assert.equal(wifiClient?.portOrRadio, '5 GHz (ath1)');
+  assert.equal(wifiClient?.portOrRadio, '5 GHz');
+  assert.equal(wifiClient?.wifiBand, '5 GHz');
   assert.equal(wifiClient?.wifiTxMbps, 866);
   assert.equal(wifiClient?.wifiRxMbps, 780);
   const wiredClient = telemetry.clients.find((c) => c.mac === 'b4:fb:e4:12:77:09');
@@ -572,22 +584,23 @@ test('convertProbeToTelemetry detects Ethernet backhaul via switch FDB and exclu
   assert.equal(telemetry.clients[0].portOrRadio, 'LAN 3');
 });
 
-test('buildTopologyGraph does not assign fake 1 GbE Ethernet labels to direct clients with unknown link metadata', () => {
+test('buildTopologyGraph designates non-Wi-Fi direct clients as Ethernet without fake link speeds', () => {
   const snap = makeSnapshot();
   snap.hosts.push(
     makeHost({
       ip: '192.168.1.99',
       mac: 'de:ad:be:ef:00:99',
-      hostname: 'iPhone 16',
+      hostname: 'Desktop Mac',
       rxBps: 250_000,
       txBps: 40_000,
     })
   );
   const graph = buildTopologyGraph(snap);
-  const phoneNode = graph.nodes.find((n) => n.id === 'client:192.168.1.99');
-  assert.ok(phoneNode);
-  assert.equal(phoneNode.connectionType, undefined);
-  assert.equal(phoneNode.linkSpeedLabel, undefined);
+  const wiredNode = graph.nodes.find((n) => n.id === 'client:192.168.1.99');
+  assert.ok(wiredNode);
+  assert.equal(wiredNode.connectionType, 'ethernet');
+  assert.equal(wiredNode.linkSpeedLabel, 'Ethernet');
+  assert.equal(wiredNode.linkSpeedMbps, 0);
 
   // Internet node reflects WAN details from router
   const internetNode = graph.nodes.find((n) => n.id === 'internet');
@@ -628,4 +641,52 @@ test('parseSatelliteInfoWifi parses JSON and text outputs from /usr/sbin/satelli
   assert.equal(parsed[0].backhaulStatus, 'Good');
   assert.equal(parsed[1].backhaulType, 'ethernet');
   assert.equal(parsed[1].backhaulSpeedMbps, 1000);
+});
+
+test('convertProbeToTelemetry filters tagged CPU switch ports and 0M/0M ghost Wi-Fi stations', () => {
+  const cfg: SatelliteConfig = {
+    id: 'sat-vlan',
+    name: 'Den Satellite',
+    host: '192.168.1.5',
+    port: 22,
+    username: 'root',
+    authMethod: 'password',
+    pollIntervalSec: 5,
+    enabled: true,
+  };
+
+  const raw = [
+    '===META===',
+    'HOST=RBS50-Den',
+    'UPTIME=9000.00 10000.00',
+    '===SWCONFIG===',
+    'VLAN|ports: 0t 1 2 3 4 6t',
+    'Port 0:',
+    '  link: port:0 link:up speed:1000baseT full-duplex',
+    'Port 1:',
+    '  link: port:1 link:up speed:1000baseT full-duplex',
+    'Port 6:',
+    '  link: port:6 link:up speed:1000baseT full-duplex',
+    '===WIFI_INFO===',
+    'ath1      IEEE 802.11ac  ESSID:"HomeWiFi"',
+    '          Mode:Master  Frequency:5.18 GHz',
+    '===WIFI===',
+    'WIFI_IF=ath1',
+    'ADDR               AID CHAN TXRATE RXRATE RSSI MINRSSI MAXRSSI IDLE',
+    'aa:aa:aa:aa:aa:01    1   36     0M     0M   30      20      35    0',
+    'bb:bb:bb:bb:bb:02    2   36   866M   780M   44      40      48    0',
+  ].join('\n');
+
+  const { telemetry } = convertProbeToTelemetry(cfg, raw, null, 1_700_000_000_000);
+  // Only physical Port 1 remains (CPU ports 0t and 6t excluded)
+  assert.deepEqual(
+    telemetry.ports.map((p) => p.id),
+    ['port1']
+  );
+  // Ghost 0M/0M station excluded; real station kept with 5 GHz band
+  assert.deepEqual(
+    telemetry.clients.map((c) => c.mac),
+    ['bb:bb:bb:bb:bb:02']
+  );
+  assert.equal(telemetry.clients[0].wifiBand, '5 GHz');
 });

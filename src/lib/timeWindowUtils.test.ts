@@ -177,3 +177,33 @@ test('getDisplaySegmentsForAnalysis downsamples 15m+ windows when unzoomed and p
   const segs5m = getDisplaySegmentsForAnalysis(analysis5m, false);
   assert.equal(segs5m.flat().length, analysis5m.points.length);
 });
+
+test('analyzeTimeWindow stitches all live history points newer than last rollup so right edge connects seamlessly', () => {
+  const now = 1_700_000_000_000;
+  // 1-minute rollups up to 90s ago
+  const rollups: TrafficPoint[] = [];
+  for (let m = 60; m >= 2; m--) {
+    rollups.push({
+      timestamp: now - m * 60_000,
+      rxBps: 2_000_000,
+      txBps: 500_000,
+      activeFlows: 8,
+    });
+  }
+  // Live 3s history continuing all the way to `now` (spanning 2 newer minutes beyond rollups)
+  const history: TrafficPoint[] = [];
+  for (let s = 120; s >= 0; s -= 3) {
+    history.push({
+      timestamp: now - s * 1000,
+      rxBps: 3_000_000,
+      txBps: 700_000,
+      activeFlows: 10,
+    });
+  }
+
+  const res = analyzeTimeWindow('1h', history, rollups, now);
+  assert.equal(res.segments.length, 1);
+  assert.equal(res.noDataRanges.length, 0);
+  const lastPoint = res.points[res.points.length - 1];
+  assert.equal(lastPoint.timestamp, now);
+});

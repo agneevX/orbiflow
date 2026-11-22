@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import type { BandwidthUnit, ClientDestinationLink } from '../types/telemetry';
+import type { BandwidthUnit, ClientDestinationLink, LanTrafficSummary } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
 import { formatBandwidth, formatBytes, isPrivateIp } from '../lib/formatters';
 
@@ -10,6 +10,7 @@ interface ClientFlowDiagramProps {
   scope: FlowScopeTab;
   unit: BandwidthUnit;
   theme: ThemePalette;
+  lanSummary?: LanTrafficSummary;
   onSelectFilter: (query: string) => void;
 }
 
@@ -43,6 +44,7 @@ export function ClientFlowDiagram({
   scope,
   unit,
   theme,
+  lanSummary,
   onSelectFilter,
 }: ClientFlowDiagramProps) {
   const [hoveredClient, setHoveredClient] = useState<string | null>(null);
@@ -250,15 +252,32 @@ export function ClientFlowDiagram({
     return layout.ribbons.find((r) => r.key === hoveredLinkKey)?.link || null;
   }, [hoveredLinkKey, layout.ribbons]);
 
+  const showLanSummary = scope === 'lan' && lanSummary && lanSummary.totalBps > 0;
+
   if (layout.clientNodes.length === 0 || layout.serviceNodes.length === 0) {
     return (
       <div
         data-testid="client-flow-empty"
-        className="py-8 text-center text-xs app-text-muted"
+        className="py-8 text-center text-xs app-text-muted space-y-1.5"
       >
-        {scope === 'lan'
-          ? 'No active LAN-to-LAN traffic flows detected right now.'
-          : 'Waiting for active internet traffic flows...'}
+        {scope === 'lan' ? (
+          showLanSummary ? (
+            <>
+              <div className="font-medium app-text-secondary tabular-nums">
+                LAN interface ({lanSummary.iface}): ↓ {formatBandwidth(lanSummary.rxBps, unit)} · ↑{' '}
+                {formatBandwidth(lanSummary.txBps, unit)}
+              </div>
+              <div>
+                Switched LAN traffic detected on {lanSummary.iface} (L2 local traffic bypasses
+                conntrack).
+              </div>
+            </>
+          ) : (
+            <div>No active LAN-to-LAN traffic flows detected right now.</div>
+          )
+        ) : (
+          <div>Waiting for active internet traffic flows...</div>
+        )}
       </div>
     );
   }
@@ -270,8 +289,26 @@ export function ClientFlowDiagram({
       data-scope={scope}
       data-client-count={layout.clientNodes.length}
     >
+      {showLanSummary && (
+        <div
+          data-testid="lan-iface-summary"
+          className="mb-2 flex items-center justify-end text-[11px] app-text-muted tabular-nums"
+        >
+          <span>
+            LAN ({lanSummary.iface}):{' '}
+            <span className="font-medium app-text-secondary">
+              ↓ {formatBandwidth(lanSummary.rxBps, unit)}
+            </span>{' '}
+            ·{' '}
+            <span className="font-medium app-text-secondary">
+              ↑ {formatBandwidth(lanSummary.txBps, unit)}
+            </span>
+          </span>
+        </div>
+      )}
+
       {activeLink && (
-        <div className="pointer-events-none absolute right-2 top-1 z-10 px-2.5 py-1 rounded-lg border app-border app-surface/95 shadow text-[11px] tabular-nums app-text-secondary">
+        <div className="pointer-events-none absolute right-2 top-1 z-10 px-2.5 py-1 rounded-lg border app-border app-floating-bar shadow text-[11px] tabular-nums app-text-secondary">
           {activeLink.clientName} → {activeLink.service} ·{' '}
           {formatBandwidth(activeLink.totalBps, unit)} · {formatBytes(activeLink.totalBytes)} (
           {activeLink.flowCount} conn)

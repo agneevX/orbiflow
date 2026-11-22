@@ -9,6 +9,7 @@ import type {
   EthernetPortMetrics,
   HostSummary,
   InterfaceCounters,
+  LanTrafficSummary,
   NotificationConfig,
   ProbeSnapshot,
   ProbeStatus,
@@ -28,8 +29,9 @@ import type {
 import {
   classifyApplication,
   computePerceivedRouterLoadPct,
-  condenseServiceLabel,
   describeRemoteIp,
+  extractNamedService,
+  extractWifiBand,
   hasTangibleTraffic,
   isActiveConnectionState,
   isPrivateIp,
@@ -293,6 +295,8 @@ export class TrafficMonitorEngine {
   private readonly topServicesRefreshMs = 15_000;
   private routerPorts: EthernetPortMetrics[] = [];
   private prevRouterPortBytes = new Map<string, { rx: number; tx: number }>();
+  private prevLanIfaceBytes = new Map<string, { rx: number; tx: number }>();
+  private latestLanSummary: LanTrafficSummary | undefined = undefined;
   private wanDetails: WanDetails | null = null;
   private routerSatelliteInfo: SatelliteInfoEntry[] = [];
   private routerClients: SatelliteClientLink[] = [];
@@ -1207,34 +1211,55 @@ export class TrafficMonitorEngine {
 
     // Refresh connected host presence cache from ARP + router/satellite client tables
     const attachedMacs = new Set<string>();
-    const clientLinkByMac = new Map<string, SatelliteClientLink>();
-    const clientLinkByIp = new Map<string, SatelliteClientLink>();
-    const registerClientLink = (link: SatelliteClientLink) => {
+    type AttachedClientMeta = { link: SatelliteClientLink; apName: string; fromSatellite: boolean };
+    const clientLinkByMac = new Map<string, AttachedClientMeta>();
+    const clientLinkByIp = new Map<string, AttachedClientMeta>();
+    const isActiveWifiLink = (link: SatelliteClientLink) =>
+      link.connectionType === 'wifi' &&
+      ((link.wifiRxMbps ?? 0) > 0 || (link.wifiTxMbps ?? 0) > 0 || (link.linkSpeedMbps ?? 0) > 0);
+    const isConfirmedPhysicalPort = (link: SatelliteClientLink) =>
+      link.connectionType === 'ethernet' && /^LAN\s*\d+/i.test(link.portOrRadio || '');
+
+    const shouldReplaceLink = (existing: AttachedClientMeta | undefined, incoming: AttachedClientMeta): boolean => {
+      if (!existing) return true;
+      // Satellite attachment is more specific than generic router bridge entry
+      if (incoming.fromSatellite && !existing.fromSatellite) {
+        if (!isConfirmedPhysicalPort(existing.link) && !isActiveWifiLink(existing.link)) return true;
+        if (isActiveWifiLink(incoming.link) || isConfirmedPhysicalPort(incoming.link)) return true;
+      }
+      // Confirmed physical switch port beats ghost/0-rate Wi-Fi or generic bridge entry
+      if (isConfirmedPhysicalPort(incoming.link) && !isActiveWifiLink(existing.link)) return true;
+      // Active Wi-Fi beats generic bridge Ethernet (e.g. br0/Ethernet without physical port)
+      if (isActiveWifiLink(incoming.link) && !isConfirmedPhysicalPort(existing.link) && !isActiveWifiLink(existing.link)) {
+        return true;
+      }
+      return false;
+    };
+
+    const registerClientLink = (link: SatelliteClientLink, apName: string, fromSatellite: boolean) => {
+      const candidate: AttachedClientMeta = { link, apName, fromSatellite };
       const m = normalizeMac(link.mac);
       if (m && m !== '00:00:00:00:00:00') {
         attachedMacs.add(m);
-        const existing = clientLinkByMac.get(m);
-        // Prefer direct Wi-Fi station records over L2 Ethernet bridge entries
-        if (!existing || (existing.connectionType !== 'wifi' && link.connectionType === 'wifi')) {
-          clientLinkByMac.set(m, link);
+        if (shouldReplaceLink(clientLinkByMac.get(m), candidate)) {
+          clientLinkByMac.set(m, candidate);
         }
       }
       if (link.ip) {
-        const existingIp = clientLinkByIp.get(link.ip);
-        if (!existingIp || (existingIp.connectionType !== 'wifi' && link.connectionType === 'wifi')) {
-          clientLinkByIp.set(link.ip, link);
+        if (shouldReplaceLink(clientLinkByIp.get(link.ip), candidate)) {
+          clientLinkByIp.set(link.ip, candidate);
         }
       }
     };
 
     const allSatellites = this.buildTopologyTelemetry().satellites;
     for (const rc of this.routerClients) {
-      registerClientLink(rc);
+      registerClientLink(rc, 'Main AP', false);
     }
     for (const sat of allSatellites) {
       if (!sat.connected) continue;
       for (const sc of sat.clients || []) {
-        registerClientLink(sc);
+        registerClientLink(sc, sat.name, true);
       }
     }
 
@@ -1365,11 +1390,13 @@ export class TrafficMonitorEngine {
         host.rxBps += f.rxBps;
         host.txBps += f.txBps;
         host.appCounts.set(f.app, (host.appCounts.get(f.app) || 0) + f.totalBytes);
-        const shortSvc = condenseServiceLabel(f.dstService, f.app);
-        const weight = hasTangibleTraffic(f.rxBps, f.txBps)
-          ? Math.max(f.totalBytes, f.totalBps * 10)
-          : Math.max(1, Math.round(f.totalBytes * 0.1));
-        host.serviceCounts.set(shortSvc, (host.serviceCounts.get(shortSvc) || 0) + weight);
+        const namedSvc = extractNamedService(f.dstService, f.dstHost);
+        if (namedSvc) {
+          const weight = hasTangibleTraffic(f.rxBps, f.txBps)
+            ? Math.max(f.totalBytes, f.totalBps * 10)
+            : Math.max(1, Math.round(f.totalBytes * 0.1));
+          host.serviceCounts.set(namedSvc, (host.serviceCounts.get(namedSvc) || 0) + weight);
+        }
         host.observedFlows.push({
           dstService: f.dstService,
           dstHost: f.dstHost,
@@ -1469,9 +1496,10 @@ export class TrafficMonitorEngine {
         }
 
         const normMac = normalizeMac(rest.mac);
-        const clientLink =
+        const clientLinkMeta =
           (normMac && normMac !== '00:00:00:00:00:00' ? clientLinkByMac.get(normMac) : undefined) ||
           clientLinkByIp.get(rest.ip);
+        const clientLink = clientLinkMeta?.link;
         const isWifi = clientLink?.connectionType === 'wifi';
         const fallbackWifiSpeed =
           isWifi && clientLink.linkSpeedMbps > 0 ? clientLink.linkSpeedMbps : undefined;
@@ -1481,6 +1509,10 @@ export class TrafficMonitorEngine {
         const wifiTxMbps = isWifi
           ? (clientLink.wifiTxMbps && clientLink.wifiTxMbps > 0 ? clientLink.wifiTxMbps : fallbackWifiSpeed)
           : undefined;
+        const wifiBand = isWifi
+          ? clientLink.wifiBand || extractWifiBand(clientLink.portOrRadio)
+          : undefined;
+        const apName = clientLinkMeta?.apName || 'Main AP';
 
         return {
           ...rest,
@@ -1494,8 +1526,10 @@ export class TrafficMonitorEngine {
           aliasMatchBy: identity.aliasMatchBy,
           topApps: sortedApps,
           topServices: stableTopServices,
-          connectionType: clientLink?.connectionType,
-          linkRadioOrPort: clientLink?.portOrRadio,
+          connectionType: (isWifi ? 'wifi' : 'ethernet') as 'wifi' | 'ethernet',
+          linkRadioOrPort: isWifi ? wifiBand : clientLink?.portOrRadio || 'Ethernet',
+          wifiBand,
+          apName,
           wifiRxMbps,
           wifiTxMbps,
           wifiSignalDbm: isWifi ? clientLink.signalDbm : undefined,
@@ -1584,6 +1618,113 @@ export class TrafficMonitorEngine {
       clientLinkMap.set(linkKey, existingLink);
     }
 
+    // Compute LAN interface summary (e.g., eth1 across all LAN ports, br0, Wi-Fi) strictly excluding WAN traffic
+    const measuredLanIfaces: Array<{
+      iface: string;
+      rxBps: number;
+      txBps: number;
+      rxBytes: number;
+      txBytes: number;
+    }> = [];
+    if (Array.isArray(snapshot.lanIfaces) && snapshot.lanIfaces.length > 0) {
+      for (const lif of snapshot.lanIfaces) {
+        const prev = this.prevLanIfaceBytes.get(lif.iface);
+        const lifRxBps =
+          prev && lif.rxBytes >= prev.rx ? Math.round((lif.rxBytes - prev.rx) / dtSec) : 0;
+        const lifTxBps =
+          prev && lif.txBytes >= prev.tx ? Math.round((lif.txBytes - prev.tx) / dtSec) : 0;
+        this.prevLanIfaceBytes.set(lif.iface, { rx: lif.rxBytes, tx: lif.txBytes });
+        measuredLanIfaces.push({
+          iface: lif.iface,
+          rxBps: lifRxBps,
+          txBps: lifTxBps,
+          rxBytes: lif.rxBytes,
+          txBytes: lif.txBytes,
+        });
+      }
+    }
+
+    const conntrackLanLinks = Array.from(clientLinkMap.values()).filter((l) => l.scope === 'lan');
+    const conntrackLanRxBps = conntrackLanLinks.reduce((sum, l) => sum + l.rxBps, 0);
+    const conntrackLanTxBps = conntrackLanLinks.reduce((sum, l) => sum + l.txBps, 0);
+
+    const primaryLanIface =
+      measuredLanIfaces.find((i) => i.iface === 'eth1') ||
+      measuredLanIfaces.find((i) => i.iface === 'br0' || i.iface === 'br-lan') ||
+      measuredLanIfaces.find((i) => i.iface.startsWith('lan')) ||
+      measuredLanIfaces[0];
+
+    if (primaryLanIface) {
+      // On eth1/br0, routed WAN download goes out tx and WAN upload comes in rx; subtract WAN so WAN never bleeds into LAN
+      const lanIntraRx = Math.max(0, Math.round(primaryLanIface.rxBps - txBps));
+      const lanIntraTx = Math.max(0, Math.round(primaryLanIface.txBps - rxBps));
+      const effectiveLanRx = Math.max(conntrackLanRxBps, lanIntraRx);
+      const effectiveLanTx = Math.max(conntrackLanTxBps, lanIntraTx);
+      this.latestLanSummary = {
+        iface: primaryLanIface.iface,
+        rxBps: effectiveLanRx,
+        txBps: effectiveLanTx,
+        totalBps: effectiveLanRx + effectiveLanTx,
+        rxBytes: primaryLanIface.rxBytes,
+        txBytes: primaryLanIface.txBytes,
+        activeInterfaces: measuredLanIfaces
+          .filter((i) => i.rxBps + i.txBps > 512)
+          .map((i) => i.iface),
+      };
+
+      // When L2 switched/bridged LAN traffic on eth1/br0 bypasses L3 conntrack, surface clean LAN-only flow links
+      const unmeasuredLanRx = Math.max(0, lanIntraRx - conntrackLanRxBps);
+      const unmeasuredLanTx = Math.max(0, lanIntraTx - conntrackLanTxBps);
+      const unmeasuredLanTotal = unmeasuredLanRx + unmeasuredLanTx;
+      if (unmeasuredLanTotal >= 10_240 && conntrackLanLinks.length < 3) {
+        const activePorts = this.routerPorts
+          .filter((p) => p.role !== 'wan' && p.linkUp && p.rxBps + p.txBps >= 8_192)
+          .sort((a, b) => b.rxBps + b.txBps - (a.rxBps + a.txBps));
+
+        if (activePorts.length >= 2 && conntrackLanLinks.length === 0) {
+          const srcPort = activePorts[0];
+          const dstPort = activePorts[1];
+          clientLinkMap.set(`lan:iface:${srcPort.id}=>${dstPort.id}`, {
+            clientIp: srcPort.id,
+            clientName: srcPort.label,
+            service: dstPort.label,
+            category: 'Local Network',
+            scope: 'lan',
+            rxBps: unmeasuredLanRx,
+            txBps: unmeasuredLanTx,
+            totalBps: unmeasuredLanTotal,
+            totalBytes: primaryLanIface.rxBytes + primaryLanIface.txBytes,
+            flowCount: 1,
+          });
+        } else if (conntrackLanLinks.length === 0) {
+          const ifaceLabel = `LAN Switch (${primaryLanIface.iface})`;
+          const targetLabel =
+            activePorts.length === 1 ? activePorts[0].label : 'Local Network';
+          clientLinkMap.set(`lan:iface:${primaryLanIface.iface}=>${targetLabel}`, {
+            clientIp: primaryLanIface.iface,
+            clientName: ifaceLabel,
+            service: targetLabel,
+            category: 'Local Network',
+            scope: 'lan',
+            rxBps: unmeasuredLanRx,
+            txBps: unmeasuredLanTx,
+            totalBps: unmeasuredLanTotal,
+            totalBytes: primaryLanIface.rxBytes + primaryLanIface.txBytes,
+            flowCount: 1,
+          });
+        }
+      }
+    } else if (conntrackLanLinks.length > 0) {
+      this.latestLanSummary = {
+        iface: 'LAN',
+        rxBps: conntrackLanRxBps,
+        txBps: conntrackLanTxBps,
+        totalBps: conntrackLanRxBps + conntrackLanTxBps,
+        rxBytes: conntrackLanLinks.reduce((s, l) => s + l.totalBytes, 0),
+        txBytes: 0,
+      };
+    }
+
     this.serverStats.randomizedMacCount = randomizedMacCount;
 
     const protocols: ProtocolSummary[] = Array.from(protoMap.values())
@@ -1602,9 +1743,13 @@ export class TrafficMonitorEngine {
       .sort((a, b) => b.bps - a.bps || b.bytes - a.bytes)
       .slice(0, 12);
 
-    const clientLinks: ClientDestinationLink[] = Array.from(clientLinkMap.values())
-      .sort((a, b) => b.totalBps - a.totalBps || b.totalBytes - a.totalBytes)
-      .slice(0, 24);
+    // Keep top Internet links and top LAN links balanced so high WAN flow counts never crowd out LAN links
+    const allLinksSorted = Array.from(clientLinkMap.values()).sort(
+      (a, b) => b.totalBps - a.totalBps || b.totalBytes - a.totalBytes
+    );
+    const internetLinks = allLinksSorted.filter((l) => l.scope === 'internet').slice(0, 18);
+    const lanLinks = allLinksSorted.filter((l) => l.scope === 'lan').slice(0, 10);
+    const clientLinks: ClientDestinationLink[] = [...internetLinks, ...lanLinks];
 
     const newAlerts = this.evaluateRules(
       now,
@@ -1629,6 +1774,7 @@ export class TrafficMonitorEngine {
         peakRxBps: Math.round(this.peakRxBps),
         peakTxBps: Math.round(this.peakTxBps),
       },
+      ...(this.latestLanSummary ? { lanSummary: { ...this.latestLanSummary } } : {}),
       history: [...this.history],
       rollupHistory: [...this.rollupHistory],
       flows: enrichedFlows,

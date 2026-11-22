@@ -569,7 +569,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
         flushSwitchPort();
         continue;
       }
-      const vlanPortsMatch = line.match(/^ports:\s*(.+)$/i);
+      const vlanPortsMatch = line.match(/^(?:VLAN\|)?ports:\s*(.+)$/i);
       if (vlanPortsMatch) {
         flushSwitchPort();
         for (const tok of vlanPortsMatch[1].trim().split(/\s+/)) {

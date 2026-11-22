@@ -670,15 +670,12 @@ export function convertProbeToTelemetry(
       if (backhaulType === 'ethernet' && brIfaceName === backhaulIface) {
         continue;
       }
-      const matchingPort =
-        ports.find((p) => p.id === brIfaceName) ||
-        ports.find((p) => p.role === 'lan' && p.linkUp && p.speedMbps > 0);
       clientsByMac.set(mac, {
         mac,
         ip: ipByMac.get(mac),
         connectionType: 'ethernet',
-        portOrRadio: matchingPort?.label || brIfaceName,
-        linkSpeedMbps: matchingPort?.speedMbps || 0,
+        portOrRadio: 'Ethernet',
+        linkSpeedMbps: 0,
         rxBytes: 0,
         txBytes: 0,
         rxBps: 0,

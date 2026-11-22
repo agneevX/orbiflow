@@ -13,16 +13,18 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Radio,
-  Share2,
   Sliders,
   Sun,
   Terminal,
   X,
 } from 'lucide-react';
-import type { BandwidthUnit, FeatureVisibility, ProbeStatus } from '../types/telemetry';
+import type { FeatureVisibility, ProbeStatus } from '../types/telemetry';
 import {
+  AUTO_THEME_PAIRS,
   DARK_THEMES,
   LIGHT_THEMES,
+  findAutoThemePair,
+  type AutoThemePair,
   type ThemeId,
   type ThemeMode,
 } from '../lib/themes';
@@ -30,7 +32,7 @@ import { DEFAULT_FEATURE_VISIBILITY } from '../lib/tablePreferences';
 import { formatDuration } from '../lib/formatters';
 import { TechTerm } from './TechTerm';
 
-export type NavTab = 'overview' | 'topology' | 'flows' | 'hosts' | 'alerts' | 'setup' | 'settings';
+export type NavTab = 'overview' | 'flows' | 'hosts' | 'alerts' | 'setup' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -42,8 +44,7 @@ interface SidebarProps {
   activeThemeId: ThemeId;
   onChangeThemeMode: (mode: ThemeMode) => void;
   onChangeActiveTheme: (themeId: ThemeId) => void;
-  unit: BandwidthUnit;
-  onChangeUnit: (u: BandwidthUnit) => void;
+  onSelectAutoThemePair: (pair: AutoThemePair) => void;
   onToggleSimulator: (enabled: boolean) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -59,7 +60,6 @@ const NAV_ITEMS: Array<{
   featureKey?: keyof FeatureVisibility;
 }> = [
   { id: 'overview', label: 'Home', icon: Home },
-  { id: 'topology', label: 'Traffic Map', icon: Share2, featureKey: 'trafficMap' },
   { id: 'flows', label: 'Connections', icon: Layers, featureKey: 'connections' },
   { id: 'hosts', label: 'Devices', icon: Network, featureKey: 'devices' },
   { id: 'alerts', label: 'Alerts', icon: Bell, featureKey: 'alerts' },
@@ -83,8 +83,7 @@ export function Sidebar({
   activeThemeId,
   onChangeThemeMode,
   onChangeActiveTheme,
-  unit,
-  onChangeUnit,
+  onSelectAutoThemePair,
   onToggleSimulator,
   collapsed,
   onToggleCollapse,
@@ -92,9 +91,12 @@ export function Sidebar({
   onCloseMobile,
   featureVisibility = DEFAULT_FEATURE_VISIBILITY,
 }: SidebarProps) {
-  const visibleNavItems = NAV_ITEMS.filter(
-    (item) => !item.featureKey || featureVisibility[item.featureKey]
-  );
+  const visibleNavItems = NAV_ITEMS.filter((item) => {
+    if (item.id === 'hosts') {
+      return featureVisibility.devices || featureVisibility.trafficMap;
+    }
+    return !item.featureKey || featureVisibility[item.featureKey];
+  });
   const conntrackPct =
     probe.conntrackMax > 0
       ? Math.min(100, Math.round((probe.conntrackCount / probe.conntrackMax) * 100))
@@ -115,6 +117,7 @@ export function Sidebar({
         : 'text-amber-500';
 
   const availableThemes = effectiveIsDark ? DARK_THEMES : LIGHT_THEMES;
+  const activeAutoPair = findAutoThemePair(activeThemeId);
 
   const renderNavContent = (isCollapsed: boolean) => (
     <div className="flex h-full flex-col app-sidebar border-r">
@@ -258,7 +261,7 @@ export function Sidebar({
               </div>
             </div>
 
-            {/* Part 2: Theme Palette following active Dark/Light mode */}
+            {/* Part 2: Theme Palette (Auto pairs both dark & light families; Dark/Light picks directly) */}
             <div className="space-y-1.5">
               <label
                 htmlFor="theme-palette-select"
@@ -269,47 +272,41 @@ export function Sidebar({
                   Theme
                 </span>
                 <span className="text-[11px] font-normal opacity-80">
-                  {effectiveIsDark ? 'Dark' : 'Light'}
+                  {themeMode === 'auto' ? 'Auto Pair' : effectiveIsDark ? 'Dark' : 'Light'}
                 </span>
               </label>
-              <select
-                id="theme-palette-select"
-                data-testid="theme-palette-select"
-                value={activeThemeId}
-                onChange={(e) => onChangeActiveTheme(e.target.value as ThemeId)}
-                className="w-full h-9 app-input border rounded-xl px-2.5 text-xs focus:outline-none focus:border-sky-500"
-              >
-                {availableThemes.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Speed Unit */}
-            <div className="space-y-1.5">
-              <span className="flex items-center h-4 text-xs font-medium app-text-muted">
-                Speed Unit
-              </span>
-              <div
-                role="group"
-                aria-label="Bandwidth speed unit"
-                className="grid grid-cols-2 h-9 app-input border rounded-xl p-1"
-              >
-                {(['Mbps', 'MB/s'] as BandwidthUnit[]).map((u) => (
-                  <button
-                    key={u}
-                    type="button"
-                    onClick={() => onChangeUnit(u)}
-                    className={`h-full text-[11px] font-mono rounded-lg transition-colors ${
-                      unit === u ? 'app-surface font-semibold' : 'app-text-muted'
-                    }`}
-                  >
-                    {u}
-                  </button>
-                ))}
-              </div>
+              {themeMode === 'auto' ? (
+                <select
+                  id="theme-palette-select"
+                  data-testid="theme-palette-select"
+                  value={activeAutoPair.id}
+                  onChange={(e) => {
+                    const pair = AUTO_THEME_PAIRS.find((p) => p.id === e.target.value);
+                    if (pair) onSelectAutoThemePair(pair);
+                  }}
+                  className="w-full h-9 app-input border rounded-xl px-2.5 text-xs focus:outline-none focus:border-sky-500"
+                >
+                  {AUTO_THEME_PAIRS.map((pair) => (
+                    <option key={pair.id} value={pair.id}>
+                      {pair.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <select
+                  id="theme-palette-select"
+                  data-testid="theme-palette-select"
+                  value={activeThemeId}
+                  onChange={(e) => onChangeActiveTheme(e.target.value as ThemeId)}
+                  className="w-full h-9 app-input border rounded-xl px-2.5 text-xs focus:outline-none focus:border-sky-500"
+                >
+                  {availableThemes.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
           </div>
         )}

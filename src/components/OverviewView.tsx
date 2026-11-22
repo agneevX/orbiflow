@@ -21,6 +21,7 @@ import {
   computeWindowPeaks,
   formatBandwidth,
   formatBytes,
+  formatMbpsAlways,
   hasTangibleTraffic,
 } from '../lib/formatters';
 
@@ -114,7 +115,7 @@ export function OverviewView({
             data-testid="kpi-download-live"
             className="font-display text-lg sm:text-xl font-semibold tracking-tight leading-snug tabular-nums"
           >
-            {formatBandwidth(snapshot.kpis.rxBps, unit)}
+            {formatMbpsAlways(snapshot.kpis.rxBps)}
           </div>
           <div
             data-testid="kpi-download-peak"
@@ -122,7 +123,7 @@ export function OverviewView({
           >
             {timeWindow} peak:{' '}
             <span className="font-medium app-text-secondary">
-              {formatBandwidth(windowPeaks.peakRxBps, unit)}
+              {formatMbpsAlways(windowPeaks.peakRxBps)}
             </span>
           </div>
         </div>
@@ -136,7 +137,7 @@ export function OverviewView({
             data-testid="kpi-upload-live"
             className="font-display text-lg sm:text-xl font-semibold tracking-tight leading-snug tabular-nums"
           >
-            {formatBandwidth(snapshot.kpis.txBps, unit)}
+            {formatMbpsAlways(snapshot.kpis.txBps)}
           </div>
           <div
             data-testid="kpi-upload-peak"
@@ -144,7 +145,7 @@ export function OverviewView({
           >
             {timeWindow} peak:{' '}
             <span className="font-medium app-text-secondary">
-              {formatBandwidth(windowPeaks.peakTxBps, unit)}
+              {formatMbpsAlways(windowPeaks.peakTxBps)}
             </span>
           </div>
         </div>
@@ -152,12 +153,14 @@ export function OverviewView({
         <button
           type="button"
           data-testid="kpi-clients-online-card"
-          disabled={!featureVisibility.devices}
+          disabled={!featureVisibility.devices && !featureVisibility.trafficMap}
           onClick={() => {
-            if (featureVisibility.devices) onOpenHosts?.();
+            if (featureVisibility.devices || featureVisibility.trafficMap) onOpenHosts?.();
           }}
           className={`app-surface border rounded-2xl px-4 py-2.5 sm:px-4 sm:py-3 flex flex-col justify-between gap-1 text-left transition-colors ${
-            featureVisibility.devices ? 'app-row-hover cursor-pointer' : 'cursor-default'
+            featureVisibility.devices || featureVisibility.trafficMap
+              ? 'app-row-hover cursor-pointer'
+              : 'cursor-default'
           }`}
         >
           <div className="flex items-center justify-between gap-2 text-xs app-text-muted w-full">
@@ -317,6 +320,7 @@ export function OverviewView({
             scope={flowsTab}
             unit={unit}
             theme={theme}
+            lanSummary={snapshot.lanSummary}
             onSelectFilter={onSelectFilter}
           />
         </section>

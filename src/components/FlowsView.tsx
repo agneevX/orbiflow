@@ -85,6 +85,17 @@ export function FlowsView({
   const columnsRef = useRef<HTMLDivElement>(null);
   const PAGE_SIZE = 50;
 
+  const [localPrefs, setLocalPrefs] = useState<ConnectionsTablePrefs>(prefs);
+  const prefsSignature = useMemo(() => JSON.stringify(prefs), [prefs]);
+  const lastSyncedPrefsRef = useRef<string>(prefsSignature);
+
+  useEffect(() => {
+    if (prefsSignature !== lastSyncedPrefsRef.current) {
+      lastSyncedPrefsRef.current = prefsSignature;
+      setLocalPrefs(prefs);
+    }
+  }, [prefs, prefsSignature]);
+
   useEffect(() => {
     if (!columnsOpen) return;
     const onDocClick = (e: MouseEvent) => {
@@ -172,29 +183,32 @@ export function FlowsView({
   };
 
   const togglePref = (key: keyof ConnectionsTablePrefs) => {
-    const next: ConnectionsTablePrefs = { ...prefs, [key]: !prefs[key] };
+    const next: ConnectionsTablePrefs = { ...localPrefs, [key]: !localPrefs[key] };
+    setLocalPrefs(next);
     void onUpdatePrefs(next);
   };
 
   const resetColumnDefaults = () => {
-    void onUpdatePrefs({ ...DEFAULT_CONNECTIONS_TABLE_PREFS });
+    const next = { ...DEFAULT_CONNECTIONS_TABLE_PREFS };
+    setLocalPrefs(next);
+    void onUpdatePrefs(next);
   };
 
   const visibleColCount = [
-    prefs.showAppProtocol,
-    prefs.showLocalDevice,
-    prefs.showDestination,
-    prefs.showDestinationIpPort,
-    prefs.showCategory,
-    prefs.showDownload,
-    prefs.showUpload,
-    prefs.showTotal,
-    prefs.showDuration,
+    localPrefs.showAppProtocol,
+    localPrefs.showLocalDevice,
+    localPrefs.showDestination,
+    localPrefs.showDestinationIpPort,
+    localPrefs.showCategory,
+    localPrefs.showDownload,
+    localPrefs.showUpload,
+    localPrefs.showTotal,
+    localPrefs.showDuration,
   ].filter(Boolean).length;
 
   const isCustomized = (
     Object.keys(DEFAULT_CONNECTIONS_TABLE_PREFS) as Array<keyof ConnectionsTablePrefs>
-  ).some((k) => prefs[k] !== DEFAULT_CONNECTIONS_TABLE_PREFS[k]);
+  ).some((k) => localPrefs[k] !== DEFAULT_CONNECTIONS_TABLE_PREFS[k]);
 
   const totalScopeCount = showIdle ? flows.length : activeCount + endedCount;
 
@@ -339,7 +353,7 @@ export function FlowsView({
                       <input
                         type="checkbox"
                         data-testid={`flows-col-${item.key}`}
-                        checked={prefs[item.key]}
+                        checked={localPrefs[item.key]}
                         onChange={() => togglePref(item.key)}
                         className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
                       />
@@ -360,7 +374,7 @@ export function FlowsView({
                       <input
                         type="checkbox"
                         data-testid={`flows-col-${item.key}`}
-                        checked={prefs[item.key]}
+                        checked={localPrefs[item.key]}
                         onChange={() => togglePref(item.key)}
                         className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
                       />
@@ -384,35 +398,39 @@ export function FlowsView({
           <table className="w-full text-left border-collapse" data-testid="flows-table">
             <thead>
               <tr className="border-b app-border text-[11px] font-medium app-text-muted app-sidebar">
-                {prefs.showAppProtocol && (
+                {localPrefs.showAppProtocol && (
                   <th className="py-2.5 px-3 whitespace-nowrap">
                     <TechTerm
-                      label={prefs.showProtocol && protoFilter === 'ALL' ? 'App / Protocol' : 'App'}
+                      label={
+                        localPrefs.showProtocol && protoFilter === 'ALL' ? 'App / Protocol' : 'App'
+                      }
                       tip="Detected application or service type along with the optional underlying transport protocol (TCP, UDP, or ICMP)."
                     />
                   </th>
                 )}
-                {prefs.showLocalDevice && (
+                {localPrefs.showLocalDevice && (
                   <th className="py-2.5 px-3 whitespace-nowrap">
                     <TechTerm
-                      label={prefs.showLocalPort ? 'Local Device : Port' : 'Local Device'}
+                      label={localPrefs.showLocalPort ? 'Local Device : Port' : 'Local Device'}
                       tip="The device on your local network initiating or receiving this connection."
                     />
                   </th>
                 )}
-                {prefs.showDestination && (
+                {localPrefs.showDestination && (
                   <th className="py-2.5 px-3 whitespace-nowrap">
                     <TechTerm
-                      label={prefs.showDestinationRdns ? 'Destination' : 'Destination Service'}
+                      label={localPrefs.showDestinationRdns ? 'Destination' : 'Destination Service'}
                       tip="Detected destination service name with reverse DNS hostname shown underneath when resolved."
                     />
                   </th>
                 )}
-                {prefs.showDestinationIpPort && (
+                {localPrefs.showDestinationIpPort && (
                   <th className="py-2.5 px-3 whitespace-nowrap">Destination IP : Port</th>
                 )}
-                {prefs.showCategory && <th className="py-2.5 px-3 whitespace-nowrap">Category</th>}
-                {prefs.showDownload && (
+                {localPrefs.showCategory && (
+                  <th className="py-2.5 px-3 whitespace-nowrap">Category</th>
+                )}
+                {localPrefs.showDownload && (
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">
                     <button
                       type="button"
@@ -424,7 +442,7 @@ export function FlowsView({
                     </button>
                   </th>
                 )}
-                {prefs.showUpload && (
+                {localPrefs.showUpload && (
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">
                     <button
                       type="button"
@@ -436,7 +454,7 @@ export function FlowsView({
                     </button>
                   </th>
                 )}
-                {prefs.showTotal && (
+                {localPrefs.showTotal && (
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">
                     <button
                       type="button"
@@ -448,7 +466,7 @@ export function FlowsView({
                     </button>
                   </th>
                 )}
-                {prefs.showDuration && (
+                {localPrefs.showDuration && (
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">Duration</th>
                 )}
               </tr>
@@ -502,7 +520,7 @@ export function FlowsView({
                         flow.ended ? 'opacity-65' : ''
                       }`}
                     >
-                      {prefs.showAppProtocol && (
+                      {localPrefs.showAppProtocol && (
                         <td className="py-2.5 px-3 whitespace-nowrap">
                           <span className="font-medium">
                             {formatAppForProtocolFilter(
@@ -512,7 +530,7 @@ export function FlowsView({
                               protoFilter
                             )}
                           </span>
-                          {prefs.showProtocol && protoFilter === 'ALL' && (
+                          {localPrefs.showProtocol && protoFilter === 'ALL' && (
                             <span
                               className="ml-1.5 text-[11px] app-text-muted"
                               title={
@@ -529,17 +547,17 @@ export function FlowsView({
                         </td>
                       )}
 
-                      {prefs.showLocalDevice && (
+                      {localPrefs.showLocalDevice && (
                         <td className="py-2.5 px-3 whitespace-nowrap">
                           <div className="tabular-nums">
                             <span className="font-medium">{flow.srcHost}</span>
-                            {prefs.showLocalPort && (
+                            {localPrefs.showLocalPort && (
                               <span className="font-mono text-[11px] app-text-muted">
                                 :{flow.sport}
                               </span>
                             )}
                           </div>
-                          {prefs.showLocalIp && flow.srcHost !== flow.srcIp && (
+                          {localPrefs.showLocalIp && flow.srcHost !== flow.srcIp && (
                             <div className="text-[11px] font-mono app-text-muted tabular-nums">
                               {flow.srcIp}
                             </div>
@@ -547,12 +565,12 @@ export function FlowsView({
                         </td>
                       )}
 
-                      {prefs.showDestination && (
+                      {localPrefs.showDestination && (
                         <td className="py-2.5 px-3 max-w-[300px]">
                           <div className="font-medium truncate" title={flow.dstService}>
                             {flow.dstService}
                           </div>
-                          {prefs.showDestinationRdns && hasResolvedHost && (
+                          {localPrefs.showDestinationRdns && hasResolvedHost && (
                             <div
                               className="text-[11px] app-text-muted truncate"
                               title={flow.dstHost}
@@ -563,19 +581,19 @@ export function FlowsView({
                         </td>
                       )}
 
-                      {prefs.showDestinationIpPort && (
+                      {localPrefs.showDestinationIpPort && (
                         <td className="py-2.5 px-3 font-mono text-[11px] app-text-secondary whitespace-nowrap tabular-nums">
                           {flow.dstIp}:{flow.dport}
                         </td>
                       )}
 
-                      {prefs.showCategory && (
+                      {localPrefs.showCategory && (
                         <td className="py-2.5 px-3 app-text-secondary whitespace-nowrap">
                           {flow.proto === 'ICMP' ? '—' : flow.dstCategory}
                         </td>
                       )}
 
-                      {prefs.showDownload && (
+                      {localPrefs.showDownload && (
                         <td
                           className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums"
                           style={{ color: theme.rxColor }}
@@ -584,7 +602,7 @@ export function FlowsView({
                         </td>
                       )}
 
-                      {prefs.showUpload && (
+                      {localPrefs.showUpload && (
                         <td
                           className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums"
                           style={{ color: theme.txColor }}
@@ -593,13 +611,13 @@ export function FlowsView({
                         </td>
                       )}
 
-                      {prefs.showTotal && (
+                      {localPrefs.showTotal && (
                         <td className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums">
                           {formatBytes(flow.totalBytes)}
                         </td>
                       )}
 
-                      {prefs.showDuration && (
+                      {localPrefs.showDuration && (
                         <td className="py-2.5 px-3 text-right app-text-muted whitespace-nowrap tabular-nums">
                           <span>{formatDuration((flow.lastSeen - flow.firstSeen) / 1000)}</span>
                           {flow.ended && (

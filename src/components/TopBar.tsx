@@ -26,7 +26,6 @@ interface TopBarProps {
 
 const TAB_TITLES: Record<NavTab, string> = {
   overview: 'Home',
-  topology: 'Traffic Map',
   flows: 'Connections',
   hosts: 'Devices',
   alerts: 'Alerts',
@@ -34,7 +33,7 @@ const TAB_TITLES: Record<NavTab, string> = {
   settings: 'Settings',
 };
 
-const PAUSABLE_TABS = new Set<NavTab>(['overview', 'topology', 'flows', 'hosts']);
+const PAUSABLE_TABS = new Set<NavTab>(['overview', 'flows', 'hosts']);
 
 export function TopBar({
   activeTab,
@@ -139,7 +138,7 @@ export function TopBar({
           type="button"
           onClick={onOpenMobileMenu}
           aria-label="Open navigation menu"
-          className="lg:hidden inline-flex items-center justify-center h-9 w-9 sm:h-10 sm:w-10 -ml-1 rounded-xl border app-border app-surface/80 app-text-secondary app-row-hover transition-colors shrink-0"
+          className="lg:hidden inline-flex items-center justify-center h-9 w-9 sm:h-10 sm:w-10 -ml-1 rounded-xl border app-border app-surface app-text-secondary app-row-hover transition-colors shrink-0"
         >
           <PanelLeft className="h-4 w-4 sm:h-[18px] sm:w-[18px]" strokeWidth={1.85} aria-hidden="true" />
         </button>
@@ -159,7 +158,7 @@ export function TopBar({
           onClick={() => setPopoverOpen((v) => !v)}
           aria-expanded={popoverOpen}
           aria-label={`Internet usage ${util.peakPct.toFixed(1)}% (${formatBandwidth(rxBps, unit)} down, ${formatBandwidth(txBps, unit)} up) and router load ${routerLoadPct}%. Click to configure internet plan speeds.`}
-          className="w-full max-w-[240px] sm:max-w-[340px] md:max-w-[400px] xl:max-w-[440px] h-9 sm:h-10 px-3 sm:px-3.5 rounded-xl border app-border app-surface/85 app-row-hover transition-colors flex flex-col justify-center gap-1.5 text-left"
+          className="w-full max-w-[240px] sm:max-w-[340px] md:max-w-[400px] xl:max-w-[440px] h-9 sm:h-10 px-3 sm:px-3.5 rounded-xl border app-border app-surface app-row-hover transition-colors flex flex-col justify-center gap-1.5 text-left"
         >
           <div className="grid grid-cols-2 gap-3 w-full items-center">
             {/* Left bar: Internet (label left, % right) */}
@@ -359,7 +358,7 @@ export function TopBar({
             className={`inline-flex items-center justify-center h-9 w-9 sm:h-10 sm:w-10 rounded-xl border transition-colors shrink-0 ${
               paused
                 ? 'border-amber-500/40 bg-amber-500/12 text-amber-500 hover:bg-amber-500/20'
-                : 'app-border app-surface/85 app-text-secondary app-row-hover'
+                : 'app-border app-surface app-text-secondary app-row-hover'
             }`}
           >
             {paused ? (

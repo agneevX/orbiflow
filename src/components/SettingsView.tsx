@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Check,
   Clock,
@@ -8,6 +8,7 @@ import {
   EyeOff,
   FileCog,
   FolderOpen,
+  Gauge,
   Globe,
   KeyRound,
   LayoutGrid,
@@ -40,6 +41,7 @@ interface SettingsViewProps {
   satellites: SatelliteTelemetry[];
   satelliteConfigs: PublicSatelliteConfig[];
   unit: BandwidthUnit;
+  onChangeUnit: (u: BandwidthUnit) => void;
   onSaveSettings: (cfg: Partial<ServerConfig>) => Promise<void>;
   onSaveSatellite: (payload: SatelliteSavePayload) => Promise<{ ok: boolean; error?: string }>;
   onDeleteSatellite: (id: string) => Promise<void>;
@@ -67,6 +69,7 @@ export function SettingsView({
   satellites,
   satelliteConfigs,
   unit,
+  onChangeUnit,
   onSaveSettings,
   onSaveSatellite,
   onDeleteSatellite,
@@ -91,7 +94,21 @@ export function SettingsView({
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
 
+  // Serialize server-side config fields so periodic 3s telemetry ticks never undo unsaved checkboxes
+  const serverConfigSignature = JSON.stringify({
+    probeToken: serverConfig.probeToken || '',
+    persistenceMode: serverConfig.persistenceMode,
+    cacheDir: serverConfig.cacheDir || '/config/cache',
+    inferDeviceNames: serverConfig.inferDeviceNames !== false,
+    rdnsServer: serverConfig.rdnsServer || '',
+    timeFormat: serverConfig.timeFormat || '12h',
+    featureVisibility: sanitizeFeatureVisibility(serverConfig.featureVisibility),
+  });
+  const lastSyncedSigRef = useRef(serverConfigSignature);
+
   useEffect(() => {
+    if (serverConfigSignature === lastSyncedSigRef.current) return;
+    lastSyncedSigRef.current = serverConfigSignature;
     setProbeToken(serverConfig.probeToken || '');
     setPersistenceMode(serverConfig.persistenceMode);
     setCacheDir(serverConfig.cacheDir || '/config/cache');
@@ -99,15 +116,7 @@ export function SettingsView({
     setRdnsServer(serverConfig.rdnsServer || '');
     setTimeFormat(serverConfig.timeFormat || '12h');
     setFeatureVisibility(sanitizeFeatureVisibility(serverConfig.featureVisibility));
-  }, [
-    serverConfig.probeToken,
-    serverConfig.persistenceMode,
-    serverConfig.cacheDir,
-    serverConfig.inferDeviceNames,
-    serverConfig.rdnsServer,
-    serverConfig.timeFormat,
-    serverConfig.featureVisibility,
-  ]);
+  }, [serverConfigSignature, serverConfig]);
 
   const handleGenerateToken = () => {
     setProbeToken(generateClientRandomToken());
@@ -455,6 +464,38 @@ export function SettingsView({
           <div className="pt-3 border-t app-border flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="flex items-center gap-1.5 text-xs font-medium">
+                <Gauge className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
+                <span>Speed Unit</span>
+              </div>
+              <p className="text-[11px] app-text-muted mt-0.5">
+                Preferred throughput unit for tables, charts, and tooltips (Home Download/Upload stay in Mbps).
+              </p>
+            </div>
+            <div
+              role="group"
+              aria-label="Bandwidth speed unit"
+              className="grid grid-cols-2 app-input border rounded-xl p-1 w-36 shrink-0"
+            >
+              {(['Mbps', 'MB/s'] as BandwidthUnit[]).map((u) => (
+                <button
+                  key={u}
+                  type="button"
+                  data-testid={`settings-speed-unit-${u === 'MB/s' ? 'mbs' : 'mbps'}`}
+                  aria-pressed={unit === u}
+                  onClick={() => onChangeUnit(u)}
+                  className={`py-1 text-xs font-mono font-medium rounded-lg transition-colors ${
+                    unit === u ? 'app-surface font-semibold' : 'app-text-muted'
+                  }`}
+                >
+                  {u}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="pt-3 border-t app-border flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-1.5 text-xs font-medium">
                 <Clock className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
                 <span>Clock (Time Format)</span>
               </div>
@@ -533,8 +574,8 @@ export function SettingsView({
                 },
                 {
                   key: 'trafficMap',
-                  label: 'Traffic Map',
-                  desc: 'Router, satellite & client topology map page',
+                  label: 'Network Map',
+                  desc: 'Network Map tab inside Devices showing router, satellites & clients',
                 },
                 {
                   key: 'connections',
@@ -543,8 +584,8 @@ export function SettingsView({
                 },
                 {
                   key: 'devices',
-                  label: 'Devices',
-                  desc: 'Connected LAN devices inventory & aliases',
+                  label: 'Device List',
+                  desc: 'Connected LAN devices table & custom aliases inside Devices',
                 },
                 {
                   key: 'alerts',

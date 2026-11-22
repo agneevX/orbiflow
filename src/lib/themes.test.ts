@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AUTO_THEME_PAIRS,
   DARK_THEMES,
   LIGHT_THEMES,
   THEMES,
+  findAutoThemePair,
   normalizeDarkTheme,
   normalizeLightTheme,
   normalizeThemeMode,
@@ -48,4 +50,19 @@ test('DARK_THEMES and LIGHT_THEMES cover every theme in THEMES and exclude Midni
   assert.ok(THEMES['nord'].isDark);
   assert.ok(THEMES['tokyo-night'].isDark);
   assert.equal(THEMES['catppuccin-latte'].isDark, false);
+  assert.equal(THEMES['dracula-light'].isDark, false);
+  assert.equal(THEMES['nord-light'].isDark, false);
+  assert.equal(THEMES['tokyo-night-day'].isDark, false);
+});
+
+test('AUTO_THEME_PAIRS pairs every dark theme with its matching light theme', () => {
+  assert.equal(AUTO_THEME_PAIRS.length, 5);
+  assert.equal(DARK_THEMES.length, 5);
+  assert.equal(LIGHT_THEMES.length, 5);
+  for (const pair of AUTO_THEME_PAIRS) {
+    assert.equal(THEMES[pair.darkThemeId].isDark, true);
+    assert.equal(THEMES[pair.lightThemeId].isDark, false);
+    assert.equal(findAutoThemePair(pair.darkThemeId).id, pair.id);
+    assert.equal(findAutoThemePair(pair.lightThemeId).id, pair.id);
+  }
 });
