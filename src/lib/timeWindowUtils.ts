@@ -1,10 +1,9 @@
 import type { TimeWindow, TrafficPoint } from '../types/telemetry';
 import { formatDuration } from './formatters';
 
-export const ALL_TIME_WINDOWS: TimeWindow[] = ['1m', '5m', '15m', '1h', '6h', '24h'];
+export const ALL_TIME_WINDOWS: TimeWindow[] = ['5m', '15m', '1h', '6h', '24h'];
 
 export const WINDOW_MS: Record<TimeWindow, number> = {
-  '1m': 60_000,
   '5m': 5 * 60_000,
   '15m': 15 * 60_000,
   '1h': 60 * 60_000,
@@ -13,7 +12,6 @@ export const WINDOW_MS: Record<TimeWindow, number> = {
 };
 
 const GAP_THRESHOLD_MS: Record<TimeWindow, number> = {
-  '1m': 20_000,
   '5m': 95_000,
   '15m': 95_000,
   '1h': 150_000,
@@ -84,12 +82,12 @@ export function buildWindowSeries(
     return merged.sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  // Short windows (1m, 5m, 15m): prefer high-res history, backfilled by earlier 1m rollups if needed
+  // Short windows (5m, 15m): prefer high-res history, backfilled by earlier 1m rollups if needed
   if (history.length === 0) {
     return [...rollupHistory].sort((a, b) => a.timestamp - b.timestamp);
   }
   const sortedHighRes = [...history].sort((a, b) => a.timestamp - b.timestamp);
-  if (window === '1m' || rollupHistory.length === 0) {
+  if (rollupHistory.length === 0) {
     return sortedHighRes;
   }
 

@@ -1,20 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeTimeWindow } from './timeWindowUtils';
+import { ALL_TIME_WINDOWS, analyzeTimeWindow } from './timeWindowUtils';
 import type { TrafficPoint } from '../types/telemetry';
+
+test('ALL_TIME_WINDOWS omits 1m and starts at 5m', () => {
+  assert.deepEqual(ALL_TIME_WINDOWS, ['5m', '15m', '1h', '6h', '24h']);
+});
 
 test('analyzeTimeWindow returns empty status when no samples fall in the window', () => {
   const now = 1_700_000_000_000;
   const oldPoints: TrafficPoint[] = [
-    { timestamp: now - 120_000, rxBps: 1000, txBps: 500, activeFlows: 3 },
+    { timestamp: now - 400_000, rxBps: 1000, txBps: 500, activeFlows: 3 },
   ];
 
-  const res = analyzeTimeWindow('1m', oldPoints, [], now);
+  const res = analyzeTimeWindow('5m', oldPoints, [], now);
   assert.equal(res.status, 'empty');
   assert.equal(res.points.length, 0);
   assert.equal(res.coveragePct, 0);
   assert.equal(res.noDataRanges.length, 1);
-  assert.equal(res.noDataRanges[0].start, now - 60_000);
+  assert.equal(res.noDataRanges[0].start, now - 300_000);
   assert.equal(res.noDataRanges[0].end, now);
   assert.match(res.summaryText, /No data recorded/i);
 });
@@ -45,27 +49,27 @@ test('analyzeTimeWindow detects leading no-data period for 6h window with 3h of 
 test('analyzeTimeWindow splits internal gaps into separate line segments and no-data ranges', () => {
   const now = 1_700_000_000_000;
   const history: TrafficPoint[] = [
-    { timestamp: now - 55_000, rxBps: 1_000_000, txBps: 200_000, activeFlows: 5 },
-    { timestamp: now - 50_000, rxBps: 1_100_000, txBps: 220_000, activeFlows: 5 },
-    // 30s gap (> 20s threshold for 1m window)
-    { timestamp: now - 15_000, rxBps: 2_000_000, txBps: 300_000, activeFlows: 7 },
+    { timestamp: now - 290_000, rxBps: 1_000_000, txBps: 200_000, activeFlows: 5 },
+    { timestamp: now - 280_000, rxBps: 1_100_000, txBps: 220_000, activeFlows: 5 },
+    // 180s gap (> 30s threshold for 5m window)
+    { timestamp: now - 100_000, rxBps: 2_000_000, txBps: 300_000, activeFlows: 7 },
     { timestamp: now - 5_000, rxBps: 2_100_000, txBps: 310_000, activeFlows: 7 },
   ];
 
-  const res = analyzeTimeWindow('1m', history, [], now);
+  const res = analyzeTimeWindow('5m', history, [], now);
   assert.equal(res.status, 'partial');
   assert.equal(res.segments.length, 2);
   assert.equal(res.segments[0].length, 2);
   assert.equal(res.segments[1].length, 2);
   assert.equal(res.noDataRanges.length, 1);
-  assert.equal(res.noDataRanges[0].start, now - 50_000);
-  assert.equal(res.noDataRanges[0].end, now - 15_000);
+  assert.equal(res.noDataRanges[0].start, now - 280_000);
+  assert.equal(res.noDataRanges[0].end, now - 100_000);
 });
 
 test('analyzeTimeWindow returns full status when samples continuously cover the window', () => {
   const now = 1_700_000_000_000;
   const history: TrafficPoint[] = [];
-  for (let s = 55; s >= 0; s -= 5) {
+  for (let s = 295; s >= 0; s -= 5) {
     history.push({
       timestamp: now - s * 1000,
       rxBps: 4_000_000,
@@ -74,7 +78,7 @@ test('analyzeTimeWindow returns full status when samples continuously cover the 
     });
   }
 
-  const res = analyzeTimeWindow('1m', history, [], now);
+  const res = analyzeTimeWindow('5m', history, [], now);
   assert.equal(res.status, 'full');
   assert.equal(res.coveragePct, 100);
   assert.equal(res.noDataRanges.length, 0);

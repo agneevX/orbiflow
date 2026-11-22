@@ -4,7 +4,7 @@ export type BandwidthUnit = 'Mbps' | 'MB/s';
 
 export type TimeFormat = '12h' | '24h';
 
-export type TimeWindow = '1m' | '5m' | '15m' | '1h' | '6h' | '24h';
+export type TimeWindow = '5m' | '15m' | '1h' | '6h' | '24h';
 
 export type PersistenceMode = 'memory' | 'disk';
 
@@ -135,19 +135,46 @@ export interface PublicSatelliteConfig {
   enabled: boolean;
 }
 
+export interface WanDetails {
+  ip?: string;
+  gateway?: string;
+  dns: string[];
+  iface: string;
+  linkSpeedMbps: number;
+  duplex?: 'full' | 'half' | 'unknown';
+  mtu?: number;
+  state?: string;
+  connectionType?: string;
+  mac?: string;
+}
+
+export interface SatelliteInfoEntry {
+  mac?: string;
+  ip?: string;
+  name?: string;
+  model?: string;
+  backhaulType: 'ethernet' | 'wifi';
+  backhaulStatus?: string;
+  backhaulSpeedMbps?: number;
+  signalDbm?: number;
+  band?: string;
+}
+
 export interface SatelliteTelemetry {
   id: string;
   name: string;
   host: string;
   model?: string;
   connected: boolean;
-  source: 'ssh' | 'simulator';
+  source: 'ssh' | 'router' | 'simulator';
   lastSeen: number;
   lastError?: string;
   uptimeSec: number;
   backhaulType: 'ethernet' | 'wifi';
   backhaulIface: string;
   backhaulSpeedMbps: number;
+  backhaulSignalDbm?: number;
+  backhaulStatus?: string;
   rxBps: number;
   txBps: number;
   rxBytes: number;
@@ -159,6 +186,7 @@ export interface SatelliteTelemetry {
 export interface TopologyTelemetry {
   routerPorts: EthernetPortMetrics[];
   routerWanSpeedMbps: number;
+  wan?: WanDetails;
   routerClients: SatelliteClientLink[];
   satellites: SatelliteTelemetry[];
   satelliteConfigs: PublicSatelliteConfig[];
@@ -174,6 +202,8 @@ export interface ProbeSnapshot {
   system?: SystemMetrics;
   rawConntrackLines?: string[];
   ports?: EthernetPortMetrics[];
+  wan?: WanDetails;
+  satelliteInfo?: SatelliteInfoEntry[];
   routerClients?: SatelliteClientLink[];
   satellites?: SatelliteTelemetry[];
 }
@@ -382,6 +412,17 @@ export interface TablePreferences {
   devices: DevicesTablePrefs;
 }
 
+export interface FeatureVisibility {
+  flows: boolean;
+  topDevices: boolean;
+  topDestinations: boolean;
+  trafficMap: boolean;
+  connections: boolean;
+  devices: boolean;
+  alerts: boolean;
+  agent: boolean;
+}
+
 export interface ServerConfig {
   probeToken: string;
   persistenceMode: PersistenceMode;
@@ -401,6 +442,7 @@ export interface ServerConfig {
   ispMaxUpMbps: number;
   timeFormat: TimeFormat;
   tablePreferences: TablePreferences;
+  featureVisibility: FeatureVisibility;
 }
 
 export interface ServerStats {

@@ -535,23 +535,324 @@ class LeaseCache:
         return leases, active_clients
 
 
-def read_arp_table(leases, active_dhcp_clients=None):
+def is_private_lan_ip(ip):
+    if not ip or ip.startswith("127.") or ip.startswith("169.254."):
+        return False
+    if ip.startswith("10.") or ip.startswith("192.168."):
+        return True
+    if ip.startswith("172."):
+        parts = ip.split(".")
+        if len(parts) == 4 and parts[1].isdigit():
+            second = int(parts[1])
+            return 16 <= second <= 31
+    return False
+
+
+def _decode_proc_route_hex_ip(hex_str):
+    h = hex_str.strip()
+    if len(h) != 8 or h == "00000000":
+        return ""
+    try:
+        val = int(h, 16)
+    except ValueError:
+        return ""
+    # Kernel /proc/net/route uses host byte order; socket.inet_ntoa(struct.pack("<L", ...)) matches little-endian ARM/x86
+    try:
+        return socket.inet_ntoa(struct.pack("=I", val))
+    except Exception:
+        return ""
+
+
+def read_wan_details(wan_iface, ip_bin, ifconfig_bin, nvram_bin):
+    wan_ip = ""
+    wan_gw = ""
+    dns_servers = []
+
+    # 1. Resolve WAN IPv4 address from ip, ifconfig, or nvram
+    if ip_bin:
+        try:
+            out = subprocess.check_output(
+                [ip_bin, "-4", "addr", "show", "dev", wan_iface],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            for raw in out.splitlines():
+                line = raw.strip()
+                if line.startswith("inet "):
+                    tok = line.split()[1].split("/")[0]
+                    if tok.count(".") == 3:
+                        wan_ip = tok
+                        break
+        except Exception:
+            pass
+    if not wan_ip and ifconfig_bin:
+        try:
+            out = subprocess.check_output(
+                [ifconfig_bin, wan_iface],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            for raw in out.splitlines():
+                if "inet addr:" in raw:
+                    wan_ip = raw.split("inet addr:", 1)[1].split()[0].strip()
+                    break
+                if "inet " in raw:
+                    parts = raw.strip().split()
+                    if len(parts) >= 2 and parts[0] == "inet" and parts[1].count(".") == 3:
+                        wan_ip = parts[1]
+                        break
+        except Exception:
+            pass
+    if not wan_ip and nvram_bin:
+        try:
+            cand = subprocess.check_output(
+                [nvram_bin, "get", "wan_ipaddr"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore").strip()
+            if cand.count(".") == 3 and cand != "0.0.0.0":
+                wan_ip = cand
+        except Exception:
+            pass
+
+    # 2. Default gateway from /proc/net/route
+    for raw in read_text("/proc/net/route").splitlines()[1:]:
+        parts = raw.split()
+        if len(parts) >= 3 and parts[1] == "00000000":
+            gw = _decode_proc_route_hex_ip(parts[2])
+            if gw and gw != "0.0.0.0":
+                wan_gw = gw
+                if parts[0] == wan_iface:
+                    break
+
+    # 3. DNS resolvers from upstream resolv files
+    seen_dns = set()
+    for rpath in ("/tmp/resolv.conf.auto", "/tmp/resolv.conf", "/etc/resolv.conf"):
+        for raw in read_text(rpath).splitlines():
+            clean = raw.split("#", 1)[0].strip()
+            if clean.startswith("nameserver "):
+                ns = clean.split()[1].strip()
+                if ns and ns != "127.0.0.1" and ns != "::1" and ns not in seen_dns:
+                    seen_dns.add(ns)
+                    dns_servers.append(ns)
+        if dns_servers:
+            break
+
+    # 4. Link attributes from /sys/class/net/<wan_iface>
+    base = f"/sys/class/net/{wan_iface}"
+    speed = read_int(f"{base}/speed")
+    if speed < 0:
+        speed = 0
+    duplex = read_text(f"{base}/duplex").strip().lower()
+    if duplex not in ("full", "half"):
+        duplex = "unknown"
+    mtu = read_int(f"{base}/mtu")
+    state = read_text(f"{base}/operstate").strip().lower() or ("up" if speed > 0 or wan_ip else "unknown")
+    mac = read_text(f"{base}/address").strip().lower()
+    conn_type = "PPPoE" if wan_iface.startswith("ppp") else "DHCP"
+    if nvram_bin:
+        try:
+            proto = subprocess.check_output(
+                [nvram_bin, "get", "wan_proto"],
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            ).decode("utf-8", errors="ignore").strip().lower()
+            if proto:
+                conn_type = proto.upper()
+        except Exception:
+            pass
+
+    res = {
+        "iface": wan_iface,
+        "dns": dns_servers[:4],
+        "linkSpeedMbps": speed,
+        "duplex": duplex,
+        "state": state,
+        "connectionType": conn_type,
+    }
+    if wan_ip:
+        res["ip"] = wan_ip
+    if wan_gw:
+        res["gateway"] = wan_gw
+    if mtu > 0:
+        res["mtu"] = mtu
+    if mac and mac.count(":") == 5:
+        res["mac"] = mac
+    return res
+
+
+def _normalize_satinfo_item(rec):
+    if not isinstance(rec, dict):
+        return None
+    raw_mac = rec.get("mac") or rec.get("MAC") or rec.get("mac_addr") or rec.get("macAddress") or rec.get("al_mac") or ""
+    raw_ip = rec.get("ip") or rec.get("IP") or rec.get("ip_addr") or rec.get("ipAddress") or rec.get("host") or ""
+    raw_name = rec.get("name") or rec.get("device_name") or rec.get("deviceName") or rec.get("hostname") or ""
+    raw_model = rec.get("model") or rec.get("model_name") or rec.get("modelName") or ""
+    bh_raw = (
+        rec.get("backhaul_type")
+        or rec.get("backhaulType")
+        or rec.get("conn_type")
+        or rec.get("connection_type")
+        or rec.get("link_type")
+        or rec.get("type")
+        or rec.get("backhaul")
+        or ""
+    )
+    bh_str = str(bh_raw).strip().lower()
+    if any(tok in bh_str for tok in ("wired", "eth", "cable", "lan")):
+        bh_type = "ethernet"
+    elif any(tok in bh_str for tok in ("wifi", "wi-fi", "wireless", "5g", "2.4g", "6g", "ath", "wlan", "radio")):
+        bh_type = "wifi"
+    elif rec.get("rssi") is not None or rec.get("signal") is not None:
+        bh_type = "wifi"
+    else:
+        return None
+
+    entry = {"backhaulType": bh_type}
+    if isinstance(raw_mac, str) and raw_mac.strip().count(":") == 5:
+        entry["mac"] = raw_mac.strip().lower()
+    if isinstance(raw_ip, str) and raw_ip.strip().count(".") == 3:
+        entry["ip"] = raw_ip.strip()
+    if isinstance(raw_name, str) and raw_name.strip():
+        entry["name"] = raw_name.strip()
+    if isinstance(raw_model, str) and raw_model.strip():
+        entry["model"] = raw_model.strip()
+    if not ("mac" in entry or "ip" in entry or "name" in entry):
+        return None
+
+    for key in ("link_rate", "linkRate", "phyrate", "phy_rate", "backhaul_speed", "speed", "tx_rate"):
+        val = rec.get(key)
+        if val is not None:
+            digits = "".join(ch for ch in str(val) if ch.isdigit() or ch == ".")
+            if digits:
+                try:
+                    num = int(round(float(digits)))
+                    if num > 0:
+                        entry["backhaulSpeedMbps"] = num
+                        break
+                except ValueError:
+                    pass
+    for key in ("rssi", "signal", "signal_dbm", "backhaul_rssi"):
+        val = rec.get(key)
+        if val is not None:
+            s = str(val).strip()
+            num_s = ""
+            for idx_c, ch in enumerate(s):
+                if ch.isdigit() or (ch == "-" and idx_c == 0):
+                    num_s += ch
+                elif num_s:
+                    break
+            if num_s and num_s != "-":
+                try:
+                    sig = int(num_s)
+                    entry["signalDbm"] = (-95 + sig) if (0 < sig < 100) else sig
+                    break
+                except ValueError:
+                    pass
+    status_val = rec.get("backhaul_status") or rec.get("backhaulStatus") or rec.get("link_status") or rec.get("status")
+    if isinstance(status_val, str) and status_val.strip():
+        entry["backhaulStatus"] = status_val.strip()
+    if bh_str and any(b in bh_str for b in ("2.4", "5g", "6g")):
+        entry["band"] = str(bh_raw).strip()
+    return entry
+
+
+def read_satelliteinfo_wifi(satinfo_bin):
+    if not satinfo_bin:
+        return []
+    try:
+        out = subprocess.check_output(
+            [satinfo_bin, "wifi"],
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return []
+    if not out:
+        return []
+
+    # Try JSON format first (Orbi stock/Voxel firmware outputs JSON array/object)
+    start_idx = -1
+    for idx_c, ch in enumerate(out):
+        if ch in "[{":
+            start_idx = idx_c
+            break
+    if start_idx >= 0:
+        try:
+            parsed = json.loads(out[start_idx:])
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, dict):
+                items = parsed.get("satellites") or parsed.get("data") or [parsed]
+            else:
+                items = []
+            res = []
+            for item in items:
+                norm = _normalize_satinfo_item(item)
+                if norm:
+                    res.append(norm)
+            if res:
+                return res
+        except Exception:
+            pass
+
+    # Fallback: key-value text blocks
+    res = []
+    cur = {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            norm = _normalize_satinfo_item(cur)
+            if norm:
+                res.append(norm)
+            cur = {}
+            continue
+        sep = ":" if ":" in line else ("=" if "=" in line else None)
+        if sep:
+            k, v = line.split(sep, 1)
+            key = k.strip().lower().replace(" ", "_").replace("-", "_")
+            val = v.strip().strip('"').strip("'").rstrip(",")
+            if key in ("mac", "ip") and key in cur:
+                norm = _normalize_satinfo_item(cur)
+                if norm:
+                    res.append(norm)
+                cur = {}
+            cur[key] = val
+    norm = _normalize_satinfo_item(cur)
+    if norm:
+        res.append(norm)
+    return res
+
+
+def read_arp_table(leases, active_dhcp_clients=None, wan_iface=None, wan_details=None):
     entries_by_ip = {}
+    excluded_ips = set()
+    if wan_details:
+        if wan_details.get("ip"):
+            excluded_ips.add(wan_details["ip"])
+        if wan_details.get("gateway"):
+            excluded_ips.add(wan_details["gateway"])
+
     content = read_text("/proc/net/arp")
     for line in content.splitlines()[1:]:
         parts = line.split()
         if len(parts) >= 6:
             ip, _, flags, mac, _, dev = parts[:6]
-            if flags != "0x0" and mac != "00:00:00:00:00:00":
-                entries_by_ip[ip] = {
-                    "ip": ip,
-                    "mac": mac.lower(),
-                    "device": dev,
-                    "hostname": leases.get(ip, ""),
-                }
+            if flags == "0x0" or mac == "00:00:00:00:00:00":
+                continue
+            if wan_iface and dev == wan_iface:
+                continue
+            if ip in excluded_ips or not is_private_lan_ip(ip):
+                continue
+            entries_by_ip[ip] = {
+                "ip": ip,
+                "mac": mac.lower(),
+                "device": dev,
+                "hostname": leases.get(ip, ""),
+            }
     if active_dhcp_clients:
         for ip, info in active_dhcp_clients.items():
-            if ip not in entries_by_ip:
+            if ip not in entries_by_ip and ip not in excluded_ips and is_private_lan_ip(ip):
                 entries_by_ip[ip] = {
                     "ip": ip,
                     "mac": info["mac"],
@@ -894,6 +1195,10 @@ def main():
     swconfig_bin = find_binary("swconfig")
     wlanconfig_bin = find_binary("wlanconfig")
     iw_bin = find_binary("iw")
+    ip_bin = find_binary("ip")
+    ifconfig_bin = find_binary("ifconfig")
+    nvram_bin = find_binary("nvram")
+    satinfo_bin = "/usr/sbin/satelliteinfo" if (os.path.isfile("/usr/sbin/satelliteinfo") and os.access("/usr/sbin/satelliteinfo", os.X_OK)) else find_binary("satelliteinfo")
     wifi_tool = ("wlanconfig", wlanconfig_bin) if wlanconfig_bin else (("iw", iw_bin) if iw_bin else None)
     wifi_ifaces = discover_wifi_ifaces()
     lease_cache = LeaseCache(cfg["dhcp_leases"])
@@ -901,6 +1206,8 @@ def main():
     ws = MiniWebSocket(cfg["ws_url"], cfg["token"])
     arp = []
     router_clients = []
+    wan_details = None
+    satellite_info = []
     last_neigh_refresh = 0.0
     last_ports_refresh = 0.0
     last_sys_refresh = 0.0
@@ -930,9 +1237,13 @@ def main():
                     wifi_ifaces = discover_wifi_ifaces()
                     last_wifi_iface_scan = now_ts
 
+                if now_ts - last_ports_refresh >= cfg["ports_interval"]:
+                    wan_details = read_wan_details(cfg["iface"], ip_bin, ifconfig_bin, nvram_bin)
+                    satellite_info = read_satelliteinfo_wifi(satinfo_bin)
+
                 if now_ts - last_neigh_refresh >= cfg["neigh_interval"]:
                     leases, active_dhcp = lease_cache.read(now_ts)
-                    arp = read_arp_table(leases, active_dhcp)
+                    arp = read_arp_table(leases, active_dhcp, cfg["iface"], wan_details)
                     router_clients = read_router_wifi_clients(wifi_ifaces, wifi_tool)
                     last_neigh_refresh = now_ts
                     logger.debug(
@@ -953,6 +1264,10 @@ def main():
 
                 if now_ts - last_ports_refresh >= cfg["ports_interval"]:
                     data["ports"] = read_router_ports(cfg["iface"], swconfig_bin)
+                    if wan_details:
+                        data["wan"] = wan_details
+                    if satellite_info:
+                        data["satelliteInfo"] = satellite_info
                     last_ports_refresh = now_ts
 
                 if now_ts - last_sys_refresh >= cfg["sys_interval"]:
@@ -1029,7 +1344,7 @@ while true; do
       arp_first = 1;
     }
     FILENAME == "/proc/net/arp" && FNR > 1 {
-      if ($3 != "0x0" && $4 != "00:00:00:00:00:00") {
+      if ($3 != "0x0" && $4 != "00:00:00:00:00:00" && $6 != iface && ($1 ~ /^10\\./ || $1 ~ /^192\\.168\\./ || $1 ~ /^172\\.(1[6-9]|2[0-9]|3[0-1])\\./)) {
         if (!arp_first) printf ",";
         printf "{\\"ip\\":\\"%s\\",\\"mac\\":\\"%s\\",\\"device\\":\\"%s\\"}", $1, $4, $6;
         arp_first = 0;

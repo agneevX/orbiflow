@@ -17,11 +17,13 @@ import type {
   RawConntrackFlow,
   RemoteEndpointSummary,
   SatelliteClientLink,
+  SatelliteInfoEntry,
   SatelliteTelemetry,
   ServerConfig,
   ServerStats,
   TopologyTelemetry,
   TrafficPoint,
+  WanDetails,
 } from '../types/telemetry';
 import {
   classifyApplication,
@@ -41,7 +43,9 @@ import {
   resolveHostIdentity,
 } from './deviceIdentity';
 import {
+  DEFAULT_FEATURE_VISIBILITY,
   DEFAULT_TABLE_PREFERENCES,
+  sanitizeFeatureVisibility,
   sanitizeTablePreferences,
 } from './tablePreferences';
 
@@ -282,12 +286,15 @@ export class TrafficMonitorEngine {
     ispMaxUpMbps: 200,
     timeFormat: '12h',
     tablePreferences: sanitizeTablePreferences(DEFAULT_TABLE_PREFERENCES),
+    featureVisibility: sanitizeFeatureVisibility(DEFAULT_FEATURE_VISIBILITY),
   };
 
   private hostTopServicesCache = new Map<string, { services: string[]; updatedAt: number }>();
   private readonly topServicesRefreshMs = 15_000;
   private routerPorts: EthernetPortMetrics[] = [];
   private prevRouterPortBytes = new Map<string, { rx: number; tx: number }>();
+  private wanDetails: WanDetails | null = null;
+  private routerSatelliteInfo: SatelliteInfoEntry[] = [];
   private routerClients: SatelliteClientLink[] = [];
   private probeSatellites: SatelliteTelemetry[] = [];
   private sshSatellites: SatelliteTelemetry[] = [];
@@ -371,24 +378,101 @@ export class TrafficMonitorEngine {
       this.routerPorts.find((p) => p.role === 'wan') ||
       this.routerPorts.find((p) => p.id === this.probeStatus.iface) ||
       this.routerPorts.find((p) => p.linkUp && p.speedMbps > 0);
-    const routerWanSpeedMbps = wanPort?.speedMbps || 1000;
+    const routerWanSpeedMbps = this.wanDetails?.linkSpeedMbps || wanPort?.speedMbps || 1000;
 
     // Combine SSH-polled satellites with any probe-reported/simulated satellites (SSH takes precedence by id)
     const mergedById = new Map<string, SatelliteTelemetry>();
     for (const sat of this.probeSatellites) {
-      mergedById.set(sat.id, sat);
+      mergedById.set(sat.id, { ...sat });
     }
     for (const sat of this.sshSatellites) {
-      mergedById.set(sat.id, sat);
+      mergedById.set(sat.id, { ...sat });
     }
+
+    // Merge authoritative Orbi `/usr/sbin/satelliteinfo wifi` entries reported by the main router
+    const matchedHosts = new Set<string>();
+    for (const sat of mergedById.values()) {
+      const info = this.routerSatelliteInfo.find(
+        (entry) => entry.ip && entry.ip === sat.host
+      );
+      if (info) {
+        matchedHosts.add(info.ip!);
+        sat.backhaulType = info.backhaulType;
+        if (info.backhaulSpeedMbps && info.backhaulSpeedMbps > 0) {
+          if (info.backhaulType === 'wifi' || sat.backhaulSpeedMbps <= 0) {
+            sat.backhaulSpeedMbps = info.backhaulSpeedMbps;
+          }
+        }
+        if (info.signalDbm !== undefined) sat.backhaulSignalDbm = info.signalDbm;
+        if (info.backhaulStatus) sat.backhaulStatus = info.backhaulStatus;
+        if (info.model && !sat.model) sat.model = info.model;
+      }
+    }
+
+    // Surface router-discovered Orbi satellites even when SSH polling is not yet configured
+    for (let idx = 0; idx < this.routerSatelliteInfo.length; idx++) {
+      const info = this.routerSatelliteInfo[idx];
+      if (info.ip && matchedHosts.has(info.ip)) continue;
+      const hostKey = info.ip || info.mac || `router-sat-${idx + 1}`;
+      const synthId = `router-sat:${hostKey}`;
+      if (mergedById.has(synthId)) continue;
+      mergedById.set(synthId, {
+        id: synthId,
+        name: info.name || info.model || `Orbi Satellite ${idx + 1}`,
+        host: info.ip || info.mac || 'unknown',
+        model: info.model,
+        connected: !info.backhaulStatus || !/disconnect|offline|down/i.test(info.backhaulStatus),
+        source: 'router',
+        lastSeen: this.probeStatus.lastHeartbeat || Date.now(),
+        uptimeSec: 0,
+        backhaulType: info.backhaulType,
+        backhaulIface: info.band || (info.backhaulType === 'ethernet' ? 'Ethernet' : 'Wi-Fi'),
+        backhaulSpeedMbps: info.backhaulSpeedMbps || 0,
+        ...(info.signalDbm !== undefined ? { backhaulSignalDbm: info.signalDbm } : {}),
+        ...(info.backhaulStatus ? { backhaulStatus: info.backhaulStatus } : {}),
+        rxBps: 0,
+        txBps: 0,
+        rxBytes: 0,
+        txBytes: 0,
+        ports: [],
+        clients: [],
+      });
+    }
+
+    const wan: WanDetails | undefined = this.wanDetails
+      ? {
+          ...this.wanDetails,
+          dns: [...(this.wanDetails.dns || [])],
+          linkSpeedMbps: this.wanDetails.linkSpeedMbps || routerWanSpeedMbps,
+        }
+      : wanPort
+        ? {
+            iface: wanPort.id,
+            dns: [],
+            linkSpeedMbps: wanPort.speedMbps,
+            duplex: wanPort.duplex,
+            state: wanPort.linkUp ? 'up' : 'down',
+          }
+        : undefined;
 
     return {
       routerPorts: this.routerPorts.map((p) => ({ ...p })),
       routerWanSpeedMbps,
+      ...(wan ? { wan } : {}),
       routerClients: this.routerClients.map((c) => ({ ...c })),
       satellites: Array.from(mergedById.values()),
       satelliteConfigs: this.satelliteConfigs.map((c) => ({ ...c })),
     };
+  }
+
+  private isLanClientIp(ip: string, device?: string): boolean {
+    if (!ip || !isPrivateIp(ip)) return false;
+    if (ip.startsWith('127.') || ip.startsWith('169.254.')) return false;
+    const wanIface = this.wanDetails?.iface || this.probeStatus.iface;
+    if (device && wanIface && device === wanIface) return false;
+    if (this.wanDetails?.ip && ip === this.wanDetails.ip) return false;
+    if (this.wanDetails?.gateway && ip === this.wanDetails.gateway) return false;
+    return true;
   }
 
   public setSatelliteConfigs(configs: PublicSatelliteConfig[]): void {
@@ -430,7 +514,14 @@ export class TrafficMonitorEngine {
     if (typeof saved.peakTxBps === 'number') this.peakTxBps = saved.peakTxBps;
     if (Array.isArray(saved.rules) && saved.rules.length > 0) this.rules = saved.rules;
     if (Array.isArray(saved.alerts)) this.alerts = saved.alerts;
-    if (saved.serverConfig) this.serverConfig = { ...this.serverConfig, ...saved.serverConfig };
+    if (saved.serverConfig) {
+      this.serverConfig = {
+        ...this.serverConfig,
+        ...saved.serverConfig,
+        tablePreferences: sanitizeTablePreferences(saved.serverConfig.tablePreferences),
+        featureVisibility: sanitizeFeatureVisibility(saved.serverConfig.featureVisibility),
+      };
+    }
     this.latestSnapshot = {
       ...this.latestSnapshot,
       history: [...this.history],
@@ -459,10 +550,14 @@ export class TrafficMonitorEngine {
     const nextTablePrefs = cfg.tablePreferences
       ? sanitizeTablePreferences(cfg.tablePreferences, this.serverConfig.tablePreferences)
       : this.serverConfig.tablePreferences;
+    const nextFeatureVis = cfg.featureVisibility
+      ? sanitizeFeatureVisibility(cfg.featureVisibility, this.serverConfig.featureVisibility)
+      : this.serverConfig.featureVisibility;
     this.serverConfig = {
       ...this.serverConfig,
       ...cfg,
       tablePreferences: nextTablePrefs,
+      featureVisibility: nextFeatureVis,
     };
     if (stats) {
       this.serverStats = { ...this.serverStats, ...stats };
@@ -472,6 +567,7 @@ export class TrafficMonitorEngine {
       serverConfig: {
         ...this.serverConfig,
         tablePreferences: sanitizeTablePreferences(this.serverConfig.tablePreferences),
+        featureVisibility: sanitizeFeatureVisibility(this.serverConfig.featureVisibility),
       },
       serverStats: { ...this.serverStats },
     };
@@ -863,6 +959,16 @@ export class TrafficMonitorEngine {
       }
     }
 
+    if (snapshot.wan && typeof snapshot.wan === 'object') {
+      this.wanDetails = {
+        ...snapshot.wan,
+        iface: snapshot.wan.iface || snapshot.iface?.iface || this.probeStatus.iface,
+        dns: Array.isArray(snapshot.wan.dns) ? snapshot.wan.dns.filter(Boolean) : [],
+      };
+    }
+    if (Array.isArray(snapshot.satelliteInfo)) {
+      this.routerSatelliteInfo = snapshot.satelliteInfo.map((s) => ({ ...s }));
+    }
     if (Array.isArray(snapshot.routerClients)) {
       this.routerClients = snapshot.routerClients.map((c) => ({ ...c }));
     }
@@ -879,6 +985,7 @@ export class TrafficMonitorEngine {
 
     const arpByIp = new Map<string, ArpEntry>();
     for (const entry of snapshot.arp || []) {
+      if (!this.isLanClientIp(entry.ip, entry.device)) continue;
       arpByIp.set(entry.ip, entry);
     }
 
@@ -1132,6 +1239,8 @@ export class TrafficMonitorEngine {
     }
 
     for (const entry of snapshot.arp || []) {
+      // Exclude WAN-side ARP neighbors (ISP gateway, public IPs, WAN interface entries)
+      if (!this.isLanClientIp(entry.ip, entry.device)) continue;
       const normMac = normalizeMac(entry.mac);
       const prevKnown = this.knownHostsCache.get(entry.ip);
       const dhcpHost = isMeaningfulHostname(entry.hostname, entry.ip)
@@ -1158,7 +1267,7 @@ export class TrafficMonitorEngine {
       ...this.routerClients,
       ...allSatellites.filter((s) => s.connected).flatMap((s) => s.clients || []),
     ]) {
-      if (sc.ip && isPrivateIp(sc.ip) && !this.knownHostsCache.has(sc.ip)) {
+      if (sc.ip && this.isLanClientIp(sc.ip) && !this.knownHostsCache.has(sc.ip)) {
         const normMac = normalizeMac(sc.mac);
         this.knownHostsCache.set(sc.ip, {
           ip: sc.ip,
@@ -1170,7 +1279,7 @@ export class TrafficMonitorEngine {
 
     // Seed hostMap from all currently connected / recently seen LAN devices (not only active traffic)
     for (const [ip, known] of this.knownHostsCache.entries()) {
-      if (now - known.lastSeen > this.hostPresenceTtlMs) {
+      if (!this.isLanClientIp(ip) || now - known.lastSeen > this.hostPresenceTtlMs) {
         this.knownHostsCache.delete(ip);
         continue;
       }
@@ -1208,7 +1317,11 @@ export class TrafficMonitorEngine {
     for (const f of activeEnrichedFlows) {
       totalFlowBytes += f.totalBytes;
 
-      const lanIp = isPrivateIp(f.srcIp) ? f.srcIp : isPrivateIp(f.dstIp) ? f.dstIp : null;
+      const lanIp = this.isLanClientIp(f.srcIp)
+        ? f.srcIp
+        : this.isLanClientIp(f.dstIp)
+          ? f.dstIp
+          : null;
 
       if (lanIp) {
         const existingKnown = this.knownHostsCache.get(lanIp);

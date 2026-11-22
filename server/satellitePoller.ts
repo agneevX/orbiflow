@@ -17,6 +17,8 @@ const STATIC_SATELLITE_PROBE_CMD = [
   'echo "===META==="',
   'echo "HOST=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null)"',
   'echo "UPTIME=$(cat /proc/uptime 2>/dev/null)"',
+  'echo "===SATELLITEINFO==="',
+  '[ -x /usr/sbin/satelliteinfo ] && /usr/sbin/satelliteinfo wifi 2>/dev/null || true',
   'echo "===ROUTE==="',
   'ip route show default 2>/dev/null || true',
   'cat /proc/net/route 2>/dev/null || true',
@@ -274,6 +276,12 @@ export function convertProbeToTelemetry(
     if (iface.mac) localSatelliteMacs.add(iface.mac);
   }
 
+  // Match authoritative Orbi `/usr/sbin/satelliteinfo wifi` entry for this satellite
+  const matchedSatInfo =
+    parsed.satelliteInfo.find((entry) => entry.ip && entry.ip === cfg.host) ||
+    parsed.satelliteInfo.find((entry) => entry.mac && localSatelliteMacs.has(entry.mac)) ||
+    (parsed.satelliteInfo.length === 1 ? parsed.satelliteInfo[0] : undefined);
+
   // 1. Identify the main router's (gateway) MAC address and which bridge/switch port leads to it
   const gatewayMac = parsed.gatewayIp ? macByIp.get(parsed.gatewayIp) : undefined;
   const gatewayBridgeEntry = gatewayMac
@@ -431,6 +439,62 @@ export function convertProbeToTelemetry(
       backhaulSpeedMbps = resolveWifiBackhaulSpeed(backhaulIface);
       backhaulRxBytes = wifiBackhaul?.rxBytes || 0;
       backhaulTxBytes = wifiBackhaul?.txBytes || 0;
+    }
+  }
+
+  // Apply authoritative Orbi `/usr/sbin/satelliteinfo wifi` backhaul metadata when no explicit override is set
+  let backhaulSignalDbm: number | undefined;
+  let backhaulStatus: string | undefined;
+  if (matchedSatInfo) {
+    backhaulSignalDbm = matchedSatInfo.signalDbm;
+    backhaulStatus = matchedSatInfo.backhaulStatus;
+    if (!explicitName) {
+      if (matchedSatInfo.backhaulType === 'wifi' && backhaulType !== 'wifi') {
+        const wifiBackhaul =
+          associatedStaWifi
+            ? ifaceByName.get(associatedStaWifi.iface)
+            : parsed.interfaces.find(
+                (i) => i.isWireless && (i.operstate === 'up' || i.rxBytes + i.txBytes > 0)
+              );
+        backhaulType = 'wifi';
+        uplinkSwitchPortNum = undefined;
+        backhaulIface = associatedStaWifi?.iface || wifiBackhaul?.name || matchedSatInfo.band || 'ath2';
+        backhaulBridgePortNum = bridgePortNumByIface.get(backhaulIface) ?? backhaulBridgePortNum;
+        backhaulSpeedMbps =
+          matchedSatInfo.backhaulSpeedMbps ||
+          resolveWifiBackhaulSpeed(backhaulIface) ||
+          backhaulSpeedMbps;
+        if (wifiBackhaul) {
+          backhaulRxBytes = wifiBackhaul.rxBytes;
+          backhaulTxBytes = wifiBackhaul.txBytes;
+        }
+      } else if (matchedSatInfo.backhaulType === 'ethernet' && backhaulType !== 'ethernet') {
+        const activeSp =
+          (gatewaySwitchPortNum !== undefined
+            ? physicalSwitchPorts.find((sp) => sp.portNum === gatewaySwitchPortNum)
+            : undefined) || physicalSwitchPorts.find((sp) => sp.linkUp && sp.speedMbps > 0);
+        const activeEth = parsed.interfaces.find(
+          (i) => !i.isWireless && /^(eth|en|lan|wan)/i.test(i.name) && (i.operstate === 'up' || i.speedMbps > 0)
+        );
+        backhaulType = 'ethernet';
+        if (activeSp) {
+          uplinkSwitchPortNum = activeSp.portNum;
+          backhaulIface = `port${activeSp.portNum}`;
+          backhaulSpeedMbps = matchedSatInfo.backhaulSpeedMbps || activeSp.speedMbps || backhaulSpeedMbps;
+          backhaulRxBytes = activeSp.rxBytes;
+          backhaulTxBytes = activeSp.txBytes;
+        } else if (activeEth) {
+          backhaulIface = activeEth.name;
+          backhaulBridgePortNum = bridgePortNumByIface.get(activeEth.name) ?? backhaulBridgePortNum;
+          backhaulSpeedMbps = matchedSatInfo.backhaulSpeedMbps || activeEth.speedMbps || backhaulSpeedMbps;
+          backhaulRxBytes = activeEth.rxBytes;
+          backhaulTxBytes = activeEth.txBytes;
+        }
+      } else if (matchedSatInfo.backhaulSpeedMbps && matchedSatInfo.backhaulSpeedMbps > 0) {
+        if (backhaulType === 'wifi' || backhaulSpeedMbps <= 0) {
+          backhaulSpeedMbps = matchedSatInfo.backhaulSpeedMbps;
+        }
+      }
     }
   }
 
@@ -641,7 +705,7 @@ export function convertProbeToTelemetry(
       id: cfg.id,
       name: cfg.name,
       host: cfg.host,
-      model: parsed.hostname || undefined,
+      model: matchedSatInfo?.model || parsed.hostname || undefined,
       connected: true,
       source: 'ssh',
       lastSeen: now,
@@ -649,6 +713,8 @@ export function convertProbeToTelemetry(
       backhaulType,
       backhaulIface,
       backhaulSpeedMbps,
+      ...(backhaulSignalDbm !== undefined ? { backhaulSignalDbm } : {}),
+      ...(backhaulStatus ? { backhaulStatus } : {}),
       rxBps: satRxBps,
       txBps: satTxBps,
       rxBytes: backhaulRxBytes,

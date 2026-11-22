@@ -715,6 +715,18 @@ export class OrbiProbeSimulator {
       arp: LAN_DEVICES,
       flows: rawFlows,
       ports: routerPorts,
+      wan: {
+        ip: '73.162.48.214',
+        gateway: '73.162.48.1',
+        dns: ['1.1.1.1', '8.8.8.8'],
+        iface: 'eth0',
+        linkSpeedMbps: 2500,
+        duplex: 'full',
+        mtu: 1500,
+        state: 'up',
+        connectionType: 'DHCP',
+        mac: 'a0:04:60:7c:18:01',
+      },
       routerClients,
       satellites,
       ...(includeSystem

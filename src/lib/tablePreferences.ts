@@ -1,6 +1,7 @@
 import type {
   ConnectionsTablePrefs,
   DevicesTablePrefs,
+  FeatureVisibility,
   TablePreferences,
 } from '../types/telemetry';
 
@@ -35,6 +36,17 @@ export const DEFAULT_DEVICES_TABLE_PREFS: DevicesTablePrefs = {
 export const DEFAULT_TABLE_PREFERENCES: TablePreferences = {
   connections: { ...DEFAULT_CONNECTIONS_TABLE_PREFS },
   devices: { ...DEFAULT_DEVICES_TABLE_PREFS },
+};
+
+export const DEFAULT_FEATURE_VISIBILITY: FeatureVisibility = {
+  flows: true,
+  topDevices: true,
+  topDestinations: true,
+  trafficMap: true,
+  connections: true,
+  devices: true,
+  alerts: true,
+  agent: true,
 };
 
 function pickBool(obj: Record<string, unknown>, key: string, fallback: boolean): boolean {
@@ -110,6 +122,24 @@ export function sanitizeTablePreferences(
   return {
     connections: sanitizeConnectionsTablePrefs(src.connections, base.connections),
     devices: sanitizeDevicesTablePrefs(src.devices, base.devices),
+  };
+}
+
+export function sanitizeFeatureVisibility(
+  input: unknown,
+  base: FeatureVisibility = DEFAULT_FEATURE_VISIBILITY
+): FeatureVisibility {
+  const src =
+    input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  return {
+    flows: pickBool(src, 'flows', base.flows),
+    topDevices: pickBool(src, 'topDevices', base.topDevices),
+    topDestinations: pickBool(src, 'topDestinations', base.topDestinations),
+    trafficMap: pickBool(src, 'trafficMap', base.trafficMap),
+    connections: pickBool(src, 'connections', base.connections),
+    devices: pickBool(src, 'devices', base.devices),
+    alerts: pickBool(src, 'alerts', base.alerts),
+    agent: pickBool(src, 'agent', base.agent),
   };
 }
 

@@ -3,6 +3,7 @@ import {
   Cable,
   Crosshair,
   ExternalLink,
+  Globe,
   Minus,
   Pause,
   Play,
@@ -36,6 +37,7 @@ interface TrafficMapViewProps {
   unit: BandwidthUnit;
   theme: ThemePalette;
   paused: boolean;
+  connectionsEnabled?: boolean;
   onInspectHostFlows: (host: HostSummary) => void;
   onSaveSatellite: (payload: SatelliteSavePayload) => Promise<{ ok: boolean; error?: string }>;
   onDeleteSatellite: (id: string) => Promise<void>;
@@ -52,6 +54,11 @@ interface Particle {
   offsetY: number;
   radius: number;
   alpha: number;
+  fixedWired?: boolean;
+}
+
+function isWiredClientEdge(edge: TopologyEdge): boolean {
+  return edge.targetId.startsWith('client:') && edge.connectionType === 'ethernet';
 }
 
 function cubicBezierPoint(
@@ -407,6 +414,7 @@ export function TrafficMapView({
   unit,
   theme,
   paused,
+  connectionsEnabled = true,
   onInspectHostFlows,
   onSaveSatellite,
   onDeleteSatellite,
@@ -512,6 +520,24 @@ export function TrafficMapView({
     const rebuildParticles = (edges: TopologyEdge[]) => {
       const next: Particle[] = [];
       edges.forEach((edge, idx) => {
+        // Wired Ethernet clients always show a steady, fixed-pace animation
+        if (isWiredClientEdge(edge)) {
+          const fixedCount = 8;
+          for (let i = 0; i < fixedCount; i++) {
+            next.push({
+              edgeIdx: idx,
+              t: i / fixedCount,
+              speed: 0.0026,
+              direction: 1,
+              offsetY: 0,
+              radius: 1.5,
+              alpha: 0.72,
+              fixedWired: true,
+            });
+          }
+          return;
+        }
+
         if (!edge.active) return;
         // Scale particle density logarithmically with live throughput
         const rxScore = edge.rxBps > 0 ? Math.min(1, Math.log10(edge.rxBps + 10) / 7.2) : 0;
@@ -564,7 +590,10 @@ export function TrafficMapView({
 
       const edges = edgesRef.current;
       const sig = edges
-        .map((e) => `${e.id}:${e.active ? 1 : 0}:${Math.round(Math.log10(e.rxBps + 10) * 4)}:${Math.round(Math.log10(e.txBps + 10) * 4)}`)
+        .map(
+          (e) =>
+            `${e.id}:${e.connectionType || ''}:${e.active ? 1 : 0}:${Math.round(Math.log10(e.rxBps + 10) * 4)}:${Math.round(Math.log10(e.txBps + 10) * 4)}`
+        )
         .join('|');
       if (sig !== lastEdgeSignature) {
         lastEdgeSignature = sig;
@@ -581,20 +610,26 @@ export function TrafficMapView({
       const dark = isDarkRef.current;
       const shouldMove = animateRef.current && !prefersReduced;
 
-      // Soft luminous ribbon glow under active splines
+      // Soft luminous ribbon glow under active splines and wired Ethernet links
       for (const e of edges) {
-        if (!e.active) continue;
+        const wiredClient = isWiredClientEdge(e);
+        if (!e.active && !wiredClient) continue;
         const mx = (e.x1 + e.x2) / 2;
         ctx.beginPath();
         ctx.moveTo(e.x1, e.y1);
         ctx.bezierCurveTo(mx, e.y1, mx, e.y2, e.x2, e.y2);
-        ctx.strokeStyle = dark ? 'rgba(56, 189, 248, 0.14)' : 'rgba(56, 189, 248, 0.16)';
-        ctx.lineWidth = 10;
+        if (wiredClient) {
+          ctx.strokeStyle = dark ? 'rgba(56, 189, 248, 0.10)' : 'rgba(14, 165, 233, 0.11)';
+          ctx.lineWidth = 6;
+        } else {
+          ctx.strokeStyle = dark ? 'rgba(56, 189, 248, 0.14)' : 'rgba(56, 189, 248, 0.16)';
+          ctx.lineWidth = 10;
+        }
         ctx.lineCap = 'round';
         ctx.stroke();
       }
 
-      // Draw UniFi-style shimmering flow particles
+      // Draw UniFi-style shimmering flow particles (and fixed steady particles on wired clients)
       for (const p of particles) {
         const edge = edges[p.edgeIdx];
         if (!edge) continue;
@@ -610,7 +645,11 @@ export function TrafficMapView({
 
         ctx.beginPath();
         ctx.arc(pt.x, py, p.radius, 0, Math.PI * 2);
-        if (p.direction === 1) {
+        if (p.fixedWired) {
+          ctx.fillStyle = dark
+            ? `rgba(56, 189, 248, ${p.alpha})`
+            : `rgba(14, 165, 233, ${p.alpha})`;
+        } else if (p.direction === 1) {
           ctx.fillStyle = dark
             ? `rgba(56, 189, 248, ${p.alpha})`
             : `rgba(14, 165, 233, ${p.alpha * 0.9})`;
@@ -882,13 +921,15 @@ export function TrafficMapView({
             {graph.edges.map((edge) => {
               const pathD = buildEdgePath(edge);
               const mid = cubicBezierPoint(edge.x1, edge.y1, edge.x2, edge.y2, 0.5);
+              const wiredClient = isWiredClientEdge(edge);
+              const isSolid = edge.active || wiredClient;
               return (
                 <g key={edge.id}>
                   <path
                     d={pathD}
                     fill="none"
                     stroke={
-                      edge.active
+                      isSolid
                         ? theme.isDark
                           ? 'rgba(56, 189, 248, 0.30)'
                           : 'rgba(56, 189, 248, 0.28)'
@@ -896,8 +937,8 @@ export function TrafficMapView({
                           ? 'rgba(148, 163, 184, 0.22)'
                           : 'rgba(148, 163, 184, 0.34)'
                     }
-                    strokeWidth={edge.active ? 2 : 1.5}
-                    strokeDasharray={edge.active ? undefined : '4 5'}
+                    strokeWidth={isSolid ? 2 : 1.5}
+                    strokeDasharray={isSolid ? undefined : '4 5'}
                   />
 
                   {showPortSpeeds && edge.linkSpeedLabel && (() => {
@@ -1144,9 +1185,11 @@ export function TrafficMapView({
                             : 'Ethernet Backhaul'
                           : selectedNode.kind === 'router'
                             ? 'WAN Negotiation'
-                            : selectedNode.connectionType === 'wifi'
-                              ? 'Wi-Fi RX / TX'
-                              : 'Connection'}
+                            : selectedNode.kind === 'internet'
+                              ? 'WAN Link'
+                              : selectedNode.connectionType === 'wifi'
+                                ? 'Wi-Fi RX / TX'
+                                : 'Connection'}
                       </span>
                     </span>
                     <span className="font-mono font-semibold tabular-nums">
@@ -1168,30 +1211,145 @@ export function TrafficMapView({
                 </div>
               )}
 
+              {/* Router WAN Details for Internet Node */}
+              {selectedNode.kind === 'internet' && (
+                <div data-testid="internet-wan-details" className="space-y-2">
+                  <h4 className="text-xs font-semibold flex items-center gap-1.5">
+                    <Globe className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                    <span>Router WAN Details</span>
+                  </h4>
+                  {selectedNode.wan ? (
+                    <div className="p-3 rounded-xl border app-border app-input space-y-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="app-text-muted">WAN IP</span>
+                        <span className="font-mono app-text-secondary tabular-nums">
+                          {selectedNode.wan.ip || 'Unavailable'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="app-text-muted">Default Gateway</span>
+                        <span className="font-mono app-text-secondary tabular-nums">
+                          {selectedNode.wan.gateway || 'Unavailable'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="app-text-muted">DNS Servers</span>
+                        <span className="font-mono app-text-secondary tabular-nums text-right truncate max-w-[200px]">
+                          {selectedNode.wan.dns.length > 0
+                            ? selectedNode.wan.dns.join(', ')
+                            : 'Unavailable'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="app-text-muted">Interface</span>
+                        <span className="font-mono app-text-secondary">
+                          {selectedNode.wan.iface}
+                          {selectedNode.wan.state ? ` (${selectedNode.wan.state})` : ''}
+                        </span>
+                      </div>
+                      {selectedNode.wan.linkSpeedMbps > 0 && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="app-text-muted">Link Rate</span>
+                          <span className="font-mono app-text-secondary tabular-nums">
+                            {formatLinkSpeed(
+                              selectedNode.wan.linkSpeedMbps,
+                              'ethernet',
+                              selectedNode.wan.state !== 'down'
+                            )}
+                            {selectedNode.wan.duplex && selectedNode.wan.duplex !== 'unknown'
+                              ? ` ${selectedNode.wan.duplex === 'full' ? 'FDX' : 'HDX'}`
+                              : ''}
+                          </span>
+                        </div>
+                      )}
+                      {selectedNode.wan.mtu && selectedNode.wan.mtu > 0 && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="app-text-muted">MTU</span>
+                          <span className="font-mono app-text-secondary tabular-nums">
+                            {selectedNode.wan.mtu}
+                          </span>
+                        </div>
+                      )}
+                      {selectedNode.wan.connectionType && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="app-text-muted">Connection Type</span>
+                          <span className="font-mono app-text-secondary">
+                            {selectedNode.wan.connectionType}
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between gap-2 pt-1.5 border-t app-border">
+                        <span className="app-text-muted">Configured Plan</span>
+                        <span className="font-mono app-text-secondary tabular-nums">
+                          {snapshot.serverConfig.ispMaxDownMbps} /{' '}
+                          {snapshot.serverConfig.ispMaxUpMbps} Mbps
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded-xl border app-border app-input space-y-2 text-xs">
+                      <p className="app-text-muted">
+                        WAN interface details have not been reported by the router agent yet. Update
+                        your router agent script to stream WAN IP, gateway, and DNS telemetry.
+                      </p>
+                      <div className="flex items-center justify-between gap-2 pt-1.5 border-t app-border">
+                        <span className="app-text-muted">Configured Plan</span>
+                        <span className="font-mono app-text-secondary tabular-nums">
+                          {snapshot.serverConfig.ispMaxDownMbps} /{' '}
+                          {snapshot.serverConfig.ispMaxUpMbps} Mbps
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Satellite metadata */}
               {selectedNode.satellite && (
                 <div className="space-y-1.5 text-xs app-text-muted">
                   <div className="flex items-center justify-between">
                     <span>Backhaul Mode</span>
                     <span className="font-mono app-text-secondary">
-                      {selectedNode.satellite.backhaulType === 'wifi' ? 'Wi-Fi' : 'Ethernet'} (
-                      {selectedNode.satellite.backhaulIface})
+                      {selectedNode.satellite.backhaulType === 'wifi' ? 'Wi-Fi' : 'Ethernet'}
+                      {selectedNode.satellite.backhaulIface
+                        ? ` (${selectedNode.satellite.backhaulIface})`
+                        : ''}
                     </span>
                   </div>
+                  {selectedNode.satellite.backhaulStatus && (
+                    <div className="flex items-center justify-between">
+                      <span>Backhaul Status</span>
+                      <span className="font-mono app-text-secondary">
+                        {selectedNode.satellite.backhaulStatus}
+                      </span>
+                    </div>
+                  )}
+                  {selectedNode.satellite.backhaulSignalDbm !== undefined && (
+                    <div className="flex items-center justify-between">
+                      <span>Backhaul Signal</span>
+                      <span className="font-mono app-text-secondary tabular-nums">
+                        {selectedNode.satellite.backhaulSignalDbm} dBm
+                      </span>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <span>Telemetry Source</span>
                     <span className="font-mono app-text-secondary">
                       {selectedNode.satellite.source === 'ssh'
                         ? 'Stateless SSH'
-                        : 'Dev Simulator'}
+                        : selectedNode.satellite.source === 'router'
+                          ? 'Router (/usr/sbin/satelliteinfo)'
+                          : 'Dev Simulator'}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span>Uptime</span>
-                    <span className="font-mono app-text-secondary tabular-nums">
-                      {formatDuration(selectedNode.satellite.uptimeSec)}
-                    </span>
-                  </div>
+                  {selectedNode.satellite.uptimeSec > 0 && (
+                    <div className="flex items-center justify-between">
+                      <span>Uptime</span>
+                      <span className="font-mono app-text-secondary tabular-nums">
+                        {formatDuration(selectedNode.satellite.uptimeSec)}
+                      </span>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <span>Total Transferred</span>
                     <span className="font-mono app-text-secondary tabular-nums">
@@ -1260,14 +1418,16 @@ export function TrafficMapView({
                     )}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => onInspectHostFlows(selectedNode.host!)}
-                    className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl app-btn-primary text-xs font-semibold transition-colors"
-                  >
-                    <span>Inspect Live Connections</span>
-                    <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-                  </button>
+                  {connectionsEnabled && (
+                    <button
+                      type="button"
+                      onClick={() => onInspectHostFlows(selectedNode.host!)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl app-btn-primary text-xs font-semibold transition-colors"
+                    >
+                      <span>Inspect Live Connections</span>
+                      <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  )}
                 </div>
               )}
             </div>

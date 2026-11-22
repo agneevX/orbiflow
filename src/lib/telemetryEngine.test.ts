@@ -904,3 +904,75 @@ test('validateRouterDeployInput blocks shell injection, path traversal, and loop
   );
 });
 
+test('TrafficMonitorEngine excludes public WAN IPs and WAN-interface ARP entries from LAN hosts and surfaces WAN & satelliteinfo telemetry', async () => {
+  const { sanitizeFeatureVisibility } = await import('./tablePreferences');
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_750_000_000_000;
+
+  const { dashboard } = engine.ingest({
+    probeId: 'orbi-main',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 200_000, txBytes: 50_000 },
+    wan: {
+      ip: '73.162.48.214',
+      gateway: '73.162.48.1',
+      dns: ['1.1.1.1', '8.8.8.8'],
+      iface: 'eth0',
+      linkSpeedMbps: 2500,
+      duplex: 'full',
+      mtu: 1500,
+      state: 'up',
+      connectionType: 'DHCP',
+    },
+    satelliteInfo: [
+      {
+        mac: 'aa:bb:cc:dd:00:02',
+        ip: '192.168.1.2',
+        name: 'Office Satellite',
+        model: 'RBS50',
+        backhaulType: 'ethernet',
+        backhaulStatus: 'Good',
+        backhaulSpeedMbps: 1000,
+      },
+    ],
+    arp: [
+      { ip: '192.168.1.25', mac: 'aa:bb:cc:00:00:25', device: 'br0', hostname: 'workstation' },
+      // Public ISP gateway on WAN iface (must be excluded)
+      { ip: '73.162.48.1', mac: '00:11:22:33:44:55', device: 'eth0' },
+      // Private cable-modem / CGNAT upstream neighbor on WAN iface (must be excluded)
+      { ip: '192.168.100.1', mac: '00:11:22:33:44:66', device: 'eth0' },
+      // Public IP accidentally reported on br0 (must be excluded)
+      { ip: '8.8.8.8', mac: '00:11:22:33:44:77', device: 'br0' },
+    ],
+    flows: [],
+  });
+
+  // Only genuine private LAN host remains in dashboard.hosts
+  assert.deepEqual(
+    dashboard.hosts.map((h) => h.ip),
+    ['192.168.1.25']
+  );
+
+  // Router WAN details and /usr/sbin/satelliteinfo satellites appear in topology
+  assert.equal(dashboard.topology?.wan?.ip, '73.162.48.214');
+  assert.equal(dashboard.topology?.wan?.gateway, '73.162.48.1');
+  assert.equal(dashboard.topology?.satellites.length, 1);
+  assert.equal(dashboard.topology?.satellites[0].source, 'router');
+  assert.equal(dashboard.topology?.satellites[0].backhaulType, 'ethernet');
+  assert.equal(dashboard.topology?.satellites[0].backhaulSpeedMbps, 1000);
+
+  // Feature visibility sanitization and config update
+  const vis = sanitizeFeatureVisibility({ flows: false, connections: false });
+  assert.equal(vis.flows, false);
+  assert.equal(vis.connections, false);
+  assert.equal(vis.devices, true);
+
+  engine.updateServerConfig({ featureVisibility: vis });
+  const updatedCfg = engine.getSnapshot().serverConfig;
+  assert.equal(updatedCfg.featureVisibility.flows, false);
+  assert.equal(updatedCfg.featureVisibility.connections, false);
+  assert.equal(updatedCfg.featureVisibility.trafficMap, true);
+});
+
+

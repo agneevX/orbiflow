@@ -13,7 +13,9 @@ import { SatelliteSshPoller, validateSatelliteInput } from './server/satellitePo
 import { deployAndRestartRouterAgent } from './server/routerDeployer';
 import { toPublicSatelliteConfig } from './src/lib/topology';
 import {
+  DEFAULT_FEATURE_VISIBILITY,
   DEFAULT_TABLE_PREFERENCES,
+  sanitizeFeatureVisibility,
   sanitizeTablePreferences,
   validateDhcpLeasesPath,
   validateDnsServer,
@@ -91,6 +93,7 @@ async function startServer() {
   let initialIspMaxUpMbps = DEFAULT_ISP_MAX_UP_MBPS;
   let initialTimeFormat: TimeFormat = DEFAULT_TIME_FORMAT;
   let initialTablePreferences = sanitizeTablePreferences(DEFAULT_TABLE_PREFERENCES);
+  let initialFeatureVisibility = sanitizeFeatureVisibility(DEFAULT_FEATURE_VISIBILITY);
   let initialSatellites: SatelliteConfig[] = [];
 
   // Load persistent user config from /config/config.json before loading cached traffic history
@@ -178,6 +181,9 @@ async function startServer() {
     if (savedUserConfig.tablePreferences) {
       initialTablePreferences = sanitizeTablePreferences(savedUserConfig.tablePreferences);
     }
+    if (savedUserConfig.featureVisibility) {
+      initialFeatureVisibility = sanitizeFeatureVisibility(savedUserConfig.featureVisibility);
+    }
     if (Array.isArray(savedUserConfig.satellites)) {
       initialSatellites = savedUserConfig.satellites.filter(
         (s) => s && typeof s.id === 'string' && typeof s.host === 'string'
@@ -220,6 +226,7 @@ async function startServer() {
     ispMaxUpMbps: initialIspMaxUpMbps,
     timeFormat: initialTimeFormat,
     tablePreferences: initialTablePreferences,
+    featureVisibility: initialFeatureVisibility,
   });
 
   // Restore cached traffic history if disk persistence is active
@@ -277,6 +284,7 @@ async function startServer() {
       ispMaxUpMbps: snap.serverConfig.ispMaxUpMbps,
       timeFormat: snap.serverConfig.timeFormat,
       tablePreferences: snap.serverConfig.tablePreferences,
+      featureVisibility: snap.serverConfig.featureVisibility,
       satellites: satellitePoller.getConfigs(),
       deviceAliases: engine.getDeviceAliases(),
       notifications: notifier.getConfig(),
@@ -555,6 +563,10 @@ async function startServer() {
       body.tablePreferences !== undefined
         ? sanitizeTablePreferences(body.tablePreferences, currentCfg.tablePreferences)
         : currentCfg.tablePreferences;
+    const nextFeatureVisibility =
+      body.featureVisibility !== undefined
+        ? sanitizeFeatureVisibility(body.featureVisibility, currentCfg.featureVisibility)
+        : currentCfg.featureVisibility;
 
     engine.updateServerConfig({
       probeToken: nextProbeToken,
@@ -568,6 +580,7 @@ async function startServer() {
       ispMaxUpMbps: nextIspMaxUpMbps,
       timeFormat: nextTimeFormat,
       tablePreferences: nextTablePreferences,
+      featureVisibility: nextFeatureVisibility,
     });
     syncStatsAndPersist();
     persistUserConfig();

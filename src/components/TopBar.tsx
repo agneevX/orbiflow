@@ -181,7 +181,7 @@ export function TopBar({
                 <div
                   className="h-full rounded-full transition-all duration-500 ease-out"
                   style={{
-                    width: `${util.peakPct > 0 ? Math.max(4, util.peakPct) : 0}%`,
+                    width: `${util.peakPct > 0 ? Math.min(100, Math.max(4, util.peakPct)) : 0}%`,
                     background: internetBarColor,
                   }}
                 />

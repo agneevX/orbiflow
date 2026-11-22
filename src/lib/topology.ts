@@ -5,7 +5,9 @@ import type {
   PublicSatelliteConfig,
   SatelliteClientLink,
   SatelliteConfig,
+  SatelliteInfoEntry,
   SatelliteTelemetry,
+  WanDetails,
 } from '../types/telemetry';
 import { compareIpv4, hasTangibleTraffic } from './formatters';
 import { normalizeMac } from './deviceIdentity';
@@ -38,8 +40,8 @@ export function computeIspUtilization(
 
   const rawDownPct = (downMbps / safeMaxDown) * 100;
   const rawUpPct = (upMbps / safeMaxUp) * 100;
-  const downPct = Math.min(100, Number(rawDownPct.toFixed(1)));
-  const upPct = Math.min(100, Number(rawUpPct.toFixed(1)));
+  const downPct = Number(rawDownPct.toFixed(1));
+  const upPct = Number(rawUpPct.toFixed(1));
   const peakPct = Math.max(downPct, upPct);
   const dominantDirection: 'down' | 'up' = upPct > downPct ? 'up' : 'down';
 
@@ -176,6 +178,188 @@ export interface ParsedSatelliteProbe {
     rxBytes: number;
     txBytes: number;
   }>;
+  satelliteInfo: SatelliteInfoEntry[];
+}
+
+function parseSatelliteInfoBackhaulType(raw: unknown): 'ethernet' | 'wifi' | null {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim().toLowerCase();
+  if (!s) return null;
+  if (/(wired|eth|ethernet|cable|lan)/i.test(s)) return 'ethernet';
+  if (/(wifi|wi-fi|wireless|5g|2\.4g|6g|ath|wlan|radio|band)/i.test(s)) return 'wifi';
+  return null;
+}
+
+function parseSatelliteInfoNumeric(raw: unknown): number | undefined {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const m = raw.match(/-?\d+(?:\.\d+)?/);
+    if (m) {
+      const n = parseFloat(m[0]);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return undefined;
+}
+
+function normalizeSatelliteInfoRecord(rec: Record<string, unknown>): SatelliteInfoEntry | null {
+  const rawMac =
+    rec.mac ?? rec.MAC ?? rec.mac_addr ?? rec.macAddress ?? rec.al_mac ?? rec.bssid;
+  const rawIp =
+    rec.ip ?? rec.IP ?? rec.ip_addr ?? rec.ipAddress ?? rec.host;
+  const rawName =
+    rec.name ?? rec.device_name ?? rec.deviceName ?? rec.hostname ?? rec.satellite_name;
+  const rawModel =
+    rec.model ?? rec.model_name ?? rec.modelName ?? rec.product;
+
+  const backhaulField =
+    rec.backhaul_type ??
+    rec.backhaulType ??
+    rec.conn_type ??
+    rec.connection_type ??
+    rec.connectionType ??
+    rec.link_type ??
+    rec.type ??
+    rec.backhaul ??
+    rec.interface;
+
+  let backhaulType = parseSatelliteInfoBackhaulType(backhaulField);
+  if (!backhaulType) {
+    // Check band/radio hints or status fields if type wasn't explicitly wired/wifi
+    if (rec.backhaul_5g || rec.backhaul_2g || rec.rssi !== undefined || rec.signal !== undefined) {
+      backhaulType = 'wifi';
+    } else if (typeof rec.status === 'string' && /wired|eth/i.test(rec.status)) {
+      backhaulType = 'ethernet';
+    } else {
+      return null;
+    }
+  }
+
+  const macStr =
+    typeof rawMac === 'string' && /^[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}$/i.test(rawMac.trim())
+      ? normalizeMac(rawMac.trim().replace(/-/g, ':'))
+      : undefined;
+  const ipStr =
+    typeof rawIp === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(rawIp.trim())
+      ? rawIp.trim()
+      : undefined;
+
+  if (!macStr && !ipStr && !rawName) return null;
+
+  const rawSpeed = parseSatelliteInfoNumeric(
+    rec.link_rate ??
+      rec.linkRate ??
+      rec.phyrate ??
+      rec.phy_rate ??
+      rec.backhaul_speed ??
+      rec.backhaulSpeedMbps ??
+      rec.speed ??
+      rec.tx_rate ??
+      rec.rx_rate
+  );
+  const rawSignal = parseSatelliteInfoNumeric(
+    rec.rssi ?? rec.signal ?? rec.signal_dbm ?? rec.signalDbm ?? rec.backhaul_rssi
+  );
+  // Orbi sometimes reports positive RSSI (SNR-like) or negative dBm
+  const signalDbm =
+    rawSignal !== undefined
+      ? rawSignal > 0 && rawSignal < 100
+        ? Math.round(-95 + rawSignal)
+        : Math.round(rawSignal)
+      : undefined;
+
+  const rawStatus =
+    rec.backhaul_status ?? rec.backhaulStatus ?? rec.link_status ?? rec.status;
+  const statusStr =
+    typeof rawStatus === 'string' && rawStatus.trim() ? rawStatus.trim() : undefined;
+
+  const bandField =
+    typeof backhaulField === 'string' && /(2\.4|5g|6g)/i.test(backhaulField)
+      ? backhaulField.trim()
+      : typeof rec.band === 'string' && rec.band.trim()
+        ? rec.band.trim()
+        : undefined;
+
+  return {
+    mac: macStr,
+    ip: ipStr,
+    name: typeof rawName === 'string' && rawName.trim() ? rawName.trim() : undefined,
+    model: typeof rawModel === 'string' && rawModel.trim() ? rawModel.trim() : undefined,
+    backhaulType,
+    backhaulStatus: statusStr,
+    backhaulSpeedMbps: rawSpeed !== undefined && rawSpeed > 0 ? Math.round(rawSpeed) : undefined,
+    signalDbm,
+    band: bandField,
+  };
+}
+
+/**
+ * Parses Netgear Orbi `/usr/sbin/satelliteinfo wifi` output.
+ * Supports JSON arrays/objects emitted by stock/Voxel Orbi firmware as well as
+ * key-value text blocks emitted on older firmware revisions.
+ */
+export function parseSatelliteInfoWifi(raw: string): SatelliteInfoEntry[] {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return [];
+
+  // 1. Try JSON parsing (array, single object, or wrapped object like { satellites: [...] })
+  const jsonStart = trimmed.search(/[\[{]/);
+  if (jsonStart >= 0) {
+    const candidate = trimmed.slice(jsonStart);
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      const items: unknown[] = Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === 'object'
+          ? Array.isArray((parsed as Record<string, unknown>).satellites)
+            ? ((parsed as Record<string, unknown>).satellites as unknown[])
+            : Array.isArray((parsed as Record<string, unknown>).data)
+              ? ((parsed as Record<string, unknown>).data as unknown[])
+              : [parsed]
+          : [];
+      const entries: SatelliteInfoEntry[] = [];
+      for (const item of items) {
+        if (item && typeof item === 'object' && !Array.isArray(item)) {
+          const norm = normalizeSatelliteInfoRecord(item as Record<string, unknown>);
+          if (norm) entries.push(norm);
+        }
+      }
+      if (entries.length > 0) return entries;
+    } catch {
+      // Fall through to line-by-line parser
+    }
+  }
+
+  // 2. Fallback: key-value / tabular text output
+  const entries: SatelliteInfoEntry[] = [];
+  let current: Record<string, unknown> = {};
+  const flushCurrent = () => {
+    if (Object.keys(current).length > 0) {
+      const norm = normalizeSatelliteInfoRecord(current);
+      if (norm) entries.push(norm);
+      current = {};
+    }
+  };
+
+  for (const rawLine of trimmed.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushCurrent();
+      continue;
+    }
+    const kv = line.match(/^([a-zA-Z0-9_ .-]+?)\s*[:=]\s*(.+)$/);
+    if (kv) {
+      const key = kv[1].trim().toLowerCase().replace(/[\s.-]+/g, '_');
+      const val = kv[2].trim().replace(/^["']|["'],?$/g, '');
+      if ((key === 'mac' || key === 'ip') && current[key]) {
+        flushCurrent();
+      }
+      current[key] = val;
+    }
+  }
+  flushCurrent();
+
+  return entries;
 }
 
 function decodeProcRouteGatewayHex(hex: string): string | undefined {
@@ -212,9 +396,11 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
     bridgeMacs: [],
     wifiIfaces: [],
     wifiStations: [],
+    satelliteInfo: [],
   };
 
   let section = '';
+  const satelliteInfoLines: string[] = [];
   let currentSwitchPort: {
     portNum: number;
     linkUp: boolean;
@@ -272,6 +458,11 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
       flushWifiInfo();
       flushIwStation();
       section = line.slice(3, -3).trim();
+      continue;
+    }
+
+    if (section === 'SATELLITEINFO') {
+      satelliteInfoLines.push(rawLine);
       continue;
     }
 
@@ -596,6 +787,9 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
   flushSwitchPort();
   flushWifiInfo();
   flushIwStation();
+  if (satelliteInfoLines.length > 0) {
+    result.satelliteInfo = parseSatelliteInfoWifi(satelliteInfoLines.join('\n'));
+  }
   return result;
 }
 
@@ -642,6 +836,7 @@ export interface TopologyNode {
   ports?: EthernetPortMetrics[];
   satellite?: SatelliteTelemetry;
   host?: HostSummary;
+  wan?: WanDetails;
 }
 
 export interface TopologyEdge {
@@ -881,16 +1076,22 @@ export function buildTopologyGraph(
       ? Math.round((col2Placed[0].y + col2Placed[col2Placed.length - 1].y) / 2)
       : Math.round(totalHeight / 2);
 
-  const wanSpeed = topology.routerWanSpeedMbps || 1000;
+  const wanDetails = topology.wan;
+  const wanSpeed = wanDetails?.linkSpeedMbps || topology.routerWanSpeedMbps || 1000;
   const wanActive = hasTangibleTraffic(snapshot.kpis.rxBps, snapshot.kpis.txBps);
   const ispLabel = snapshot.serverConfig.ispName?.trim() || 'Internet';
+  const internetSublabel = wanDetails?.ip
+    ? `${wanDetails.ip} · ${formatLinkSpeed(wanSpeed, 'ethernet', snapshot.probe.connected)}`
+    : `${snapshot.serverConfig.ispMaxDownMbps} / ${snapshot.serverConfig.ispMaxUpMbps} Mbps`;
 
   nodes.push({
     id: internetId,
     kind: 'internet',
     icon: 'internet',
     label: ispLabel,
-    sublabel: `${snapshot.serverConfig.ispMaxDownMbps} / ${snapshot.serverConfig.ispMaxUpMbps} Mbps`,
+    sublabel: internetSublabel,
+    ip: wanDetails?.ip,
+    mac: wanDetails?.mac,
     parentId: null,
     column: 0,
     x: COL_X[0],
@@ -899,8 +1100,13 @@ export function buildTopologyGraph(
     txBps: snapshot.kpis.txBps,
     active: wanActive,
     connected: snapshot.probe.connected,
+    connectionType: 'ethernet',
+    linkSpeedMbps: wanSpeed,
+    linkSpeedLabel: formatLinkSpeed(wanSpeed, 'ethernet', snapshot.probe.connected),
+    portLabel: wanDetails?.iface || snapshot.probe.iface || 'eth0',
     childCount: 1,
     collapsed: false,
+    wan: wanDetails,
   });
 
   nodes.push({

@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { ArrowDownRight, ArrowUpRight, MonitorSmartphone } from 'lucide-react';
+import { ArrowDownRight, ArrowRight, ArrowUpRight, MonitorSmartphone } from 'lucide-react';
 import type {
   BandwidthUnit,
   DashboardSnapshot,
+  FeatureVisibility,
   HostSummary,
   TimeFormat,
   TimeWindow,
@@ -13,9 +14,11 @@ import {
   analyzeTimeWindow,
   type TimeWindowAnalysis,
 } from '../lib/timeWindowUtils';
+import { DEFAULT_FEATURE_VISIBILITY } from '../lib/tablePreferences';
 import { ThroughputChart } from './ThroughputChart';
 import { ClientFlowDiagram, type FlowScopeTab } from './ClientFlowDiagram';
 import {
+  computeWindowPeaks,
   formatBandwidth,
   formatBytes,
   hasTangibleTraffic,
@@ -29,6 +32,7 @@ interface OverviewViewProps {
   unit: BandwidthUnit;
   timeFormat: TimeFormat;
   theme: ThemePalette;
+  featureVisibility?: FeatureVisibility;
   onSelectHost: (host: HostSummary) => void;
   onSelectFilter: (query: string) => void;
   onViewAllFlows: () => void;
@@ -43,6 +47,7 @@ export function OverviewView({
   unit,
   timeFormat,
   theme,
+  featureVisibility = DEFAULT_FEATURE_VISIBILITY,
   onSelectHost,
   onSelectFilter,
   onViewAllFlows,
@@ -54,6 +59,12 @@ export function OverviewView({
   const activeAnalysis =
     windowAvailability[timeWindow] ||
     analyzeTimeWindow(timeWindow, snapshot.history, snapshot.rollupHistory);
+
+  const windowPeaks = computeWindowPeaks(activeAnalysis.points, {
+    rxBps: snapshot.kpis.rxBps,
+    txBps: snapshot.kpis.txBps,
+    routerLoadPct: 0,
+  });
 
   const onlineClientsCount = snapshot.hosts.length;
   const activeClientsCount = snapshot.kpis.activeHosts;
@@ -105,6 +116,15 @@ export function OverviewView({
           >
             {formatBandwidth(snapshot.kpis.rxBps, unit)}
           </div>
+          <div
+            data-testid="kpi-download-peak"
+            className="text-[11px] app-text-muted tabular-nums truncate"
+          >
+            {timeWindow} peak:{' '}
+            <span className="font-medium app-text-secondary">
+              {formatBandwidth(windowPeaks.peakRxBps, unit)}
+            </span>
+          </div>
         </div>
 
         <div className="app-surface border rounded-2xl px-4 py-2.5 sm:px-4 sm:py-3 flex flex-col justify-between gap-1">
@@ -118,13 +138,27 @@ export function OverviewView({
           >
             {formatBandwidth(snapshot.kpis.txBps, unit)}
           </div>
+          <div
+            data-testid="kpi-upload-peak"
+            className="text-[11px] app-text-muted tabular-nums truncate"
+          >
+            {timeWindow} peak:{' '}
+            <span className="font-medium app-text-secondary">
+              {formatBandwidth(windowPeaks.peakTxBps, unit)}
+            </span>
+          </div>
         </div>
 
         <button
           type="button"
           data-testid="kpi-clients-online-card"
-          onClick={() => onOpenHosts?.()}
-          className="app-surface border rounded-2xl px-4 py-2.5 sm:px-4 sm:py-3 flex flex-col justify-between gap-1 text-left app-row-hover transition-colors"
+          disabled={!featureVisibility.devices}
+          onClick={() => {
+            if (featureVisibility.devices) onOpenHosts?.();
+          }}
+          className={`app-surface border rounded-2xl px-4 py-2.5 sm:px-4 sm:py-3 flex flex-col justify-between gap-1 text-left transition-colors ${
+            featureVisibility.devices ? 'app-row-hover cursor-pointer' : 'cursor-default'
+          }`}
         >
           <div className="flex items-center justify-between gap-2 text-xs app-text-muted w-full">
             <span className="font-medium">Clients Online</span>
@@ -226,141 +260,158 @@ export function OverviewView({
       </section>
 
       {/* Device to Destination Flow Diagram */}
-      <section className="app-surface border rounded-2xl p-4 sm:p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-2.5">
-          <div>
-            <h2 className="font-display text-sm font-semibold">Flows</h2>
-            <p className="text-xs app-text-muted mt-0.5">
-              {flowsTab === 'internet'
-                ? 'Live internet traffic paths from top active local devices'
-                : 'Live local network traffic between devices on your LAN'}
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <div
-              role="tablist"
-              aria-label="Traffic flow scope"
-              className="inline-flex items-center h-8 app-input border rounded-xl p-0.5"
-            >
-              {(['internet', 'lan'] as FlowScopeTab[]).map((tab) => {
-                const active = flowsTab === tab;
-                return (
-                  <button
-                    key={tab}
-                    type="button"
-                    role="tab"
-                    data-testid={`flows-tab-${tab}`}
-                    aria-selected={active}
-                    onClick={() => setFlowsTab(tab)}
-                    className={`px-3 h-full rounded-lg text-xs font-medium transition-colors ${
-                      active
-                        ? 'app-surface font-semibold'
-                        : 'app-text-muted hover:opacity-80'
-                    }`}
-                  >
-                    {tab === 'internet' ? 'Internet' : 'LAN'}
-                  </button>
-                );
-              })}
+      {featureVisibility.flows && (
+        <section className="app-surface border rounded-2xl p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-2.5">
+            <div>
+              <h2 className="font-display text-sm font-semibold">Flows</h2>
+              <p className="text-xs app-text-muted mt-0.5">
+                {flowsTab === 'internet'
+                  ? 'Live internet traffic paths from top active local devices'
+                  : 'Live local network traffic between devices on your LAN'}
+              </p>
             </div>
-            <button
-              type="button"
-              data-testid="inspect-connections-btn"
-              onClick={onViewAllFlows}
-              className="text-xs font-medium text-sky-500 hover:text-sky-400 transition-colors whitespace-nowrap"
-            >
-              Inspect connections
-            </button>
+            <div className="flex items-center gap-3">
+              <div
+                role="tablist"
+                aria-label="Traffic flow scope"
+                className="inline-flex items-center h-8 app-input border rounded-xl p-0.5"
+              >
+                {(['internet', 'lan'] as FlowScopeTab[]).map((tab) => {
+                  const active = flowsTab === tab;
+                  return (
+                    <button
+                      key={tab}
+                      type="button"
+                      role="tab"
+                      data-testid={`flows-tab-${tab}`}
+                      aria-selected={active}
+                      onClick={() => setFlowsTab(tab)}
+                      className={`px-3 h-full rounded-lg text-xs font-medium transition-colors ${
+                        active
+                          ? 'app-surface font-semibold'
+                          : 'app-text-muted hover:opacity-80'
+                      }`}
+                    >
+                      {tab === 'internet' ? 'Internet' : 'LAN'}
+                    </button>
+                  );
+                })}
+              </div>
+              {featureVisibility.connections && (
+                <button
+                  type="button"
+                  data-testid="inspect-connections-btn"
+                  onClick={onViewAllFlows}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-sky-500 hover:text-sky-400 transition-colors whitespace-nowrap"
+                >
+                  <span>Inspect</span>
+                  <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              )}
+            </div>
           </div>
-        </div>
 
-        <ClientFlowDiagram
-          links={snapshot.clientLinks}
-          scope={flowsTab}
-          unit={unit}
-          theme={theme}
-          onSelectFilter={onSelectFilter}
-        />
-      </section>
+          <ClientFlowDiagram
+            links={snapshot.clientLinks}
+            scope={flowsTab}
+            unit={unit}
+            theme={theme}
+            onSelectFilter={onSelectFilter}
+          />
+        </section>
+      )}
 
       {/* Compact Two-Column Summary: Top Devices & Top Destinations */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
-        <section className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col">
-          <div className="mb-3">
-            <h2 className="font-display text-sm font-semibold">Top Devices</h2>
-            <p className="text-xs app-text-muted mt-0.5">
-              Local clients transferring the most bandwidth right now
-            </p>
-          </div>
+      {(featureVisibility.topDevices || featureVisibility.topDestinations) && (
+        <div
+          className={`grid grid-cols-1 ${
+            featureVisibility.topDevices && featureVisibility.topDestinations
+              ? 'lg:grid-cols-2'
+              : 'lg:grid-cols-1'
+          } gap-6 items-stretch`}
+        >
+          {featureVisibility.topDevices && (
+            <section className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col">
+              <div className="mb-3">
+                <h2 className="font-display text-sm font-semibold">Top Devices</h2>
+                <p className="text-xs app-text-muted mt-0.5">
+                  Local clients transferring the most bandwidth right now
+                </p>
+              </div>
 
-          {topHosts.length === 0 ? (
-            <div className="flex-1 flex items-center justify-center py-8 text-sm app-text-muted">
-              No active local devices detected yet.
-            </div>
-          ) : (
-            <div className="divide-y app-border">
-              {topHosts.map((host) => (
-                <button
-                  key={host.ip}
-                  type="button"
-                  onClick={() => onSelectHost(host)}
-                  className="w-full py-2.5 px-2.5 -mx-2.5 rounded-xl app-row-hover transition-colors flex items-center justify-between gap-4 text-left"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium truncate">{host.hostname}</span>
-                      <span className="text-xs app-text-muted tabular-nums">{host.ip}</span>
-                    </div>
-                    <div className="text-xs app-text-muted mt-0.5 truncate">
-                      {host.vendor} · {host.activeFlows} connections
-                    </div>
-                  </div>
-                  <div className="text-right text-xs font-medium tabular-nums shrink-0">
-                    <div>{formatBandwidth(host.rxBps, unit)} ↓</div>
-                    <div className="app-text-muted">{formatBandwidth(host.txBps, unit)} ↑</div>
-                  </div>
-                </button>
-              ))}
-            </div>
+              {topHosts.length === 0 ? (
+                <div className="flex-1 flex items-center justify-center py-8 text-sm app-text-muted">
+                  No active local devices detected yet.
+                </div>
+              ) : (
+                <div className="divide-y app-border">
+                  {topHosts.map((host) => (
+                    <button
+                      key={host.ip}
+                      type="button"
+                      onClick={() => onSelectHost(host)}
+                      className="w-full py-2.5 px-2.5 -mx-2.5 rounded-xl app-row-hover transition-colors flex items-center justify-between gap-4 text-left"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium truncate">{host.hostname}</span>
+                          <span className="text-xs app-text-muted tabular-nums">{host.ip}</span>
+                        </div>
+                        <div className="text-xs app-text-muted mt-0.5 truncate">
+                          {host.vendor} · {host.activeFlows} connections
+                        </div>
+                      </div>
+                      <div className="text-right text-xs font-medium tabular-nums shrink-0">
+                        <div>{formatBandwidth(host.rxBps, unit)} ↓</div>
+                        <div className="app-text-muted">{formatBandwidth(host.txBps, unit)} ↑</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
           )}
-        </section>
 
-        <section className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col">
-          <div className="mb-3">
-            <h2 className="font-display text-sm font-semibold">Top Destinations</h2>
-            <p className="text-xs app-text-muted mt-0.5">
-              Internet services receiving the highest active traffic
-            </p>
-          </div>
+          {featureVisibility.topDestinations && (
+            <section className="app-surface border rounded-2xl p-4 sm:p-5 flex flex-col">
+              <div className="mb-3">
+                <h2 className="font-display text-sm font-semibold">Top Destinations</h2>
+                <p className="text-xs app-text-muted mt-0.5">
+                  Internet services receiving the highest active traffic
+                </p>
+              </div>
 
-          {topServices.length === 0 ? (
-            <div className="flex-1 flex items-center justify-center py-8 text-sm app-text-muted">
-              No destination services observed yet.
-            </div>
-          ) : (
-            <div className="divide-y app-border">
-              {topServices.map((srv) => (
-                <button
-                  key={srv.service}
-                  type="button"
-                  onClick={() => onSelectFilter(srv.service)}
-                  className="w-full py-2.5 px-2.5 -mx-2.5 rounded-xl app-row-hover transition-colors flex items-center justify-between gap-4 text-left"
-                >
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">{srv.service}</div>
-                    <div className="text-xs app-text-muted mt-0.5 truncate">
-                      {srv.category} · {srv.flows} active connections · {formatBytes(srv.bytes)}
-                    </div>
-                  </div>
-                  <div className="text-xs font-medium tabular-nums shrink-0">
-                    {formatBandwidth(srv.bps, unit)}
-                  </div>
-                </button>
-              ))}
-            </div>
+              {topServices.length === 0 ? (
+                <div className="flex-1 flex items-center justify-center py-8 text-sm app-text-muted">
+                  No destination services observed yet.
+                </div>
+              ) : (
+                <div className="divide-y app-border">
+                  {topServices.map((srv) => (
+                    <button
+                      key={srv.service}
+                      type="button"
+                      onClick={() => onSelectFilter(srv.service)}
+                      className="w-full py-2.5 px-2.5 -mx-2.5 rounded-xl app-row-hover transition-colors flex items-center justify-between gap-4 text-left"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium truncate">{srv.service}</div>
+                        <div className="text-xs app-text-muted mt-0.5 truncate">
+                          {srv.category} · {srv.flows} active connections · {formatBytes(srv.bytes)}
+                        </div>
+                      </div>
+                      <div className="text-xs font-medium tabular-nums shrink-0">
+                        {formatBandwidth(srv.bps, unit)}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
           )}
-        </section>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

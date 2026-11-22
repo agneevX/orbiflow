@@ -19,13 +19,14 @@ import {
   Terminal,
   X,
 } from 'lucide-react';
-import type { BandwidthUnit, ProbeStatus } from '../types/telemetry';
+import type { BandwidthUnit, FeatureVisibility, ProbeStatus } from '../types/telemetry';
 import {
   DARK_THEMES,
   LIGHT_THEMES,
   type ThemeId,
   type ThemeMode,
 } from '../lib/themes';
+import { DEFAULT_FEATURE_VISIBILITY } from '../lib/tablePreferences';
 import { formatDuration } from '../lib/formatters';
 import { TechTerm } from './TechTerm';
 
@@ -48,15 +49,21 @@ interface SidebarProps {
   onToggleCollapse: () => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
+  featureVisibility?: FeatureVisibility;
 }
 
-const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Home }> = [
+const NAV_ITEMS: Array<{
+  id: NavTab;
+  label: string;
+  icon: typeof Home;
+  featureKey?: keyof FeatureVisibility;
+}> = [
   { id: 'overview', label: 'Home', icon: Home },
-  { id: 'topology', label: 'Traffic Map', icon: Share2 },
-  { id: 'flows', label: 'Connections', icon: Layers },
-  { id: 'hosts', label: 'Devices', icon: Network },
-  { id: 'alerts', label: 'Alerts', icon: Bell },
-  { id: 'setup', label: 'Agent', icon: Terminal },
+  { id: 'topology', label: 'Traffic Map', icon: Share2, featureKey: 'trafficMap' },
+  { id: 'flows', label: 'Connections', icon: Layers, featureKey: 'connections' },
+  { id: 'hosts', label: 'Devices', icon: Network, featureKey: 'devices' },
+  { id: 'alerts', label: 'Alerts', icon: Bell, featureKey: 'alerts' },
+  { id: 'setup', label: 'Agent', icon: Terminal, featureKey: 'agent' },
   { id: 'settings', label: 'Settings', icon: Sliders },
 ];
 
@@ -83,7 +90,11 @@ export function Sidebar({
   onToggleCollapse,
   mobileOpen,
   onCloseMobile,
+  featureVisibility = DEFAULT_FEATURE_VISIBILITY,
 }: SidebarProps) {
+  const visibleNavItems = NAV_ITEMS.filter(
+    (item) => !item.featureKey || featureVisibility[item.featureKey]
+  );
   const conntrackPct =
     probe.conntrackMax > 0
       ? Math.min(100, Math.round((probe.conntrackCount / probe.conntrackMax) * 100))
@@ -153,7 +164,7 @@ export function Sidebar({
         aria-label="Primary navigation"
         className={`flex-1 py-3 space-y-1 overflow-y-auto ${isCollapsed ? 'px-2' : 'px-3 space-y-0.5'}`}
       >
-        {NAV_ITEMS.map((item) => {
+        {visibleNavItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
           return (

@@ -860,22 +860,9 @@ export function ThroughputChart({
         </div>
 
         <div className="flex items-center gap-2">
-          {!zoomRange && (
-            <span className="text-[11px] app-text-muted hidden sm:inline">
-              Drag to zoom into full resolution
-            </span>
-          )}
-          {zoomRange && (
-            <button
-              type="button"
-              data-testid="reset-zoom-btn"
-              onClick={handleResetZoom}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border app-border app-input app-row-hover text-[11px] font-medium transition-colors"
-            >
-              <RotateCcw className="h-3 w-3" aria-hidden="true" />
-              Reset Zoom
-            </button>
-          )}
+          <span className="text-[11px] app-text-muted hidden sm:inline">
+            {zoomRange ? 'Double-click chart to reset' : 'Drag to zoom into full resolution'}
+          </span>
         </div>
       </div>
 
@@ -920,66 +907,82 @@ export function ThroughputChart({
           </div>
 
           {selectionSummary.hasData ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:divide-x app-border">
-              <div className="space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-semibold">
-                  <ArrowDownRight
-                    className="h-3.5 w-3.5 shrink-0"
-                    style={{ color: theme.rxColor }}
-                    aria-hidden="true"
-                  />
-                  <span style={{ color: theme.rxColor }}>Download</span>
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:divide-x app-border">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold">
+                    <ArrowDownRight
+                      className="h-3.5 w-3.5 shrink-0"
+                      style={{ color: theme.rxColor }}
+                      aria-hidden="true"
+                    />
+                    <span style={{ color: theme.rxColor }}>Download</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <div className="text-[11px] app-text-muted">Average</div>
+                      <div className="text-sm font-semibold tabular-nums mt-0.5">
+                        {formatBandwidth(selectionSummary.avgRxBps, unit)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] app-text-muted">Peak</div>
+                      <div className="text-sm font-semibold tabular-nums mt-0.5">
+                        {formatBandwidth(selectionSummary.peakRxBps, unit)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] app-text-muted">Est. Transfer</div>
+                      <div className="text-sm font-semibold tabular-nums mt-0.5">
+                        {formatBytes(selectionSummary.estimatedRxBytes)}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <div className="text-[11px] app-text-muted">Average</div>
-                    <div className="text-sm font-semibold tabular-nums mt-0.5">
-                      {formatBandwidth(selectionSummary.avgRxBps, unit)}
-                    </div>
+
+                <div className="space-y-2 md:pl-4 pt-3 md:pt-0 border-t md:border-t-0 app-border">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold">
+                    <ArrowUpRight
+                      className="h-3.5 w-3.5 shrink-0"
+                      style={{ color: theme.txColor }}
+                      aria-hidden="true"
+                    />
+                    <span style={{ color: theme.txColor }}>Upload</span>
                   </div>
-                  <div>
-                    <div className="text-[11px] app-text-muted">Peak</div>
-                    <div className="text-sm font-semibold tabular-nums mt-0.5">
-                      {formatBandwidth(selectionSummary.peakRxBps, unit)}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <div className="text-[11px] app-text-muted">Average</div>
+                      <div className="text-sm font-semibold tabular-nums mt-0.5">
+                        {formatBandwidth(selectionSummary.avgTxBps, unit)}
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <div className="text-[11px] app-text-muted">Est. Transfer</div>
-                    <div className="text-sm font-semibold tabular-nums mt-0.5">
-                      {formatBytes(selectionSummary.estimatedRxBytes)}
+                    <div>
+                      <div className="text-[11px] app-text-muted">Peak</div>
+                      <div className="text-sm font-semibold tabular-nums mt-0.5">
+                        {formatBandwidth(selectionSummary.peakTxBps, unit)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] app-text-muted">Est. Transfer</div>
+                      <div className="text-sm font-semibold tabular-nums mt-0.5">
+                        {formatBytes(selectionSummary.estimatedTxBytes)}
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
 
-              <div className="space-y-2 md:pl-4 pt-3 md:pt-0 border-t md:border-t-0 app-border">
-                <div className="flex items-center gap-1.5 text-xs font-semibold">
-                  <ArrowUpRight
-                    className="h-3.5 w-3.5 shrink-0"
-                    style={{ color: theme.txColor }}
-                    aria-hidden="true"
-                  />
-                  <span style={{ color: theme.txColor }}>Upload</span>
+              <div className="pt-3 border-t app-border flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs app-text-muted">
+                  Total Transfer <span className="hidden sm:inline">(Download + Upload)</span>
                 </div>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <div className="text-[11px] app-text-muted">Average</div>
-                    <div className="text-sm font-semibold tabular-nums mt-0.5">
-                      {formatBandwidth(selectionSummary.avgTxBps, unit)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[11px] app-text-muted">Peak</div>
-                    <div className="text-sm font-semibold tabular-nums mt-0.5">
-                      {formatBandwidth(selectionSummary.peakTxBps, unit)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[11px] app-text-muted">Est. Transfer</div>
-                    <div className="text-sm font-semibold tabular-nums mt-0.5">
-                      {formatBytes(selectionSummary.estimatedTxBytes)}
-                    </div>
-                  </div>
+                <div
+                  data-testid="zoom-total-transfer"
+                  className="text-sm font-semibold tabular-nums"
+                >
+                  {formatBytes(
+                    selectionSummary.estimatedRxBytes + selectionSummary.estimatedTxBytes
+                  )}
                 </div>
               </div>
             </div>

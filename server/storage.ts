@@ -5,6 +5,7 @@ import type {
   AlertEvent,
   AlertRule,
   DeviceAlias,
+  FeatureVisibility,
   NotificationConfig,
   PersistenceMode,
   SatelliteConfig,
@@ -42,6 +43,7 @@ export interface PersistedUserConfig {
   ispMaxUpMbps?: number;
   timeFormat?: TimeFormat;
   tablePreferences?: TablePreferences;
+  featureVisibility?: FeatureVisibility;
   satellites?: SatelliteConfig[];
   deviceAliases?: Record<string, DeviceAlias>;
   notifications?: NotificationConfig;

@@ -10,12 +10,14 @@ import {
   FolderOpen,
   Globe,
   KeyRound,
+  LayoutGrid,
   MonitorSmartphone,
   Radio,
   RefreshCw,
 } from 'lucide-react';
 import type {
   BandwidthUnit,
+  FeatureVisibility,
   PersistenceMode,
   PublicSatelliteConfig,
   SatelliteTelemetry,
@@ -24,7 +26,11 @@ import type {
   TimeFormat,
 } from '../types/telemetry';
 import { formatBytes } from '../lib/formatters';
-import { validateDnsServer } from '../lib/tablePreferences';
+import {
+  DEFAULT_FEATURE_VISIBILITY,
+  sanitizeFeatureVisibility,
+  validateDnsServer,
+} from '../lib/tablePreferences';
 import { TechTerm } from './TechTerm';
 import { SatelliteManager, type SatelliteSavePayload } from './SatelliteManager';
 
@@ -79,6 +85,9 @@ export function SettingsView({
   const [rdnsServer, setRdnsServer] = useState(serverConfig.rdnsServer || '');
   const [rdnsServerError, setRdnsServerError] = useState('');
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(serverConfig.timeFormat || '12h');
+  const [featureVisibility, setFeatureVisibility] = useState<FeatureVisibility>(() =>
+    sanitizeFeatureVisibility(serverConfig.featureVisibility)
+  );
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
 
@@ -89,6 +98,7 @@ export function SettingsView({
     setInferDeviceNames(serverConfig.inferDeviceNames !== false);
     setRdnsServer(serverConfig.rdnsServer || '');
     setTimeFormat(serverConfig.timeFormat || '12h');
+    setFeatureVisibility(sanitizeFeatureVisibility(serverConfig.featureVisibility));
   }, [
     serverConfig.probeToken,
     serverConfig.persistenceMode,
@@ -96,6 +106,7 @@ export function SettingsView({
     serverConfig.inferDeviceNames,
     serverConfig.rdnsServer,
     serverConfig.timeFormat,
+    serverConfig.featureVisibility,
   ]);
 
   const handleGenerateToken = () => {
@@ -131,6 +142,7 @@ export function SettingsView({
         inferDeviceNames,
         rdnsServer: dnsCheck.value,
         timeFormat,
+        featureVisibility,
       });
       setSavedNotice('Settings saved to configuration file');
       setTimeout(() => setSavedNotice(''), 2500);
@@ -470,6 +482,104 @@ export function SettingsView({
                 </button>
               ))}
             </div>
+          </div>
+        </section>
+
+        {/* App Features & Sections Visibility */}
+        <section
+          data-testid="feature-visibility-section"
+          className="app-surface border rounded-2xl p-5 space-y-4"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+                <LayoutGrid className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+                <span>App Features &amp; Sections</span>
+              </h2>
+              <p className="text-xs app-text-muted mt-1">
+                Disable sections or navigation pages you don&apos;t need to keep the dashboard
+                focused. Home and Settings always remain accessible.
+              </p>
+            </div>
+            {Object.values(featureVisibility).some((v) => !v) && (
+              <button
+                type="button"
+                data-testid="feature-enable-all-btn"
+                onClick={() => setFeatureVisibility({ ...DEFAULT_FEATURE_VISIBILITY })}
+                className="text-[11px] font-medium text-sky-500 hover:text-sky-400 transition-colors shrink-0"
+              >
+                Enable all
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {(
+              [
+                {
+                  key: 'flows',
+                  label: 'Flows Diagram',
+                  desc: 'Internet & LAN traffic flow diagram on Home',
+                },
+                {
+                  key: 'topDevices',
+                  label: 'Top Devices',
+                  desc: 'Top local clients card on Home',
+                },
+                {
+                  key: 'topDestinations',
+                  label: 'Top Destinations',
+                  desc: 'Top internet services card on Home',
+                },
+                {
+                  key: 'trafficMap',
+                  label: 'Traffic Map',
+                  desc: 'Router, satellite & client topology map page',
+                },
+                {
+                  key: 'connections',
+                  label: 'Connections',
+                  desc: 'Live and recent connection tracking table',
+                },
+                {
+                  key: 'devices',
+                  label: 'Devices',
+                  desc: 'Connected LAN devices inventory & aliases',
+                },
+                {
+                  key: 'alerts',
+                  label: 'Alerts',
+                  desc: 'Traffic alert rules, history & notifications',
+                },
+                {
+                  key: 'agent',
+                  label: 'Agent',
+                  desc: 'Router probe script & SSH installer page',
+                },
+              ] as Array<{ key: keyof FeatureVisibility; label: string; desc: string }>
+            ).map((item) => (
+              <label
+                key={item.key}
+                className="flex items-start gap-3 p-3 rounded-xl border app-border app-input cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  data-testid={`feature-toggle-${item.key}`}
+                  checked={featureVisibility[item.key]}
+                  onChange={(e) =>
+                    setFeatureVisibility((prev) => ({
+                      ...prev,
+                      [item.key]: e.target.checked,
+                    }))
+                  }
+                  className="mt-0.5 h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
+                />
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold">{item.label}</div>
+                  <div className="text-[11px] app-text-muted mt-0.5 leading-snug">{item.desc}</div>
+                </div>
+              </label>
+            ))}
           </div>
         </section>
 

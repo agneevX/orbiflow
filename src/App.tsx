@@ -27,7 +27,10 @@ import {
   analyzeTimeWindow,
   type TimeWindowAnalysis,
 } from './lib/timeWindowUtils';
-import { DEFAULT_TABLE_PREFERENCES } from './lib/tablePreferences';
+import {
+  DEFAULT_TABLE_PREFERENCES,
+  sanitizeFeatureVisibility,
+} from './lib/tablePreferences';
 import type {
   AlertRule,
   BandwidthUnit,
@@ -396,12 +399,31 @@ export default function App() {
     }
   };
 
+  const featureVisibility = useMemo(
+    () => sanitizeFeatureVisibility(snapshot?.serverConfig.featureVisibility),
+    [snapshot?.serverConfig.featureVisibility]
+  );
+
+  useEffect(() => {
+    const tabDisabled =
+      (activeTab === 'topology' && !featureVisibility.trafficMap) ||
+      (activeTab === 'flows' && !featureVisibility.connections) ||
+      (activeTab === 'hosts' && !featureVisibility.devices) ||
+      (activeTab === 'alerts' && !featureVisibility.alerts) ||
+      (activeTab === 'setup' && !featureVisibility.agent);
+    if (tabDisabled) {
+      setActiveTab('overview');
+    }
+  }, [activeTab, featureVisibility]);
+
   const handleFilterConnections = (query: string) => {
+    if (!featureVisibility.connections) return;
     setFlowSearchSeed(query);
     setActiveTab('flows');
   };
 
   const handleSelectHost = (host: HostSummary) => {
+    if (!featureVisibility.connections) return;
     handleFilterConnections(host.ip);
   };
 
@@ -514,6 +536,7 @@ export default function App() {
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
+        featureVisibility={featureVisibility}
       />
 
       <div className="flex-1 min-w-0 flex flex-col">
@@ -544,22 +567,28 @@ export default function App() {
               unit={unit}
               timeFormat={activeTimeFormat}
               theme={activeTheme}
+              featureVisibility={featureVisibility}
               onSelectHost={handleSelectHost}
               onSelectFilter={handleFilterConnections}
               onViewAllFlows={() => {
+                if (!featureVisibility.connections) return;
                 setFlowSearchSeed('');
                 setActiveTab('flows');
               }}
-              onOpenHosts={() => setActiveTab('hosts')}
+              onOpenHosts={() => {
+                if (!featureVisibility.devices) return;
+                setActiveTab('hosts');
+              }}
             />
           )}
 
-          {activeTab === 'topology' && (
+          {activeTab === 'topology' && featureVisibility.trafficMap && (
             <TrafficMapView
               snapshot={snapshot}
               unit={unit}
               theme={activeTheme}
               paused={paused}
+              connectionsEnabled={featureVisibility.connections}
               onInspectHostFlows={handleSelectHost}
               onSaveSatellite={handleSaveSatellite}
               onDeleteSatellite={handleDeleteSatellite}
@@ -567,7 +596,7 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'flows' && (
+          {activeTab === 'flows' && featureVisibility.connections && (
             <FlowsView
               key={flowSearchSeed}
               flows={snapshot.flows}
@@ -583,7 +612,7 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'hosts' && (
+          {activeTab === 'hosts' && featureVisibility.devices && (
             <HostsView
               hosts={snapshot.hosts}
               unit={unit}
@@ -599,7 +628,7 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'alerts' && (
+          {activeTab === 'alerts' && featureVisibility.alerts && (
             <AlertsView
               rules={snapshot.rules}
               alerts={snapshot.alerts}
@@ -613,7 +642,7 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'setup' && (
+          {activeTab === 'setup' && featureVisibility.agent && (
             <SetupView
               defaultToken={snapshot.serverConfig.probeToken}
               defaultDhcpLeasesPath={snapshot.serverConfig.dhcpLeasesPath}

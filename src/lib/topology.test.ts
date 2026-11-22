@@ -6,14 +6,15 @@ import {
   formatLinkSpeed,
   formatWifiRatesLabel,
   inferTopologyDeviceIcon,
+  parseSatelliteInfoWifi,
   parseSatelliteSshOutput,
   toPublicSatelliteConfig,
 } from './topology';
 import { convertProbeToTelemetry, validateSatelliteInput } from '../../server/satellitePoller';
-import { DEFAULT_TABLE_PREFERENCES } from './tablePreferences';
+import { DEFAULT_FEATURE_VISIBILITY, DEFAULT_TABLE_PREFERENCES } from './tablePreferences';
 import type { DashboardSnapshot, HostSummary, SatelliteConfig } from '../types/telemetry';
 
-test('computeIspUtilization calculates Mbps, percentages, and health tiers', () => {
+test('computeIspUtilization calculates Mbps, unclamped percentages >100%, and health tiers', () => {
   // 50 MB/s = 400 Mbps on 1000 Mbps plan = 40% (moderate)
   const mod = computeIspUtilization(50_000_000, 5_000_000, 1000, 200);
   assert.equal(mod.downMbps, 400);
@@ -24,9 +25,10 @@ test('computeIspUtilization calculates Mbps, percentages, and health tiers', () 
   assert.equal(mod.dominantDirection, 'down');
   assert.equal(mod.health, 'moderate');
 
-  // Saturated upload: 25 MB/s = 200 Mbps on 200 Mbps plan = 100%
+  // Over-subscribed upload: 30 MB/s = 240 Mbps on 200 Mbps plan = 120% (exceeds 100%)
   const sat = computeIspUtilization(1_000_000, 30_000_000, 1000, 200);
-  assert.equal(sat.upPct, 100);
+  assert.equal(sat.upPct, 120);
+  assert.equal(sat.peakPct, 120);
   assert.equal(sat.dominantDirection, 'up');
   assert.equal(sat.health, 'saturated');
 
@@ -202,6 +204,17 @@ function makeSnapshot(): DashboardSnapshot {
     remotes: [],
     clientLinks: [],
     topology: {
+      wan: {
+        ip: '73.162.48.214',
+        gateway: '73.162.48.1',
+        dns: ['1.1.1.1', '8.8.8.8'],
+        iface: 'eth0',
+        linkSpeedMbps: 2500,
+        duplex: 'full',
+        mtu: 1500,
+        state: 'up',
+        connectionType: 'DHCP',
+      },
       routerPorts: [
         {
           id: 'eth0',
@@ -311,6 +324,7 @@ function makeSnapshot(): DashboardSnapshot {
       ispMaxDownMbps: 1000,
       ispMaxUpMbps: 200,
       tablePreferences: DEFAULT_TABLE_PREFERENCES,
+      featureVisibility: DEFAULT_FEATURE_VISIBILITY,
     },
     serverStats: {
       configPath: '/config/config.json',
@@ -574,4 +588,44 @@ test('buildTopologyGraph does not assign fake 1 GbE Ethernet labels to direct cl
   assert.ok(phoneNode);
   assert.equal(phoneNode.connectionType, undefined);
   assert.equal(phoneNode.linkSpeedLabel, undefined);
+
+  // Internet node reflects WAN details from router
+  const internetNode = graph.nodes.find((n) => n.id === 'internet');
+  assert.ok(internetNode);
+  assert.equal(internetNode.ip, '73.162.48.214');
+  assert.equal(internetNode.wan?.gateway, '73.162.48.1');
+  assert.equal(internetNode.sublabel, '73.162.48.214 · 2.5 GbE');
+});
+
+test('parseSatelliteInfoWifi parses JSON and text outputs from /usr/sbin/satelliteinfo wifi', () => {
+  const jsonRaw = JSON.stringify([
+    {
+      mac: 'AA:BB:CC:11:22:33',
+      ip: '192.168.1.3',
+      model: 'RBS50',
+      name: 'Living Room',
+      backhaul_type: '5G',
+      backhaul_status: 'Good',
+      link_rate: '1733 Mbps',
+      rssi: '-54',
+    },
+    {
+      mac: 'AA:BB:CC:44:55:66',
+      ip: '192.168.1.4',
+      model: 'RBS50',
+      backhaul_type: 'Wired',
+      backhaul_status: 'Good',
+      link_rate: 1000,
+    },
+  ]);
+
+  const parsed = parseSatelliteInfoWifi(jsonRaw);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].mac, 'aa:bb:cc:11:22:33');
+  assert.equal(parsed[0].backhaulType, 'wifi');
+  assert.equal(parsed[0].backhaulSpeedMbps, 1733);
+  assert.equal(parsed[0].signalDbm, -54);
+  assert.equal(parsed[0].backhaulStatus, 'Good');
+  assert.equal(parsed[1].backhaulType, 'ethernet');
+  assert.equal(parsed[1].backhaulSpeedMbps, 1000);
 });
