@@ -250,9 +250,49 @@ export function parseProcConntrackLines(lines: string[]): RawConntrackFlow[] {
   return flows;
 }
 
+const UINT32_MODULO = 0x1_0000_0000; // 4,294,967,296 (32-bit ARMv7 Linux /proc/net/dev & conntrack wrap)
+const DEFAULT_MAX_PLAUSIBLE_BPS = 1_250_000_000; // 10 Gbps ceiling to reject corrupted counter spikes
+
+/**
+ * Computes a safe byte delta across polling ticks:
+ * - Recovers cleanly from 32-bit unsigned counter wraps (every 4.29 GB on 32-bit ARM routers)
+ * - Rejects counter resets / interface reboots and physically impossible single-tick spikes
+ */
+export function computeCounterDelta(
+  curr: number,
+  prev: number,
+  dtSec: number,
+  maxPlausibleBps = DEFAULT_MAX_PLAUSIBLE_BPS
+): number {
+  if (!Number.isFinite(curr) || !Number.isFinite(prev) || curr < 0 || prev < 0) return 0;
+  if (!Number.isFinite(dtSec) || dtSec <= 0) return 0;
+
+  let delta = 0;
+  if (curr >= prev) {
+    delta = curr - prev;
+  } else if (prev <= UINT32_MODULO && curr <= UINT32_MODULO) {
+    // Candidate 32-bit unsigned counter wrap
+    const wrappedDelta = UINT32_MODULO - prev + curr;
+    // Only treat as a genuine wrap if the implied rate is plausible (otherwise it was a counter reset)
+    if (wrappedDelta / dtSec <= maxPlausibleBps) {
+      delta = wrappedDelta;
+    } else {
+      return 0;
+    }
+  } else {
+    return 0;
+  }
+
+  if (delta / dtSec > maxPlausibleBps) {
+    return 0;
+  }
+  return delta;
+}
+
 export class TrafficMonitorEngine {
-  private history: TrafficPoint[] = []; // High-resolution samples (last 15 minutes)
-  private readonly maxHistoryPoints = 900;
+  private history: TrafficPoint[] = []; // High-resolution samples (up to 65+ minutes at 3s cadence)
+  private readonly maxHistoryPoints = 1800;
+  private readonly maxHistoryAgeMs = 65 * 60_000;
   private rollupHistory: TrafficPoint[] = []; // 1-minute buckets (up to 24h = 1440 buckets)
   private readonly maxRollupPoints = 1440;
   private currentBucketStart = 0;
@@ -305,8 +345,10 @@ export class TrafficMonitorEngine {
   private readonly topServicesRefreshMs = 15_000;
   private routerPorts: EthernetPortMetrics[] = [];
   private routerSubnets: ProbeSubnetEntry[] = [];
-  private prevRouterPortBytes = new Map<string, { rx: number; tx: number }>();
-  private prevLanIfaceBytes = new Map<string, { rx: number; tx: number }>();
+  private prevRouterPortBytes = new Map<string, { rx: number; tx: number; ts: number }>();
+  private prevLanIfaceBytes = new Map<string, { rx: number; tx: number; ts: number }>();
+  private lastWanRxBps = 0;
+  private lastWanTxBps = 0;
   private latestLanSummary: LanTrafficSummary | undefined = undefined;
   private wanDetails: WanDetails | null = null;
   private routerSatelliteInfo: SatelliteInfoEntry[] = [];
@@ -578,10 +620,32 @@ export class TrafficMonitorEngine {
     serverConfig?: ServerConfig;
   }): void {
     if (Array.isArray(saved.history)) {
-      this.history = saved.history.slice(-this.maxHistoryPoints);
+      const sorted = saved.history
+        .filter((p) => p && Number.isFinite(p.timestamp) && Number.isFinite(p.rxBps) && Number.isFinite(p.txBps))
+        .sort((a, b) => a.timestamp - b.timestamp);
+      const deduped: TrafficPoint[] = [];
+      for (const p of sorted) {
+        if (deduped.length > 0 && deduped[deduped.length - 1].timestamp === p.timestamp) {
+          deduped[deduped.length - 1] = p;
+        } else {
+          deduped.push(p);
+        }
+      }
+      this.history = deduped.slice(-this.maxHistoryPoints);
     }
     if (Array.isArray(saved.rollupHistory)) {
-      this.rollupHistory = saved.rollupHistory.slice(-this.maxRollupPoints);
+      const sorted = saved.rollupHistory
+        .filter((p) => p && Number.isFinite(p.timestamp) && Number.isFinite(p.rxBps) && Number.isFinite(p.txBps))
+        .sort((a, b) => a.timestamp - b.timestamp);
+      const deduped: TrafficPoint[] = [];
+      for (const p of sorted) {
+        if (deduped.length > 0 && deduped[deduped.length - 1].timestamp === p.timestamp) {
+          deduped[deduped.length - 1] = p;
+        } else {
+          deduped.push(p);
+        }
+      }
+      this.rollupHistory = deduped.slice(-this.maxRollupPoints);
     }
     if (typeof saved.peakRxBps === 'number') this.peakRxBps = saved.peakRxBps;
     if (typeof saved.peakTxBps === 'number') this.peakTxBps = saved.peakTxBps;
@@ -1054,9 +1118,26 @@ export class TrafficMonitorEngine {
   }
 
   private recordHistoryPoint(point: TrafficPoint): void {
-    this.history.push(point);
-    if (this.history.length > this.maxHistoryPoints) {
+    // Keep high-res history strictly monotonic (ignore out-of-order / duplicate timestamps)
+    const lastHist = this.history.length > 0 ? this.history[this.history.length - 1] : null;
+    if (lastHist && point.timestamp < lastHist.timestamp) {
+      return;
+    }
+    if (lastHist && point.timestamp === lastHist.timestamp) {
+      this.history[this.history.length - 1] = point;
+    } else {
+      this.history.push(point);
+    }
+
+    // Prune excess points beyond maxHistoryPoints (or older than 65m once over 900 samples)
+    while (this.history.length > this.maxHistoryPoints) {
       this.history.shift();
+    }
+    if (this.history.length > 900) {
+      const cutoff = point.timestamp - this.maxHistoryAgeMs;
+      while (this.history.length > 900 && this.history[0].timestamp < cutoff) {
+        this.history.shift();
+      }
     }
 
     const minuteFloor = Math.floor(point.timestamp / 60_000) * 60_000;
@@ -1074,20 +1155,27 @@ export class TrafficMonitorEngine {
           .map((p) => p.routerLoadPct)
           .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
         const peakRouterLoadPct = loadValues.length > 0 ? Math.max(...loadValues) : undefined;
-        this.rollupHistory.push({
+        const rollupPoint: TrafficPoint = {
           timestamp: this.currentBucketStart,
           rxBps: avgRx,
           txBps: avgTx,
           activeFlows: avgFlows,
           ...(peakRouterLoadPct !== undefined ? { routerLoadPct: peakRouterLoadPct } : {}),
-        });
-        if (this.rollupHistory.length > this.maxRollupPoints) {
+        };
+        const lastRollup =
+          this.rollupHistory.length > 0 ? this.rollupHistory[this.rollupHistory.length - 1] : null;
+        if (!lastRollup || rollupPoint.timestamp > lastRollup.timestamp) {
+          this.rollupHistory.push(rollupPoint);
+        } else if (rollupPoint.timestamp === lastRollup.timestamp) {
+          this.rollupHistory[this.rollupHistory.length - 1] = rollupPoint;
+        }
+        while (this.rollupHistory.length > this.maxRollupPoints) {
           this.rollupHistory.shift();
         }
       }
       this.currentBucketStart = minuteFloor;
       this.bucketSamples = [point];
-    } else {
+    } else if (minuteFloor === this.currentBucketStart) {
       this.bucketSamples.push(point);
     }
   }
@@ -1100,11 +1188,30 @@ export class TrafficMonitorEngine {
     dashboard: DashboardSnapshot;
     newAlerts: AlertEvent[];
   } {
-    const now = snapshot.timestamp || Date.now();
-    const dtSec =
-      this.lastTimestamp > 0 && now > this.lastTimestamp
-        ? Math.max(0.25, (now - this.lastTimestamp) / 1000)
-        : 1;
+    const rawNow =
+      typeof snapshot.timestamp === 'number' && Number.isFinite(snapshot.timestamp) && snapshot.timestamp > 0
+        ? snapshot.timestamp
+        : Date.now();
+
+    // Ignore out-of-order or duplicate snapshots that would corrupt counter deltas and timeline order
+    if (this.lastTimestamp > 0 && rawNow <= this.lastTimestamp) {
+      return {
+        dashboard: this.latestSnapshot,
+        newAlerts: [],
+      };
+    }
+
+    const now = rawNow;
+    const rawDtSec = this.lastTimestamp > 0 ? (now - this.lastTimestamp) / 1000 : 1;
+    const isMicroBurst = this.lastTimestamp > 0 && rawDtSec < 0.5;
+    const dtSec = this.lastTimestamp > 0 ? Math.max(0.5, rawDtSec) : 1;
+
+    // Upper sanity ceiling: max of 10 Gbps or 4× configured ISP speed (rejects impossible glitch spikes)
+    const configuredMaxMbps = Math.max(
+      this.serverConfig.ispMaxDownMbps || 1000,
+      this.serverConfig.ispMaxUpMbps || 200
+    );
+    const maxPlausibleWanBps = Math.max(DEFAULT_MAX_PLAUSIBLE_BPS, configuredMaxMbps * 125_000 * 4);
 
     this.probeStatus = {
       ...this.probeStatus,
@@ -1128,16 +1235,29 @@ export class TrafficMonitorEngine {
     let rxBps = 0;
     let txBps = 0;
 
-    if (
-      this.lastIface &&
-      this.lastIface.iface === snapshot.iface.iface &&
-      snapshot.iface.rxBytes >= this.lastIface.rxBytes &&
-      snapshot.iface.txBytes >= this.lastIface.txBytes
-    ) {
-      rxBps = (snapshot.iface.rxBytes - this.lastIface.rxBytes) / dtSec;
-      txBps = (snapshot.iface.txBytes - this.lastIface.txBytes) / dtSec;
+    if (isMicroBurst) {
+      // Buffered TCP/WS frames arriving <0.5s apart: keep previous rate rather than dividing by tiny dt
+      rxBps = this.lastWanRxBps;
+      txBps = this.lastWanTxBps;
+    } else if (this.lastIface && this.lastIface.iface === snapshot.iface.iface) {
+      const rxDeltaBytes = computeCounterDelta(
+        snapshot.iface.rxBytes,
+        this.lastIface.rxBytes,
+        dtSec,
+        maxPlausibleWanBps
+      );
+      const txDeltaBytes = computeCounterDelta(
+        snapshot.iface.txBytes,
+        this.lastIface.txBytes,
+        dtSec,
+        maxPlausibleWanBps
+      );
+      rxBps = rxDeltaBytes / dtSec;
+      txBps = txDeltaBytes / dtSec;
     }
 
+    this.lastWanRxBps = rxBps;
+    this.lastWanTxBps = txBps;
     this.lastIface = { ...snapshot.iface };
     this.lastTimestamp = now;
 
@@ -1145,22 +1265,24 @@ export class TrafficMonitorEngine {
     if (txBps > this.peakTxBps) this.peakTxBps = txBps;
 
     // Update main router Ethernet port negotiation speeds & per-port Rx/Tx rates
+    // Note: ports refresh every ~30s, so compute delta using each port's own elapsed timestamp (not global 3s dtSec!)
     if (Array.isArray(snapshot.ports) && snapshot.ports.length > 0) {
       this.routerPorts = snapshot.ports.map((port) => {
         const prevPort = this.prevRouterPortBytes.get(port.id);
+        const portDtSec = prevPort && now > prevPort.ts ? Math.max(1, (now - prevPort.ts) / 1000) : dtSec;
         const computedRx =
           port.rxBps > 0
             ? port.rxBps
-            : prevPort && port.rxBytes >= prevPort.rx
-              ? Math.round((port.rxBytes - prevPort.rx) / dtSec)
+            : prevPort
+              ? Math.round(computeCounterDelta(port.rxBytes, prevPort.rx, portDtSec) / portDtSec)
               : 0;
         const computedTx =
           port.txBps > 0
             ? port.txBps
-            : prevPort && port.txBytes >= prevPort.tx
-              ? Math.round((port.txBytes - prevPort.tx) / dtSec)
+            : prevPort
+              ? Math.round(computeCounterDelta(port.txBytes, prevPort.tx, portDtSec) / portDtSec)
               : 0;
-        this.prevRouterPortBytes.set(port.id, { rx: port.rxBytes, tx: port.txBytes });
+        this.prevRouterPortBytes.set(port.id, { rx: port.rxBytes, tx: port.txBytes, ts: now });
         return {
           ...port,
           rxBps: computedRx,
@@ -1251,13 +1373,23 @@ export class TrafficMonitorEngine {
       const id = raw.id || `${proto}:${raw.src}:${raw.sport}->${raw.dst}:${raw.dport}`;
 
       const prev = this.flowRecords.get(id);
-      const txDelta =
-        prev && raw.txBytes >= prev.prevTxBytes ? (raw.txBytes - prev.prevTxBytes) / dtSec : 0;
-      const rxDelta =
-        prev && raw.rxBytes >= prev.prevRxBytes ? (raw.rxBytes - prev.prevRxBytes) / dtSec : 0;
+      // If a previously ended 5-tuple is reused, treat it as a fresh baseline instead of computing a bogus delta
+      const usablePrev = prev && !prev.endedAt ? prev : undefined;
+      const flowDtSec =
+        usablePrev && now > usablePrev.lastSeen
+          ? Math.max(0.5, (now - usablePrev.lastSeen) / 1000)
+          : dtSec;
 
-      const flowTxBps = prev ? Math.round(txDelta) : 0;
-      const flowRxBps = prev ? Math.round(rxDelta) : 0;
+      const flowTxBps = isMicroBurst
+        ? (usablePrev?.txBps ?? 0)
+        : usablePrev
+          ? Math.round(computeCounterDelta(raw.txBytes, usablePrev.prevTxBytes, flowDtSec) / flowDtSec)
+          : 0;
+      const flowRxBps = isMicroBurst
+        ? (usablePrev?.rxBps ?? 0)
+        : usablePrev
+          ? Math.round(computeCounterDelta(raw.rxBytes, usablePrev.prevRxBytes, flowDtSec) / flowDtSec)
+          : 0;
 
       // Drop brand-new closing/unestablished sessions, but if a previously tracked live flow
       // transitions to TIME_WAIT / FIN_WAIT / CLOSE_WAIT / CLOSE, mark it ended so it stays readable
@@ -1888,11 +2020,16 @@ export class TrafficMonitorEngine {
     if (Array.isArray(snapshot.lanIfaces) && snapshot.lanIfaces.length > 0) {
       for (const lif of snapshot.lanIfaces) {
         const prev = this.prevLanIfaceBytes.get(lif.iface);
+        const lifDtSec = prev && now > prev.ts ? Math.max(0.5, (now - prev.ts) / 1000) : dtSec;
         const lifRxBps =
-          prev && lif.rxBytes >= prev.rx ? Math.round((lif.rxBytes - prev.rx) / dtSec) : 0;
+          prev && !isMicroBurst
+            ? Math.round(computeCounterDelta(lif.rxBytes, prev.rx, lifDtSec) / lifDtSec)
+            : 0;
         const lifTxBps =
-          prev && lif.txBytes >= prev.tx ? Math.round((lif.txBytes - prev.tx) / dtSec) : 0;
-        this.prevLanIfaceBytes.set(lif.iface, { rx: lif.rxBytes, tx: lif.txBytes });
+          prev && !isMicroBurst
+            ? Math.round(computeCounterDelta(lif.txBytes, prev.tx, lifDtSec) / lifDtSec)
+            : 0;
+        this.prevLanIfaceBytes.set(lif.iface, { rx: lif.rxBytes, tx: lif.txBytes, ts: now });
         measuredLanIfaces.push({
           iface: lif.iface,
           rxBps: lifRxBps,
@@ -1900,6 +2037,16 @@ export class TrafficMonitorEngine {
           rxBytes: lif.rxBytes,
           txBytes: lif.txBytes,
         });
+      }
+    }
+
+    // Periodically prune stale hostTopServicesCache entries so long-running sessions stay bounded
+    if (this.hostTopServicesCache.size > 120) {
+      const staleCutoff = now - this.hostPresenceTtlMs;
+      for (const [k, entry] of this.hostTopServicesCache.entries()) {
+        if (entry.updatedAt < staleCutoff) {
+          this.hostTopServicesCache.delete(k);
+        }
       }
     }
 

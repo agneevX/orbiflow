@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { BandwidthUnit, ClientDestinationLink } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
 import { formatBandwidth, formatBytes, isPrivateIp } from '../lib/formatters';
@@ -22,8 +22,20 @@ interface PositionedNode {
   color: string;
 }
 
+interface SmoothedLinkEntry {
+  link: ClientDestinationLink;
+  smoothedRxBps: number;
+  smoothedTxBps: number;
+  smoothedTotalBps: number;
+  lastSeenAt: number;
+}
+
 const MAX_FLOW_DEVICES = 3;
 const MAX_FLOW_DESTINATIONS = 5;
+const FLOW_EMA_ALPHA = 0.45;
+const FLOW_HOLD_MS = 12_000;
+const FLOW_DECAY_FACTOR = 0.58;
+const RANK_HYSTERESIS_RATIO = 1.2;
 
 function isInternetLink(link: ClientDestinationLink): boolean {
   if (link.scope === 'lan') return false;
@@ -31,6 +43,58 @@ function isInternetLink(link: ClientDestinationLink): boolean {
   if (link.category === 'Local Network') return false;
   if (link.dstIp && isPrivateIp(link.dstIp)) return false;
   return true;
+}
+
+/**
+ * Deterministic color index from client IP so a device's ribbon color stays stable
+ * even when devices enter, leave, or change rank.
+ */
+function pickStableRibbonColor(clientIp: string, palette: string[]): string {
+  if (!palette.length) return '#38bdf8';
+  let hash = 2166136261;
+  for (let i = 0; i < clientIp.length; i++) {
+    hash ^= clientIp.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return palette[Math.abs(hash) % palette.length];
+}
+
+/**
+ * Applies gentle rank hysteresis so items with similar bandwidth do not swap slots every 3s.
+ */
+function sortWithHysteresis<T extends { bps: number; bytes: number }>(
+  entries: Array<[string, T]>,
+  prevOrder: string[],
+  limit: number
+): Array<[string, T]> {
+  const bySpeed = [...entries].sort((a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes);
+  if (prevOrder.length === 0 || bySpeed.length <= 1) {
+    return bySpeed.slice(0, limit);
+  }
+
+  // First choose the top `limit` candidates (favoring existing visible items unless clearly beaten)
+  const prevRank = new Map(prevOrder.map((id, idx) => [id, idx]));
+  const selected = bySpeed.slice(0, limit);
+
+  // Preserve previous relative ordering between adjacent items unless the lower-ranked one
+  // exceeds the higher-ranked one by >= RANK_HYSTERESIS_RATIO (20%)
+  const ordered = [...selected].sort((a, b) => {
+    const ra = prevRank.get(a[0]);
+    const rb = prevRank.get(b[0]);
+    if (ra !== undefined && rb !== undefined) {
+      if (ra < rb) {
+        // Keep `a` ahead of `b` unless `b` beats `a` by >= 20%
+        if (b[1].bps <= a[1].bps * RANK_HYSTERESIS_RATIO) return -1;
+        return 1;
+      } else {
+        if (a[1].bps <= b[1].bps * RANK_HYSTERESIS_RATIO) return 1;
+        return -1;
+      }
+    }
+    return b[1].bps - a[1].bps || b[1].bytes - a[1].bytes;
+  });
+
+  return ordered;
 }
 
 export function ClientFlowDiagram({
@@ -43,21 +107,81 @@ export function ClientFlowDiagram({
   const [hoveredService, setHoveredService] = useState<string | null>(null);
   const [hoveredLinkKey, setHoveredLinkKey] = useState<string | null>(null);
 
+  // Temporal stabilizer cache: smooths bursty 3s conntrack deltas and prevents erratic jumping/flicker
+  const smoothedCacheRef = useRef<Map<string, SmoothedLinkEntry>>(new Map());
+  const prevClientOrderRef = useRef<string[]>([]);
+  const prevServiceOrderRef = useRef<string[]>([]);
+
   const layout = useMemo(() => {
-    const scopedLinks = links.filter(isInternetLink);
+    const now = Date.now();
+    const rawInternetLinks = links.filter(isInternetLink);
+    const cache = smoothedCacheRef.current;
+    const seenKeys = new Set<string>();
+
+    for (const l of rawInternetLinks) {
+      const key = `${l.clientIp}=>${l.service}`;
+      seenKeys.add(key);
+      const existing = cache.get(key);
+      if (existing) {
+        existing.smoothedRxBps = Math.round(
+          existing.smoothedRxBps * (1 - FLOW_EMA_ALPHA) + l.rxBps * FLOW_EMA_ALPHA
+        );
+        existing.smoothedTxBps = Math.round(
+          existing.smoothedTxBps * (1 - FLOW_EMA_ALPHA) + l.txBps * FLOW_EMA_ALPHA
+        );
+        existing.smoothedTotalBps = Math.round(
+          existing.smoothedTotalBps * (1 - FLOW_EMA_ALPHA) + l.totalBps * FLOW_EMA_ALPHA
+        );
+        existing.link = l;
+        existing.lastSeenAt = now;
+      } else {
+        cache.set(key, {
+          link: l,
+          smoothedRxBps: l.rxBps,
+          smoothedTxBps: l.txBps,
+          smoothedTotalBps: l.totalBps,
+          lastSeenAt: now,
+        });
+      }
+    }
+
+    // Gently decay recently active flows for up to FLOW_HOLD_MS so bursty chunks don't flicker
+    for (const [key, entry] of cache.entries()) {
+      if (seenKeys.has(key)) continue;
+      if (now - entry.lastSeenAt > FLOW_HOLD_MS || entry.smoothedTotalBps < 512) {
+        cache.delete(key);
+      } else {
+        entry.smoothedRxBps = Math.round(entry.smoothedRxBps * FLOW_DECAY_FACTOR);
+        entry.smoothedTxBps = Math.round(entry.smoothedTxBps * FLOW_DECAY_FACTOR);
+        entry.smoothedTotalBps = Math.round(entry.smoothedTotalBps * FLOW_DECAY_FACTOR);
+      }
+    }
+
+    const scopedLinks: ClientDestinationLink[] = Array.from(cache.values())
+      .filter((e) => e.smoothedTotalBps >= 512 || e.link.totalBytes > 0)
+      .map((e) => ({
+        ...e.link,
+        rxBps: e.smoothedRxBps,
+        txBps: e.smoothedTxBps,
+        totalBps: e.smoothedTotalBps,
+      }));
 
     const clientTotals = new Map<string, { name: string; bps: number; bytes: number }>();
     for (const l of scopedLinks) {
       const c = clientTotals.get(l.clientIp) || { name: l.clientName, bps: 0, bytes: 0 };
+      c.name = l.clientName;
       c.bps += l.totalBps;
       c.bytes += l.totalBytes;
       clientTotals.set(l.clientIp, c);
     }
 
-    // Show up to a max of 3 active devices with traffic
-    const topClients = Array.from(clientTotals.entries())
-      .sort((a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes)
-      .slice(0, MAX_FLOW_DEVICES);
+    // Show up to a max of 3 active devices with rank hysteresis to prevent slot jumping
+    const topClients = sortWithHysteresis(
+      Array.from(clientTotals.entries()),
+      prevClientOrderRef.current,
+      MAX_FLOW_DEVICES
+    );
+    prevClientOrderRef.current = topClients.map(([ip]) => ip);
 
     const clientSet = new Set(topClients.map(([ip]) => ip));
     const linksForTopClients = scopedLinks.filter((l) => clientSet.has(l.clientIp));
@@ -86,23 +210,29 @@ export function ClientFlowDiagram({
       (a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes
     );
 
-    const topServices: Array<[string, { bps: number; bytes: number }]> = [];
+    const chosenServices: Array<[string, { bps: number; bytes: number }]> = [];
     const chosenServiceKeys = new Set<string>();
 
     for (const entry of sortedServices) {
       if (guaranteedServices.has(entry[0]) && !chosenServiceKeys.has(entry[0])) {
-        topServices.push(entry);
+        chosenServices.push(entry);
         chosenServiceKeys.add(entry[0]);
       }
     }
     for (const entry of sortedServices) {
-      if (topServices.length >= MAX_FLOW_DESTINATIONS) break;
+      if (chosenServices.length >= MAX_FLOW_DESTINATIONS) break;
       if (!chosenServiceKeys.has(entry[0])) {
-        topServices.push(entry);
+        chosenServices.push(entry);
         chosenServiceKeys.add(entry[0]);
       }
     }
-    topServices.sort((a, b) => b[1].bps - a[1].bps || b[1].bytes - a[1].bytes);
+
+    const topServices = sortWithHysteresis(
+      chosenServices,
+      prevServiceOrderRef.current,
+      MAX_FLOW_DESTINATIONS
+    );
+    prevServiceOrderRef.current = topServices.map(([srv]) => srv);
 
     const serviceSet = new Set(topServices.map(([srv]) => srv));
 
@@ -152,7 +282,7 @@ export function ClientFlowDiagram({
           y: cursorY,
           height: h,
           color: usePalette
-            ? theme.ribbonColors[idx % theme.ribbonColors.length]
+            ? pickStableRibbonColor(key, theme.ribbonColors)
             : theme.rxColor,
         };
         cursorY += h + gap;
@@ -191,9 +321,10 @@ export function ClientFlowDiagram({
     const clientNodeMap = new Map(clientNodes.map((n) => [n.id, n]));
     const serviceNodeMap = new Map(serviceNodes.map((n) => [n.id, n]));
 
-    const filteredLinks = linksForTopClients.filter(
-      (l) => clientSet.has(l.clientIp) && serviceSet.has(l.service)
-    );
+    const filteredLinks = linksForTopClients
+      .filter((l) => clientSet.has(l.clientIp) && serviceSet.has(l.service))
+      .sort((a, b) => a.clientIp.localeCompare(b.clientIp) || a.service.localeCompare(b.service));
+
     const maxLinkWeight = Math.max(
       1,
       ...filteredLinks.map((l) => l.totalBps || l.totalBytes)
@@ -296,7 +427,7 @@ export function ClientFlowDiagram({
                   strokeWidth={r.thickness}
                   strokeOpacity={opacity}
                   strokeLinecap="round"
-                  className="transition-opacity duration-150 cursor-pointer"
+                  className="transition-all duration-300 cursor-pointer"
                   onMouseEnter={() => setHoveredLinkKey(r.key)}
                   onMouseLeave={() => setHoveredLinkKey(null)}
                   onClick={() => onSelectFilter(r.link.clientIp)}
@@ -314,7 +445,7 @@ export function ClientFlowDiagram({
                   key={n.id}
                   data-testid={`flow-client-node-${n.id}`}
                   transform={`translate(${n.x}, ${n.y})`}
-                  className="cursor-pointer"
+                  className="cursor-pointer transition-transform duration-300"
                   onMouseEnter={() => setHoveredClient(n.id)}
                   onMouseLeave={() => setHoveredClient(null)}
                   onClick={() => onSelectFilter(n.id)}
@@ -360,7 +491,7 @@ export function ClientFlowDiagram({
             })}
           </g>
 
-          {/* Right Column: Destination Services / LAN Targets */}
+          {/* Right Column: Destination Services */}
           <g>
             {layout.serviceNodes.map((n) => {
               const active = hoveredService === n.id;
@@ -369,7 +500,7 @@ export function ClientFlowDiagram({
                   key={n.id}
                   data-testid={`flow-service-node-${n.id}`}
                   transform={`translate(${n.x}, ${n.y})`}
-                  className="cursor-pointer"
+                  className="cursor-pointer transition-transform duration-300"
                   onMouseEnter={() => setHoveredService(n.id)}
                   onMouseLeave={() => setHoveredService(null)}
                   onClick={() => onSelectFilter(n.id)}

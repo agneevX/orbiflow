@@ -138,8 +138,10 @@ test('analyzeTimeWindow populates leadingAnchor when a sample immediately preced
   assert.equal(gappedRes.leadingAnchor, null);
 });
 
-test('getDisplaySegmentsForAnalysis downsamples 15m+ windows when unzoomed and preserves full points when zoomed or on 5m', async () => {
-  const { getDisplaySegmentsForAnalysis, buildZoomedRangeAnalysis } = await import('./timeWindowUtils');
+test('getDisplaySegmentsForAnalysis produces consistent ~60-bucket density across all 5 windows and full resolution when zoomed', async () => {
+  const { getDisplaySegmentsForAnalysis, buildZoomedRangeAnalysis, SMOOTH_BUCKET_MS } = await import(
+    './timeWindowUtils'
+  );
   const now = 1_700_000_000_000;
   const history: TrafficPoint[] = [];
   // 300 high-res samples (every 3s over 15 minutes)
@@ -151,31 +153,70 @@ test('getDisplaySegmentsForAnalysis downsamples 15m+ windows when unzoomed and p
       activeFlows: 10,
     });
   }
+  // 24h of 1-minute rollups
+  const rollups: TrafficPoint[] = [];
+  for (let m = 1440; m >= 1; m--) {
+    rollups.push({
+      timestamp: now - m * 60_000,
+      rxBps: 3_500_000 + (m % 20) * 40_000,
+      txBps: 700_000 + (m % 10) * 10_000,
+      activeFlows: 9,
+    });
+  }
 
-  const analysis15m = analyzeTimeWindow('15m', history, [], now);
-  const overviewSegments = getDisplaySegmentsForAnalysis(analysis15m, false);
-  const overviewCount = overviewSegments.flat().length;
-  assert.ok(overviewCount < 55, `Expected downsampled 15m points < 55, got ${overviewCount}`);
-  assert.ok(overviewCount >= 20, `Expected downsampled 15m points >= 20, got ${overviewCount}`);
+  // Every single time window targets ~60 buckets (50..65 points across full window)
+  for (const win of ['5m', '15m', '1h', '6h', '24h'] as const) {
+    const analysis = analyzeTimeWindow(win, history, rollups, now);
+    assert.equal(analysis.status, 'full', `Expected ${win} to have full coverage`);
+    assert.equal(analysis.segments.length, 1, `Expected ${win} to have 1 continuous segment`);
+    const segs = getDisplaySegmentsForAnalysis(analysis, false);
+    const count = segs.flat().length;
+    assert.ok(
+      count >= 50 && count <= 66,
+      `Expected consistent ~60 buckets on ${win} (bucket=${SMOOTH_BUCKET_MS[win]}ms), got ${count}`
+    );
+  }
 
   // Zooming into a 3-minute slice restores full 3s resolution (~61 points)
-  const zoomed = buildZoomedRangeAnalysis(
-    analysis15m,
-    now - 180_000,
-    now,
-    history,
-    []
-  );
+  const analysis15m = analyzeTimeWindow('15m', history, rollups, now);
+  const zoomed = buildZoomedRangeAnalysis(analysis15m, now - 180_000, now, history, rollups);
   const zoomedSegments = getDisplaySegmentsForAnalysis(zoomed, true);
   assert.ok(
     zoomedSegments.flat().length >= 58,
     `Expected full-res zoomed points >= 58, got ${zoomedSegments.flat().length}`
   );
+});
 
-  // 5m window keeps full high-res points un-downsampled
-  const analysis5m = analyzeTimeWindow('5m', history, [], now);
-  const segs5m = getDisplaySegmentsForAnalysis(analysis5m, false);
-  assert.equal(segs5m.flat().length, analysis5m.points.length);
+test('analyzeTimeWindow stitches rollupHistory into high-res history on 15m with zero false gap at the seam', () => {
+  const now = 1_700_000_000_000;
+  // 20 minutes of 1m rollups ending 6 minutes ago
+  const rollups: TrafficPoint[] = [];
+  for (let m = 20; m >= 6; m--) {
+    rollups.push({
+      timestamp: now - m * 60_000,
+      rxBps: 2_500_000,
+      txBps: 450_000,
+      activeFlows: 8,
+    });
+  }
+  // High-res 3s history starting 5m30s ago (just 30s after the last rollup — previously dropped by -30_000!)
+  const history: TrafficPoint[] = [];
+  for (let s = 330; s >= 0; s -= 3) {
+    history.push({
+      timestamp: now - s * 1000,
+      rxBps: 2_800_000,
+      txBps: 500_000,
+      activeFlows: 9,
+    });
+  }
+
+  const res15m = analyzeTimeWindow('15m', history, rollups, now);
+  assert.equal(res15m.status, 'full');
+  assert.equal(res15m.segments.length, 1);
+  assert.equal(res15m.noDataRanges.length, 0);
+
+  const res1h = analyzeTimeWindow('1h', history, rollups, now);
+  assert.equal(res1h.segments.length, 1);
 });
 
 test('analyzeTimeWindow stitches all live history points newer than last rollup so right edge connects seamlessly', () => {
@@ -211,7 +252,7 @@ test('analyzeTimeWindow stitches all live history points newer than last rollup 
 test('getDisplaySegmentsForAnalysis preserves >=2 endpoints when live segment is shorter than bucket size on 15m/1h windows', async () => {
   const { getDisplaySegmentsForAnalysis } = await import('./timeWindowUtils');
   const now = 1_700_000_000_000;
-  // Fresh boot with only 4 live samples (every 3s = 9s span, much smaller than 15m 18s bucket)
+  // Fresh boot with only 4 live samples (every 3s = 9s span, much smaller than 15m 15s bucket)
   const freshLive: TrafficPoint[] = [
     { timestamp: now - 9_000, rxBps: 1_000_000, txBps: 200_000, activeFlows: 4 },
     { timestamp: now - 6_000, rxBps: 1_500_000, txBps: 250_000, activeFlows: 5 },
@@ -219,7 +260,7 @@ test('getDisplaySegmentsForAnalysis preserves >=2 endpoints when live segment is
     { timestamp: now, rxBps: 2_000_000, txBps: 300_000, activeFlows: 6 },
   ];
 
-  for (const win of ['15m', '1h', '6h', '24h'] as const) {
+  for (const win of ['5m', '15m', '1h', '6h', '24h'] as const) {
     const analysis = analyzeTimeWindow(win, freshLive, [], now);
     const segs = getDisplaySegmentsForAnalysis(analysis, false);
     assert.equal(segs.length, 1);
@@ -231,4 +272,5 @@ test('getDisplaySegmentsForAnalysis preserves >=2 endpoints when live segment is
     assert.equal(segs[0][segs[0].length - 1].timestamp, freshLive[freshLive.length - 1].timestamp);
   }
 });
+
 

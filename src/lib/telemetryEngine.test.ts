@@ -1167,6 +1167,141 @@ test('TrafficMonitorEngine caps router ports to 4 (1 WAN + 3 LAN), detects VLANs
   assert.equal(dockerSub.hostCount, 1);
 });
 
+test('TrafficMonitorEngine recovers cleanly from 32-bit unsigned counter wraps on WAN and conntrack flows', async () => {
+  const { computeCounterDelta } = await import('./telemetryEngine');
+  const UINT32 = 0x1_0000_0000;
+
+  // Direct unit check on computeCounterDelta: 4,294,900,000 -> 15,000,000 over 3s = ~15,067,296 bytes
+  const expectedWrap = UINT32 - 4_294_900_000 + 15_000_000;
+  assert.equal(computeCounterDelta(15_000_000, 4_294_900_000, 3), expectedWrap);
+  // Counter reset (huge wrap that would imply >10 Gbps) returns 0 instead of spiking
+  assert.equal(computeCounterDelta(100, 100_000, 3), 0);
+
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_780_000_000_000;
+
+  // Tick 1: just below 32-bit unsigned max (4.29 GB)
+  engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 4_294_900_000, txBytes: 1_000_000 },
+    arp: [{ ip: '192.168.1.50', mac: 'aa:bb:cc:dd:ee:50', device: 'br0', hostname: 'media-box' }],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.50',
+        dst: '23.246.18.145',
+        sport: 50000,
+        dport: 443,
+        txBytes: 500_000,
+        rxBytes: 4_294_900_000,
+      },
+    ],
+  });
+
+  // Tick 2 (3s later): rxBytes wraps past 2^32 to 15,000,000; txBytes increases normally by +3,000,000
+  const { dashboard } = engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0 + 3_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 15_000_000, txBytes: 4_000_000 },
+    arp: [{ ip: '192.168.1.50', mac: 'aa:bb:cc:dd:ee:50', device: 'br0', hostname: 'media-box' }],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.50',
+        dst: '23.246.18.145',
+        sport: 50000,
+        dport: 443,
+        txBytes: 800_000,
+        rxBytes: 15_000_000,
+      },
+    ],
+  });
+
+  // Both WAN rxBps and txBps stay accurate across the 32-bit wrap (no drop to 0!)
+  assert.equal(dashboard.kpis.rxBps, Math.round(expectedWrap / 3));
+  assert.equal(dashboard.kpis.txBps, 1_000_000);
+  // Conntrack flow rxBps also recovers cleanly across the 32-bit wrap
+  assert.equal(dashboard.flows[0].rxBps, Math.round(expectedWrap / 3));
+  assert.equal(dashboard.flows[0].txBps, 100_000);
+});
+
+test('TrafficMonitorEngine rejects out-of-order/micro-burst spikes and computes 30s port rates accurately', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_785_000_000_000;
+
+  // Tick 1: establish baseline + initial port counters
+  engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 10_000_000, txBytes: 2_000_000 },
+    ports: [
+      { id: 'eth0', label: 'WAN', role: 'wan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 10_000_000, txBytes: 2_000_000, rxBps: 0, txBps: 0 },
+      { id: 'port1', label: 'LAN 1', role: 'lan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 5_000_000, txBytes: 1_000_000, rxBps: 0, txBps: 0 },
+    ],
+    arp: [],
+    flows: [],
+  });
+
+  // Tick 2 (+3s): normal 10 MB/s rx
+  const r2 = engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0 + 3_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 40_000_000, txBytes: 5_000_000 },
+    arp: [],
+    flows: [],
+  });
+  assert.equal(r2.dashboard.kpis.rxBps, 10_000_000);
+
+  // Out-of-order / duplicate timestamp snapshot is ignored cleanly without corrupting history
+  const rDup = engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0 + 2_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 99_000_000, txBytes: 9_000_000 },
+    arp: [],
+    flows: [],
+  });
+  assert.equal(rDup.dashboard.kpis.rxBps, 10_000_000);
+  assert.equal(rDup.dashboard.history.length, 2);
+
+  // Micro-burst packet arriving 150ms later does NOT create a 20x spike
+  const rBurst = engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0 + 3_150,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 70_000_000, txBytes: 8_000_000 },
+    arp: [],
+    flows: [],
+  });
+  assert.equal(rBurst.dashboard.kpis.rxBps, 10_000_000);
+
+  // 27s later (30s total since Tick 1): ports refresh with +30 MB on LAN 1 -> must divide by 30s (= 1 MB/s), NOT 3s (= 10 MB/s)!
+  const rPorts = engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0 + 30_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 340_000_000, txBytes: 35_000_000 },
+    ports: [
+      { id: 'eth0', label: 'WAN', role: 'wan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 340_000_000, txBytes: 35_000_000, rxBps: 0, txBps: 0 },
+      { id: 'port1', label: 'LAN 1', role: 'lan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 35_000_000, txBytes: 7_000_000, rxBps: 0, txBps: 0 },
+    ],
+    arp: [],
+    flows: [],
+  });
+  const lan1 = rPorts.dashboard.topology?.routerPorts.find((p) => p.id === 'port1');
+  assert.ok(lan1);
+  assert.equal(lan1.rxBps, 1_000_000);
+  assert.equal(lan1.txBps, 200_000);
+});
+
+
 
 
 

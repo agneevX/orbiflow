@@ -1753,7 +1753,7 @@ def main():
     last_neigh_refresh = 0.0
     last_ports_refresh = 0.0
     last_sys_refresh = 0.0
-    last_wifi_iface_scan = time.time()
+    last_wifi_iface_scan = time.monotonic()
 
     logger.info(
         f"Starting probe={cfg['probe_id']} iface={cfg['iface']} "
@@ -1774,14 +1774,14 @@ def main():
                     })
                     logger.info(f"Connected to {cfg['ws_url']}")
 
-                now_ts = time.time()
-                if now_ts - last_wifi_iface_scan >= 60.0:
+                mono_now = time.monotonic()
+                if mono_now - last_wifi_iface_scan >= 60.0:
                     wifi_ifaces = discover_wifi_ifaces()
                     wifi_meta = read_wifi_iface_meta(wifi_ifaces, iwconfig_bin, iw_bin)
-                    last_wifi_iface_scan = now_ts
+                    last_wifi_iface_scan = mono_now
 
                 ports_payload = None
-                if now_ts - last_ports_refresh >= cfg["ports_interval"]:
+                if last_ports_refresh == 0.0 or mono_now - last_ports_refresh >= cfg["ports_interval"]:
                     wan_details = read_wan_details(cfg["iface"], ip_bin, ifconfig_bin, nvram_bin)
                     satellite_info = read_satelliteinfo_wifi(satinfo_bin)
                     router_subnets = read_router_subnets(cfg["iface"], ip_bin)
@@ -1789,8 +1789,8 @@ def main():
                         cfg["iface"], swconfig_bin
                     )
 
-                if now_ts - last_neigh_refresh >= cfg["neigh_interval"]:
-                    leases, active_dhcp = lease_cache.read(now_ts)
+                if last_neigh_refresh == 0.0 or mono_now - last_neigh_refresh >= cfg["neigh_interval"]:
+                    leases, active_dhcp = lease_cache.read(time.time())
                     arp = read_arp_table(leases, active_dhcp, cfg["iface"], wan_details)
                     sat_macs = {s["mac"].lower() for s in satellite_info if s.get("mac")}
                     wifi_clients = read_router_wifi_clients(wifi_ifaces, wifi_tool, wifi_meta, sat_macs)
@@ -1798,16 +1798,19 @@ def main():
                         swconfig_bin, brctl_bin, cpu_ports, wan_switch_ports, sw_lan_ports, wifi_ifaces, sat_macs
                     )
                     router_clients = merge_router_clients(wifi_clients, wired_clients)
-                    last_neigh_refresh = now_ts
+                    last_neigh_refresh = time.monotonic()
                     logger.debug(
                         f"Refreshed {len(arp)} ARP/DHCP devices, {len(wifi_clients)} Wi-Fi, {len(wired_clients)} wired"
                     )
 
+                # Capture wall-clock timestamp immediately when byte counters are sampled
+                # (after slow ports/neighbor subprocess calls) so rate dt stays exact.
                 dev_map = read_proc_net_dev()
+                sample_ts_ms = int(time.time() * 1000)
                 conntrack_lines = read_conntrack_lines(ct_path)
                 data = {
                     "probeId": cfg["probe_id"],
-                    "timestamp": int(now_ts * 1000),
+                    "timestamp": sample_ts_ms,
                     "source": "live",
                     "iface": read_iface_counters(cfg["iface"], dev_map),
                     "lanIfaces": read_lan_iface_counters(cfg["iface"], dev_map),
@@ -1825,11 +1828,11 @@ def main():
                         data["wan"] = wan_details
                     if satellite_info:
                         data["satelliteInfo"] = satellite_info
-                    last_ports_refresh = now_ts
+                    last_ports_refresh = time.monotonic()
 
-                if now_ts - last_sys_refresh >= cfg["sys_interval"]:
+                if last_sys_refresh == 0.0 or mono_now - last_sys_refresh >= cfg["sys_interval"]:
                     data["system"] = read_system_metrics(len(conntrack_lines), static_info)
-                    last_sys_refresh = now_ts
+                    last_sys_refresh = time.monotonic()
                     logger.debug(
                         f"System metrics: load={data['system']['load1m']} mem={data['system']['memUsedPct']}%"
                     )
@@ -1837,9 +1840,9 @@ def main():
                 ws.send_json({"type": "probe:snapshot", "data": data})
                 logger.debug(f"Sent snapshot: flows={len(conntrack_lines)}")
                 elapsed = time.monotonic() - tick_start
-                sleep_for = cfg["interval"] - elapsed
-                if sleep_for > 0.1:
-                    time.sleep(sleep_for)
+                # Enforce minimum 0.5s gap even after slow subprocess ticks so counters never back-to-back burst
+                sleep_for = max(0.5, cfg["interval"] - elapsed)
+                time.sleep(sleep_for)
             except Exception as exc:
                 logger.error(f"Reconnecting after error: {exc}")
                 ws.close()

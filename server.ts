@@ -403,6 +403,19 @@ async function startServer() {
     }
   });
 
+  const normalizeLiveTimestamp = (rawTs: unknown): number => {
+    const serverNow = Date.now();
+    if (typeof rawTs !== 'number' || !Number.isFinite(rawTs) || rawTs <= 0) {
+      return serverNow;
+    }
+    // If router clock is skewed >15s from server time (e.g. NTP drift/step), align to server clock
+    // so live charts and browser time windows stay strictly synchronized without false edge gaps.
+    if (Math.abs(rawTs - serverNow) > 15_000) {
+      return serverNow;
+    }
+    return Math.round(rawTs);
+  };
+
   ingestWss.on('connection', (ws) => {
     let connectedProbeId = 'router-wan';
 
@@ -417,7 +430,7 @@ async function startServer() {
           const snap: ProbeSnapshot = {
             ...msg.data,
             source: 'live',
-            timestamp: msg.data.timestamp || Date.now(),
+            timestamp: normalizeLiveTimestamp(msg.data.timestamp),
           };
           connectedProbeId = snap.probeId || connectedProbeId;
           handleIngestSnapshot(snap);
@@ -484,7 +497,7 @@ async function startServer() {
     handleIngestSnapshot({
       ...body,
       source: 'live',
-      timestamp: body.timestamp || Date.now(),
+      timestamp: normalizeLiveTimestamp(body.timestamp),
     });
     res.json({ ok: true });
   });
