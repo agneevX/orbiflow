@@ -4,8 +4,10 @@ import type { BandwidthUnit, TimeFormat, TrafficPoint } from '../types/telemetry
 import type { ThemePalette } from '../lib/themes';
 import {
   buildZoomedRangeAnalysis,
+  computeMonotoneSplineCurves,
   getDisplaySegmentsForAnalysis,
   summarizeSelectionRange,
+  type PlotPoint,
   type TimeRange,
   type TimeWindowAnalysis,
 } from '../lib/timeWindowUtils';
@@ -22,18 +24,13 @@ interface ThroughputChartProps {
   height?: number;
 }
 
-const PAD_RIGHT = 6;
+const PAD_RIGHT = 8;
 const PAD_TOP = 12;
 const PAD_BOTTOM = 26;
 
-interface PlotPoint {
-  x: number;
-  y: number;
-}
-
 /**
  * Traces a smooth monotone cubic Hermite spline (Fritsch-Carlson) through sorted points.
- * Preserves local extrema without overshooting below baseline or introducing artificial waves.
+ * Preserves local extrema without overshooting below baseline or dropping the final live segment.
  */
 function traceMonotoneSpline(ctx: CanvasRenderingContext2D, pts: PlotPoint[], baselineY: number): void {
   const n = pts.length;
@@ -45,52 +42,9 @@ function traceMonotoneSpline(ctx: CanvasRenderingContext2D, pts: PlotPoint[], ba
     return;
   }
 
-  const dx: number[] = new Array(n - 1);
-  const dy: number[] = new Array(n - 1);
-  const slopes: number[] = new Array(n - 1);
-  for (let i = 0; i < n - 1; i++) {
-    dx[i] = Math.max(0.0001, pts[i + 1].x - pts[i].x);
-    dy[i] = pts[i + 1].y - pts[i].y;
-    slopes[i] = dy[i] / dx[i];
-  }
-
-  const tangents: number[] = new Array(n);
-  tangents[0] = slopes[0];
-  tangents[n - 1] = slopes[n - 1];
-
-  for (let i = 1; i < n - 1; i++) {
-    if (slopes[i - 1] * slopes[i] <= 0) {
-      tangents[i] = 0;
-    } else {
-      const w1 = 2 * dx[i] + dx[i - 1];
-      const w2 = dx[i] + 2 * dx[i - 1];
-      tangents[i] = (w1 + w2) / (w1 / slopes[i - 1] + w2 / slopes[i]);
-    }
-  }
-
-  for (let i = 0; i < n - 1; i++) {
-    if (Math.abs(slopes[i]) < 1e-6) {
-      tangents[i] = 0;
-      tangents[i + 1] = 0;
-    } else {
-      const a = tangents[i] / slopes[i];
-      const b = tangents[i + 1] / slopes[i];
-      const sq = a * a + b * b;
-      if (sq > 9) {
-        const t = 3 / Math.sqrt(sq);
-        tangents[i] = t * a * slopes[i];
-        tangents[i + 1] = t * b * slopes[i];
-      }
-    }
-  }
-
-  for (let i = 0; i < n - 1; i++) {
-    const h = dx[i] / 3;
-    const cp1x = pts[i].x + h;
-    const cp1y = Math.min(baselineY, Math.max(PAD_TOP, pts[i].y + tangents[i] * h));
-    const cp2x = pts[i + 1].x - h;
-    const cp2y = Math.min(baselineY, Math.max(PAD_TOP, pts[i + 1].y - tangents[i + 1] * h));
-    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, pts[i + 1].x, pts[i + 1].y);
+  const curves = computeMonotoneSplineCurves(pts, PAD_TOP, baselineY);
+  for (const c of curves) {
+    ctx.bezierCurveTo(c.cp1x, c.cp1y, c.cp2x, c.cp2y, c.x, c.y);
   }
 }
 
@@ -196,7 +150,6 @@ export function ThroughputChart({
     status,
     window: timeWindow,
   } = displayAnalysis;
-  const is24h = timeWindow === '24h' && !zoomRange;
   const effectiveLong = longWindow && !zoomRange;
 
   useEffect(() => {
@@ -472,7 +425,7 @@ export function ThroughputChart({
           ctx.fillText('No data', cx, cy - 8);
           ctx.font = '10px "Inter", sans-serif';
           ctx.fillText(
-            `${formatTimestamp(range.start, effectiveLong, is24h, timeFormat)} – ${formatTimestamp(range.end, effectiveLong, is24h, timeFormat)}`,
+            `${formatTimestamp(range.start, effectiveLong, false, timeFormat)} – ${formatTimestamp(range.end, effectiveLong, false, timeFormat)}`,
             cx,
             cy + 8
           );
@@ -490,21 +443,21 @@ export function ThroughputChart({
 
     ctx.textAlign = 'left';
     ctx.fillText(
-      formatTimestamp(windowStart, effectiveLong, is24h, timeFormat),
+      formatTimestamp(windowStart, effectiveLong, false, timeFormat),
       padLeft,
       baselineY + 8
     );
 
     ctx.textAlign = 'center';
     ctx.fillText(
-      formatTimestamp(windowStart + span / 2, effectiveLong, is24h, timeFormat),
+      formatTimestamp(windowStart + span / 2, effectiveLong, false, timeFormat),
       padLeft + plotW / 2,
       baselineY + 8
     );
 
     ctx.textAlign = 'right';
     ctx.fillText(
-      formatTimestamp(windowEnd, effectiveLong, is24h, timeFormat),
+      formatTimestamp(windowEnd, effectiveLong, false, timeFormat),
       padLeft + plotW,
       baselineY + 8
     );
@@ -538,7 +491,7 @@ export function ThroughputChart({
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(padLeft - 2, PAD_TOP - 4, plotW + 6, plotH + 8);
+    ctx.rect(padLeft - 2, PAD_TOP - 6, plotW + 10, plotH + 10);
     ctx.clip();
 
     const drawSeries = (
@@ -595,7 +548,7 @@ export function ThroughputChart({
         ctx.fillStyle = areaGrad;
         ctx.fill();
 
-        // Draw thinner smooth gradient stroke on top
+        // Draw smooth gradient stroke on top
         ctx.beginPath();
         traceMonotoneSpline(ctx, pts, baselineY);
         ctx.strokeStyle = strokeGrad;
@@ -603,6 +556,28 @@ export function ThroughputChart({
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
         ctx.stroke();
+      }
+
+      // Always render the latest live incoming point cleanly at the right edge
+      if (!zoomRange && renderSegments.length > 0) {
+        const lastSeg = renderSegments[renderSegments.length - 1];
+        const livePt = lastSeg[lastSeg.length - 1];
+        if (livePt && windowEnd - livePt.timestamp <= 30_000) {
+          const lx = Math.min(padLeft + plotW, Math.max(padLeft, xForTimeRaw(livePt.timestamp)));
+          const ly = yForBps(accessor(livePt));
+          ctx.beginPath();
+          ctx.arc(lx, ly, 4.5, 0, Math.PI * 2);
+          ctx.fillStyle = hexToRgba(baseColor, 0.22);
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(lx, ly, 2.4, 0, Math.PI * 2);
+          ctx.fillStyle = baseColor;
+          ctx.fill();
+          ctx.strokeStyle = theme.nodeFill;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
       }
     };
 
@@ -704,7 +679,6 @@ export function ThroughputChart({
     timeFormat,
     theme,
     effectiveLong,
-    is24h,
     showDownload,
     showUpload,
   ]);
@@ -801,7 +775,7 @@ export function ThroughputChart({
               {formatTimestamp(
                 hoverInfo.point ? hoverInfo.point.timestamp : hoverInfo.timestamp,
                 effectiveLong,
-                is24h,
+                false,
                 timeFormat
               )}
             </span>
@@ -904,8 +878,8 @@ export function ThroughputChart({
                 {activeDragRange ? 'Selecting Range' : 'Zoomed Range (Full Data)'}
               </span>
               <span className="font-semibold tabular-nums">
-                {formatTimestamp(selectionSummary.start, false, is24h, timeFormat)} –{' '}
-                {formatTimestamp(selectionSummary.end, false, is24h, timeFormat)}
+                {formatTimestamp(selectionSummary.start, false, false, timeFormat)} –{' '}
+                {formatTimestamp(selectionSummary.end, false, false, timeFormat)}
               </span>
               <span className="app-text-muted" aria-hidden="true">
                 ·

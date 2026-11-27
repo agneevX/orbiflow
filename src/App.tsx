@@ -614,6 +614,10 @@ export default function App() {
   };
 
   const [nowTick, setNowTick] = useState(() => Date.now());
+  const lastSampleClockRef = useRef<{ sampleTs: number; receivedAt: number }>({
+    sampleTs: 0,
+    receivedAt: Date.now(),
+  });
 
   useEffect(() => {
     if (paused) return;
@@ -628,15 +632,22 @@ export default function App() {
     const lastRollupTs =
       rollupHistory.length > 0 ? rollupHistory[rollupHistory.length - 1].timestamp : 0;
     const latestTs =
-      lastHistoryTs > 0 || lastRollupTs > 0 ? Math.max(lastHistoryTs, lastRollupTs) : nowTick;
-    // Anchor the right edge of live graphs to the latest incoming sample timestamp
-    // so there is zero empty gap on the right; only advance with wall-clock if data stops.
+      lastHistoryTs > 0 || lastRollupTs > 0 ? Math.max(lastHistoryTs, lastRollupTs) : 0;
+
+    if (latestTs > 0 && latestTs !== lastSampleClockRef.current.sampleTs) {
+      lastSampleClockRef.current = { sampleTs: latestTs, receivedAt: Date.now() };
+    }
+
+    // Anchor the right edge strictly to the newest incoming sample timestamp while live data is arriving,
+    // immune to browser-vs-router clock skew. Advance only if no new sample arrives for >30s locally.
+    const localIdleMs = Math.max(0, nowTick - lastSampleClockRef.current.receivedAt);
     const referenceNow =
-      lastHistoryTs > 0 || lastRollupTs > 0
-        ? nowTick - latestTs > 20_000
-          ? nowTick
+      latestTs > 0
+        ? localIdleMs > 30_000
+          ? latestTs + localIdleMs
           : latestTs
         : nowTick;
+
     const entries = ALL_TIME_WINDOWS.map((w) => [
       w,
       analyzeTimeWindow(w, history, rollupHistory, referenceNow),
@@ -850,6 +861,7 @@ export default function App() {
               serverConfig={snapshot.serverConfig}
               serverStats={snapshot.serverStats}
               detectedSubnets={snapshot.detectedSubnets || []}
+              sampleHostIp={snapshot.hosts[0]?.ip}
               satellites={snapshot.topology?.satellites || []}
               satelliteConfigs={snapshot.topology?.satelliteConfigs || []}
               unit={unit}

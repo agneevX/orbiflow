@@ -1301,6 +1301,149 @@ test('TrafficMonitorEngine rejects out-of-order/micro-burst spikes and computes 
   assert.equal(lan1.txBps, 200_000);
 });
 
+test('TrafficMonitorEngine.refreshLanHostnames propagates newly resolved private PTR names to hosts, flows, and links immediately', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_750_000_000_000;
+
+  engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 100_000, txBytes: 50_000 },
+    arp: [
+      { ip: '10.0.0.25', mac: 'aa:bb:cc:dd:ee:25', device: 'br0' },
+      { ip: '10.0.1.10', mac: 'aa:bb:cc:dd:ee:10', device: 'br0' },
+    ],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '10.0.0.25',
+        dst: '10.0.1.10',
+        sport: 54000,
+        dport: 8080,
+        txBytes: 10_000,
+        rxBytes: 50_000,
+      },
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '10.0.0.25',
+        dst: '140.82.114.4',
+        sport: 54001,
+        dport: 443,
+        txBytes: 5_000,
+        rxBytes: 25_000,
+      },
+    ],
+  });
+
+  // Before PTR resolution, 10.0.0.25 uses inferred fingerprint (GitHub traffic) and 10.0.1.10 uses raw IP
+  assert.equal(engine.getSnapshot().hosts.find((h) => h.ip === '10.0.0.25')?.nameSource, 'fingerprint');
+  assert.equal(engine.getSnapshot().hosts.find((h) => h.ip === '10.0.1.10')?.hostname, '10.0.1.10');
+
+  // Async PTR resolution finishes -> refreshLanHostnames overrides fingerprint/IP immediately
+  const ptrMap: Record<string, string> = {
+    '10.0.0.25': 'macbook-pro.lan',
+    '10.0.1.10': 'plex-container.docker.lan',
+  };
+  const changed = engine.refreshLanHostnames((ip) => ptrMap[ip] ?? null);
+  assert.equal(changed, true);
+
+  const snap = engine.getSnapshot();
+  const h1 = snap.hosts.find((h) => h.ip === '10.0.0.25');
+  const h2 = snap.hosts.find((h) => h.ip === '10.0.1.10');
+  assert.equal(h1?.hostname, 'macbook-pro');
+  assert.equal(h1?.nameSource, 'lan-dns');
+  assert.equal(h1?.ptrHostname, 'macbook-pro.lan');
+  assert.equal(h2?.hostname, 'plex-container');
+
+  const lanFlow = snap.flows.find((f) => f.srcIp === '10.0.0.25' && f.dstIp === '10.0.1.10');
+  assert.equal(lanFlow?.srcHost, 'macbook-pro');
+  assert.equal(lanFlow?.dstHost, 'plex-container');
+
+  // Calling again with same PTR returns false (no redundant broadcast)
+  assert.equal(engine.refreshLanHostnames((ip) => ptrMap[ip] ?? null), false);
+
+  // Disabling lanDnsEnabled immediately clears PTR-derived names
+  engine.updateServerConfig({ lanDnsEnabled: false });
+  const afterDisable1 = engine.getSnapshot().hosts.find((h) => h.ip === '10.0.0.25');
+  const afterDisable2 = engine.getSnapshot().hosts.find((h) => h.ip === '10.0.1.10');
+  assert.equal(afterDisable1?.nameSource, 'fingerprint');
+  assert.equal(afterDisable2?.hostname, '10.0.1.10');
+  assert.equal(afterDisable2?.nameSource, 'ip');
+});
+
+test('LanResolver tracks private fallback DNS servers, evicts negative cache on fallback update, and validates testLookup IPs', async () => {
+  const { LanResolver } = await import('../../server/lanResolver');
+  const resolver = new LanResolver({ enabled: true, server: '', stripDomain: true });
+
+  // Negative-cache a LAN IP before fallback servers are known
+  resolver.setEntry('192.168.1.42', null);
+  assert.equal(resolver.getStats().size, 1);
+
+  // Register fallback servers (public & loopback filtered out, private kept)
+  resolver.setFallbackServers(['8.8.8.8', '127.0.0.11', '192.168.1.1', '10.0.0.2']);
+  assert.deepEqual(resolver.getFallbackServers(), ['192.168.1.1', '10.0.0.2']);
+  // Negative cache entry should be evicted so it retries against the newly discovered gateway
+  assert.equal(resolver.getStats().size, 0);
+
+  // Invalid IP fails cleanly in testLookup without throwing
+  const invalid = await resolver.testLookup('not-an-ip');
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error || '', /valid IPv4 or IPv6/i);
+});
+
+test('TrafficMonitorEngine caps traffic history retention strictly to 6 hours on ingest and hydration', () => {
+  const engine = new TrafficMonitorEngine();
+  const now = 1_790_000_000_000;
+  const sixHoursMs = 6 * 60 * 60_000;
+
+  const staleRollups = Array.from({ length: 720 }, (_, i) => ({
+    timestamp: now - (720 - i) * 60_000,
+    rxBps: 2_000_000,
+    txBps: 500_000,
+    activeFlows: 10,
+  }));
+  const staleHistory = Array.from({ length: 120 }, (_, i) => ({
+    timestamp: now - (120 - i) * 60_000,
+    rxBps: 2_000_000,
+    txBps: 500_000,
+    activeFlows: 10,
+  }));
+
+  engine.hydrateFromStorage({ history: staleHistory, rollupHistory: staleRollups }, now);
+  const hydrated = engine.getExportableState();
+  assert.ok(hydrated.rollupHistory.length <= 360, `Expected <=360 rollups, got ${hydrated.rollupHistory.length}`);
+  assert.ok(
+    hydrated.rollupHistory.every((p) => p.timestamp >= now - sixHoursMs),
+    'Expected hydrated rollups to drop everything older than 6 hours'
+  );
+  assert.ok(
+    hydrated.history.every((p) => p.timestamp >= now - 65 * 60_000),
+    'Expected hydrated high-res history to drop everything older than 65 minutes'
+  );
+
+  const freshEngine = new TrafficMonitorEngine();
+  const startTs = now - 420 * 60_000;
+  for (let m = 0; m <= 420; m++) {
+    freshEngine.ingest({
+      probeId: 'orbi-main',
+      timestamp: startTs + m * 60_000,
+      source: 'live',
+      iface: { iface: 'eth0', rxBytes: (m + 1) * 1_000_000, txBytes: (m + 1) * 200_000 },
+      arp: [],
+      flows: [],
+    });
+  }
+  const snap = freshEngine.getSnapshot();
+  assert.ok(snap.rollupHistory.length <= 360, `Expected <=360 rollups, got ${snap.rollupHistory.length}`);
+  assert.ok(
+    snap.rollupHistory.every((p) => p.timestamp >= now - sixHoursMs),
+    'Expected live rollups to never retain points older than 6 hours'
+  );
+});
+
 
 
 

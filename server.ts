@@ -28,6 +28,7 @@ import {
   generateRandomProbeToken,
 } from './server/storage';
 import { sanitizeVlanConfigs } from './src/lib/vlanUtils';
+import { isPrivateIp } from './src/lib/formatters';
 import type {
   AlertEvent,
   AlertRule,
@@ -307,20 +308,74 @@ async function startServer() {
   // Dev-only simulator (never instantiated or seeded in production builds)
   const simulator = IS_DEV ? new OrbiProbeSimulator() : null;
 
+  let lanDnsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleLanHostnameBroadcast = () => {
+    if (lanDnsRefreshTimer) return;
+    lanDnsRefreshTimer = setTimeout(() => {
+      lanDnsRefreshTimer = null;
+      const updated = engine.refreshLanHostnames((ip) => lanResolver.lookup(ip));
+      syncStatsAndPersist();
+      if (updated) {
+        broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+      }
+    }, 350);
+  };
+
+  lanResolver.setOnResolved(() => {
+    scheduleLanHostnameBroadcast();
+  });
+
+  const deriveLanFallbackDnsServers = (
+    wanDns?: string[],
+    lanSubnets?: Array<{ cidr: string; iface?: string; vlanId?: number }>
+  ): string[] => {
+    const candidates: string[] = [];
+    if (Array.isArray(wanDns)) {
+      for (const ip of wanDns) {
+        if (typeof ip === 'string' && isPrivateIp(ip.trim()) && !ip.trim().startsWith('127.')) {
+          candidates.push(ip.trim());
+        }
+      }
+    }
+    const snap = engine.getSnapshot();
+    const primarySubnet =
+      snap.detectedSubnets?.find((s) => s.isPrimary) || snap.detectedSubnets?.[0];
+    const probePrimary = Array.isArray(lanSubnets)
+      ? lanSubnets.find(
+          (s) => s.vlanId === undefined && (s.iface === 'br0' || s.iface === 'br-lan' || s.iface === 'eth1')
+        ) || lanSubnets[0]
+      : undefined;
+    const cidr = primarySubnet?.cidr || probePrimary?.cidr;
+    if (cidr) {
+      const base = cidr.split('/')[0];
+      const parts = base.split('.');
+      if (parts.length === 4) {
+        const gw = `${parts[0]}.${parts[1]}.${parts[2]}.1`;
+        if (isPrivateIp(gw)) candidates.push(gw);
+      }
+    }
+    return Array.from(new Set(candidates));
+  };
+
   if (IS_DEV && simulator && engine.isSimulatorEnabled() && engine.getSnapshot().history.length === 0) {
     const now = Date.now();
-    const threeHoursAgo = now - 180 * 60_000;
-    for (let m = 0; m < 174; m++) {
-      engine.ingest(simulator.nextSnapshot(threeHoursAgo + m * 60_000, 60));
+    const sixHoursAgo = now - 360 * 60_000;
+    // Seed 298 minutes of 1m rollups followed by 62 minutes of 3s high-res samples so all 5
+    // windows (5m, 15m, 1h, 3h, 6h) start full with exact 100-point dynamic resolution.
+    for (let m = 0; m < 298; m++) {
+      engine.ingest(simulator.nextSnapshot(sixHoursAgo + m * 60_000, 60));
     }
-    const startRecent = now - 110 * 3_000;
-    for (let s = 0; s <= 110; s++) {
+    const totalRecentTicks = 1240; // 62 minutes at 3s intervals
+    const startRecent = now - totalRecentTicks * 3_000;
+    for (let s = 0; s <= totalRecentTicks; s++) {
+      const resolveNames = s >= totalRecentTicks - 10;
       engine.ingest(
         simulator.nextSnapshot(startRecent + s * 3_000, 3),
-        (ip) => rdnsCache.lookup(ip),
-        (ip) => lanResolver.lookup(ip)
+        resolveNames ? (ip) => rdnsCache.lookup(ip) : undefined,
+        resolveNames ? (ip) => lanResolver.lookup(ip) : undefined
       );
     }
+    lanResolver.setFallbackServers(deriveLanFallbackDnsServers());
   }
 
   const dispatchAlertsAsync = (alerts: AlertEvent[]) => {
@@ -350,10 +405,17 @@ async function startServer() {
   };
 
   const handleIngestSnapshot = (snapshot: ProbeSnapshot) => {
+    lanResolver.setFallbackServers(
+      deriveLanFallbackDnsServers(snapshot.wan?.dns, snapshot.subnets)
+    );
     const { dashboard, newAlerts } = engine.ingest(
       snapshot,
       (ip) => rdnsCache.lookup(ip),
       (ip) => lanResolver.lookup(ip)
+    );
+    // Refresh fallbacks after ingest in case detectedSubnets just identified the primary LAN
+    lanResolver.setFallbackServers(
+      deriveLanFallbackDnsServers(snapshot.wan?.dns, snapshot.subnets)
     );
     storage.appendSnapshotLog({
       timestamp: snapshot.timestamp,
@@ -638,6 +700,10 @@ async function startServer() {
       tablePreferences: nextTablePreferences,
       featureVisibility: nextFeatureVisibility,
     });
+    if (lanResolver.getConfig().enabled) {
+      lanResolver.prefetchIps(engine.getSnapshot().hosts.map((h) => h.ip));
+    }
+    engine.refreshLanHostnames((ip) => lanResolver.lookup(ip));
     syncStatsAndPersist();
     persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
@@ -648,6 +714,29 @@ async function startServer() {
       serverStats: snap.serverStats,
       snapshot: snap,
     });
+  });
+
+  app.post('/api/dns/test', async (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const ip = typeof body.ip === 'string' ? body.ip.trim() : '';
+    if (!ip || ip.length > 64) {
+      res.status(400).json({ ok: false, error: 'Enter a valid IPv4 or IPv6 address' });
+      return;
+    }
+
+    let overrideServer: string | undefined;
+    if (typeof body.server === 'string') {
+      const check = validateDnsServer(body.server);
+      if (!check.ok) {
+        res.status(400).json({ ok: false, error: check.error || 'Invalid DNS server address' });
+        return;
+      }
+      overrideServer = check.value;
+    }
+
+    const result = await lanResolver.testLookup(ip, overrideServer);
+    syncStatsAndPersist();
+    res.json(result);
   });
 
   app.post('/api/satellites', (req, res) => {

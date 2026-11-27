@@ -290,11 +290,12 @@ export function computeCounterDelta(
 }
 
 export class TrafficMonitorEngine {
-  private history: TrafficPoint[] = []; // High-resolution samples (up to 65+ minutes at 3s cadence)
+  private history: TrafficPoint[] = []; // High-resolution samples (up to 65 minutes at 3s cadence for 5m/15m/1h)
   private readonly maxHistoryPoints = 1800;
   private readonly maxHistoryAgeMs = 65 * 60_000;
-  private rollupHistory: TrafficPoint[] = []; // 1-minute buckets (up to 24h = 1440 buckets)
-  private readonly maxRollupPoints = 1440;
+  private rollupHistory: TrafficPoint[] = []; // 1-minute buckets (strictly capped at 6h = 360 buckets)
+  private readonly maxRollupPoints = 360;
+  private readonly maxRollupAgeMs = 6 * 60 * 60_000;
   private currentBucketStart = 0;
   private bucketSamples: TrafficPoint[] = [];
 
@@ -610,18 +611,31 @@ export class TrafficMonitorEngine {
     };
   }
 
-  public hydrateFromStorage(saved: {
-    history?: TrafficPoint[];
-    rollupHistory?: TrafficPoint[];
-    peakRxBps?: number;
-    peakTxBps?: number;
-    rules?: AlertRule[];
-    alerts?: AlertEvent[];
-    serverConfig?: ServerConfig;
-  }): void {
+  public hydrateFromStorage(
+    saved: {
+      history?: TrafficPoint[];
+      rollupHistory?: TrafficPoint[];
+      peakRxBps?: number;
+      peakTxBps?: number;
+      rules?: AlertRule[];
+      alerts?: AlertEvent[];
+      serverConfig?: ServerConfig;
+    },
+    now = Date.now()
+  ): void {
+    const historyCutoff = now - this.maxHistoryAgeMs;
+    const rollupCutoff = now - this.maxRollupAgeMs;
+
     if (Array.isArray(saved.history)) {
       const sorted = saved.history
-        .filter((p) => p && Number.isFinite(p.timestamp) && Number.isFinite(p.rxBps) && Number.isFinite(p.txBps))
+        .filter(
+          (p) =>
+            p &&
+            Number.isFinite(p.timestamp) &&
+            p.timestamp >= historyCutoff &&
+            Number.isFinite(p.rxBps) &&
+            Number.isFinite(p.txBps)
+        )
         .sort((a, b) => a.timestamp - b.timestamp);
       const deduped: TrafficPoint[] = [];
       for (const p of sorted) {
@@ -635,7 +649,14 @@ export class TrafficMonitorEngine {
     }
     if (Array.isArray(saved.rollupHistory)) {
       const sorted = saved.rollupHistory
-        .filter((p) => p && Number.isFinite(p.timestamp) && Number.isFinite(p.rxBps) && Number.isFinite(p.txBps))
+        .filter(
+          (p) =>
+            p &&
+            Number.isFinite(p.timestamp) &&
+            p.timestamp >= rollupCutoff &&
+            Number.isFinite(p.rxBps) &&
+            Number.isFinite(p.txBps)
+        )
         .sort((a, b) => a.timestamp - b.timestamp);
       const deduped: TrafficPoint[] = [];
       for (const p of sorted) {
@@ -685,6 +706,7 @@ export class TrafficMonitorEngine {
   public updateServerConfig(cfg: Partial<ServerConfig>, stats?: Partial<ServerStats>): void {
     const prevInfer = this.serverConfig.inferDeviceNames;
     const prevStrip = this.serverConfig.stripLanDomain;
+    const prevLanDnsEnabled = this.serverConfig.lanDnsEnabled;
     const prevVlansSig = JSON.stringify(this.serverConfig.vlans || []);
     const nextTablePrefs = cfg.tablePreferences
       ? sanitizeTablePreferences(cfg.tablePreferences, this.serverConfig.tablePreferences)
@@ -719,6 +741,7 @@ export class TrafficMonitorEngine {
     if (
       prevInfer !== this.serverConfig.inferDeviceNames ||
       prevStrip !== this.serverConfig.stripLanDomain ||
+      prevLanDnsEnabled !== this.serverConfig.lanDnsEnabled ||
       prevVlansSig !== JSON.stringify(nextVlans)
     ) {
       this.reapplyAliasesToLatestSnapshot();
@@ -1070,13 +1093,15 @@ export class TrafficMonitorEngine {
   }
 
   private reapplyAliasesToLatestSnapshot(): void {
+    const allowLanPtr = this.serverConfig.lanDnsEnabled !== false;
     const hostNameByIp = new Map<string, string>();
     const renamedHosts = this.latestSnapshot.hosts.map((h) => {
+      const effectivePtr = allowLanPtr ? h.ptrHostname : undefined;
       const identity = resolveHostIdentity({
         ip: h.ip,
         mac: h.mac,
         dhcpHostname: h.nameSource === 'dhcp' ? h.hostname : undefined,
-        ptrHostname: h.ptrHostname,
+        ptrHostname: effectivePtr,
         providedVendor: h.vendor.includes('Private MAC') ? undefined : h.vendor,
         deviceHint: h.deviceHint,
         aliases: this.deviceAliases,
@@ -1090,6 +1115,7 @@ export class TrafficMonitorEngine {
         vendor: identity.vendor,
         nameSource: identity.nameSource,
         isRandomizedMac: identity.isRandomizedMac,
+        ptrHostname: identity.ptrHostname,
         aliasKey: identity.aliasKey,
         aliasMatchBy: identity.aliasMatchBy,
       };
@@ -1098,8 +1124,14 @@ export class TrafficMonitorEngine {
     const { hosts: updatedHosts, detectedSubnets } = this.applyVlanTagsAndBuildSubnets(renamedHosts);
 
     const updatedFlows = this.latestSnapshot.flows.map((f) => {
-      const resolvedSrc = hostNameByIp.get(f.srcIp);
-      return resolvedSrc ? { ...f, srcHost: resolvedSrc } : f;
+      const resolvedSrc = isPrivateIp(f.srcIp) ? hostNameByIp.get(f.srcIp) : undefined;
+      const resolvedDst = isPrivateIp(f.dstIp) ? hostNameByIp.get(f.dstIp) : undefined;
+      if (!resolvedSrc && !resolvedDst) return f;
+      return {
+        ...f,
+        ...(resolvedSrc ? { srcHost: resolvedSrc } : {}),
+        ...(resolvedDst ? { dstHost: resolvedDst } : {}),
+      };
     });
 
     const updatedLinks = this.latestSnapshot.clientLinks.map((l) => {
@@ -1117,6 +1149,79 @@ export class TrafficMonitorEngine {
     };
   }
 
+  /**
+   * Re-applies freshly resolved private reverse-DNS (PTR) hostnames to the latest snapshot
+   * immediately when asynchronous lookups complete, without waiting for the next probe tick.
+   */
+  public refreshLanHostnames(lanRdnsLookup: RdnsLookupFn): boolean {
+    const allowLanPtr = this.serverConfig.lanDnsEnabled !== false;
+    let changed = false;
+    const hostNameByIp = new Map<string, string>();
+
+    const nextHosts = this.latestSnapshot.hosts.map((h) => {
+      const freshPtr = allowLanPtr ? lanRdnsLookup(h.ip) : null;
+      const effectivePtr = allowLanPtr ? (freshPtr || h.ptrHostname) : undefined;
+      const identity = resolveHostIdentity({
+        ip: h.ip,
+        mac: h.mac,
+        dhcpHostname: h.nameSource === 'dhcp' ? h.hostname : undefined,
+        ptrHostname: effectivePtr,
+        providedVendor: h.vendor.includes('Private MAC') ? undefined : h.vendor,
+        deviceHint: h.deviceHint,
+        aliases: this.deviceAliases,
+        stripDomain: this.serverConfig.stripLanDomain,
+        inferDeviceNames: this.serverConfig.inferDeviceNames,
+      });
+      hostNameByIp.set(h.ip, identity.hostname);
+
+      if (
+        identity.hostname !== h.hostname ||
+        identity.ptrHostname !== h.ptrHostname ||
+        identity.nameSource !== h.nameSource
+      ) {
+        changed = true;
+      }
+
+      return {
+        ...h,
+        hostname: identity.hostname,
+        vendor: identity.vendor,
+        nameSource: identity.nameSource,
+        isRandomizedMac: identity.isRandomizedMac,
+        ptrHostname: identity.ptrHostname,
+        aliasKey: identity.aliasKey,
+        aliasMatchBy: identity.aliasMatchBy,
+      };
+    });
+
+    if (!changed) return false;
+
+    const updatedFlows = this.latestSnapshot.flows.map((f) => {
+      const resolvedSrc = isPrivateIp(f.srcIp) ? hostNameByIp.get(f.srcIp) : undefined;
+      const resolvedDst = isPrivateIp(f.dstIp) ? hostNameByIp.get(f.dstIp) : undefined;
+      if (!resolvedSrc && !resolvedDst) return f;
+      return {
+        ...f,
+        ...(resolvedSrc ? { srcHost: resolvedSrc } : {}),
+        ...(resolvedDst ? { dstHost: resolvedDst } : {}),
+      };
+    });
+
+    const updatedLinks = this.latestSnapshot.clientLinks.map((l) => {
+      const resolved = hostNameByIp.get(l.clientIp);
+      return resolved ? { ...l, clientName: resolved } : l;
+    });
+
+    this.latestSnapshot = {
+      ...this.latestSnapshot,
+      hosts: nextHosts,
+      flows: updatedFlows,
+      clientLinks: updatedLinks,
+    };
+
+    return true;
+  }
+
   private recordHistoryPoint(point: TrafficPoint): void {
     // Keep high-res history strictly monotonic (ignore out-of-order / duplicate timestamps)
     const lastHist = this.history.length > 0 ? this.history[this.history.length - 1] : null;
@@ -1129,15 +1234,13 @@ export class TrafficMonitorEngine {
       this.history.push(point);
     }
 
-    // Prune excess points beyond maxHistoryPoints (or older than 65m once over 900 samples)
-    while (this.history.length > this.maxHistoryPoints) {
+    // Prune high-res history strictly to 65m / maxHistoryPoints
+    const historyCutoff = point.timestamp - this.maxHistoryAgeMs;
+    while (
+      this.history.length > this.maxHistoryPoints ||
+      (this.history.length > 0 && this.history[0].timestamp < historyCutoff)
+    ) {
       this.history.shift();
-    }
-    if (this.history.length > 900) {
-      const cutoff = point.timestamp - this.maxHistoryAgeMs;
-      while (this.history.length > 900 && this.history[0].timestamp < cutoff) {
-        this.history.shift();
-      }
     }
 
     const minuteFloor = Math.floor(point.timestamp / 60_000) * 60_000;
@@ -1169,14 +1272,20 @@ export class TrafficMonitorEngine {
         } else if (rollupPoint.timestamp === lastRollup.timestamp) {
           this.rollupHistory[this.rollupHistory.length - 1] = rollupPoint;
         }
-        while (this.rollupHistory.length > this.maxRollupPoints) {
-          this.rollupHistory.shift();
-        }
       }
       this.currentBucketStart = minuteFloor;
       this.bucketSamples = [point];
     } else if (minuteFloor === this.currentBucketStart) {
       this.bucketSamples.push(point);
+    }
+
+    // Strictly cap rollup retention at 6 hours (do not retain data any longer)
+    const rollupCutoff = point.timestamp - this.maxRollupAgeMs;
+    while (
+      this.rollupHistory.length > this.maxRollupPoints ||
+      (this.rollupHistory.length > 0 && this.rollupHistory[0].timestamp < rollupCutoff)
+    ) {
+      this.rollupHistory.shift();
     }
   }
 

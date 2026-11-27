@@ -4,7 +4,7 @@ export type BandwidthUnit = 'Mbps' | 'MB/s';
 
 export type TimeFormat = '12h' | '24h';
 
-export type TimeWindow = '5m' | '15m' | '1h' | '6h' | '24h';
+export type TimeWindow = '5m' | '15m' | '1h' | '3h' | '6h';
 
 export type PersistenceMode = 'memory' | 'disk';
 

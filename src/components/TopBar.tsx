@@ -157,7 +157,7 @@ export function TopBar({
           data-testid="topbar-utilization-btn"
           onClick={() => setPopoverOpen((v) => !v)}
           aria-expanded={popoverOpen}
-          aria-label={`Internet usage ${util.peakPct.toFixed(1)}% (${formatBandwidth(rxBps, unit)} down, ${formatBandwidth(txBps, unit)} up) and router load ${routerLoadPct}%. Click to configure internet plan speeds.`}
+          aria-label={`Internet usage ${Math.round(util.peakPct)}% (${formatBandwidth(rxBps, unit)} down, ${formatBandwidth(txBps, unit)} up) and router load ${routerLoadPct}%. Click to configure internet plan speeds.`}
           className="w-full max-w-[240px] sm:max-w-[340px] md:max-w-[400px] xl:max-w-[440px] h-9 sm:h-10 px-3 sm:px-3.5 rounded-xl border app-border app-surface app-row-hover transition-colors flex flex-col justify-center gap-1.5 text-left"
         >
           <div className="grid grid-cols-2 gap-3 w-full items-center">
@@ -170,7 +170,7 @@ export function TopBar({
                   className="font-semibold shrink-0"
                   style={{ color: internetTextColor }}
                 >
-                  {util.peakPct.toFixed(1)}%
+                  {Math.round(util.peakPct)}%
                 </span>
               </div>
               <div

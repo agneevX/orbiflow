@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { ALL_TIME_WINDOWS, analyzeTimeWindow } from './timeWindowUtils';
 import type { TrafficPoint } from '../types/telemetry';
 
-test('ALL_TIME_WINDOWS omits 1m and starts at 5m', () => {
-  assert.deepEqual(ALL_TIME_WINDOWS, ['5m', '15m', '1h', '6h', '24h']);
+test('ALL_TIME_WINDOWS covers 5m, 15m, 1h, 3h, and 6h', () => {
+  assert.deepEqual(ALL_TIME_WINDOWS, ['5m', '15m', '1h', '3h', '6h']);
 });
 
 test('analyzeTimeWindow returns empty status when no samples fall in the window', () => {
@@ -138,14 +138,14 @@ test('analyzeTimeWindow populates leadingAnchor when a sample immediately preced
   assert.equal(gappedRes.leadingAnchor, null);
 });
 
-test('getDisplaySegmentsForAnalysis produces consistent ~60-bucket density across all 5 windows and full resolution when zoomed', async () => {
+test('getDisplaySegmentsForAnalysis produces consistent ~100-point dynamic density across all 5 windows and full resolution when zoomed', async () => {
   const { getDisplaySegmentsForAnalysis, buildZoomedRangeAnalysis, SMOOTH_BUCKET_MS } = await import(
     './timeWindowUtils'
   );
   const now = 1_700_000_000_000;
   const history: TrafficPoint[] = [];
-  // 300 high-res samples (every 3s over 15 minutes)
-  for (let s = 900; s >= 0; s -= 3) {
+  // 1,220 high-res samples (every 3s over 61 minutes — covers 5m, 15m, and 1h)
+  for (let s = 3660; s >= 0; s -= 3) {
     history.push({
       timestamp: now - s * 1000,
       rxBps: 4_000_000 + (s % 30) * 50_000,
@@ -153,9 +153,9 @@ test('getDisplaySegmentsForAnalysis produces consistent ~60-bucket density acros
       activeFlows: 10,
     });
   }
-  // 24h of 1-minute rollups
+  // 6h of 1-minute rollups
   const rollups: TrafficPoint[] = [];
-  for (let m = 1440; m >= 1; m--) {
+  for (let m = 360; m >= 1; m--) {
     rollups.push({
       timestamp: now - m * 60_000,
       rxBps: 3_500_000 + (m % 20) * 40_000,
@@ -164,18 +164,24 @@ test('getDisplaySegmentsForAnalysis produces consistent ~60-bucket density acros
     });
   }
 
-  // Every single time window targets ~60 buckets (50..65 points across full window)
-  for (const win of ['5m', '15m', '1h', '6h', '24h'] as const) {
+  // Every single time window targets ~100 points (97..104 points across full window)
+  const counts: number[] = [];
+  for (const win of ['5m', '15m', '1h', '3h', '6h'] as const) {
     const analysis = analyzeTimeWindow(win, history, rollups, now);
     assert.equal(analysis.status, 'full', `Expected ${win} to have full coverage`);
     assert.equal(analysis.segments.length, 1, `Expected ${win} to have 1 continuous segment`);
     const segs = getDisplaySegmentsForAnalysis(analysis, false);
     const count = segs.flat().length;
+    counts.push(count);
     assert.ok(
-      count >= 50 && count <= 66,
-      `Expected consistent ~60 buckets on ${win} (bucket=${SMOOTH_BUCKET_MS[win]}ms), got ${count}`
+      count >= 97 && count <= 104,
+      `Expected consistent ~100 points on ${win} (bucket=${SMOOTH_BUCKET_MS[win]}ms), got ${count}`
     );
   }
+  assert.ok(
+    Math.max(...counts) - Math.min(...counts) <= 6,
+    `Expected all 5 windows to share tight 100-point density spread, got ${counts.join(', ')}`
+  );
 
   // Zooming into a 3-minute slice restores full 3s resolution (~61 points)
   const analysis15m = analyzeTimeWindow('15m', history, rollups, now);
@@ -185,6 +191,46 @@ test('getDisplaySegmentsForAnalysis produces consistent ~60-bucket density acros
     zoomedSegments.flat().length >= 58,
     `Expected full-res zoomed points >= 58, got ${zoomedSegments.flat().length}`
   );
+});
+
+test('getDisplaySegmentsForAnalysis always preserves the exact latest incoming live data point un-averaged across every window', async () => {
+  const { getDisplaySegmentsForAnalysis } = await import('./timeWindowUtils');
+  const now = 1_700_000_000_000;
+  const rollups: TrafficPoint[] = [];
+  for (let m = 360; m >= 2; m--) {
+    rollups.push({
+      timestamp: now - m * 60_000,
+      rxBps: 2_000_000,
+      txBps: 400_000,
+      activeFlows: 8,
+    });
+  }
+  const history: TrafficPoint[] = [];
+  for (let s = 3600; s >= 3; s -= 3) {
+    history.push({
+      timestamp: now - s * 1000,
+      rxBps: 2_000_000,
+      txBps: 400_000,
+      activeFlows: 8,
+    });
+  }
+  // Newest incoming live spike arrives at `now`
+  const liveSpike: TrafficPoint = {
+    timestamp: now,
+    rxBps: 18_750_000,
+    txBps: 4_250_000,
+    activeFlows: 24,
+  };
+  history.push(liveSpike);
+
+  for (const win of ['5m', '15m', '1h', '3h', '6h'] as const) {
+    const analysis = analyzeTimeWindow(win, history, rollups, now);
+    const plotted = getDisplaySegmentsForAnalysis(analysis, false).flat();
+    const last = plotted[plotted.length - 1];
+    assert.equal(last.timestamp, liveSpike.timestamp, `Expected exact latest timestamp on ${win}`);
+    assert.equal(last.rxBps, liveSpike.rxBps, `Expected un-averaged live rxBps on ${win}`);
+    assert.equal(last.txBps, liveSpike.txBps, `Expected un-averaged live txBps on ${win}`);
+  }
 });
 
 test('analyzeTimeWindow stitches rollupHistory into high-res history on 15m with zero false gap at the seam', () => {
@@ -260,7 +306,7 @@ test('getDisplaySegmentsForAnalysis preserves >=2 endpoints when live segment is
     { timestamp: now, rxBps: 2_000_000, txBps: 300_000, activeFlows: 6 },
   ];
 
-  for (const win of ['5m', '15m', '1h', '6h', '24h'] as const) {
+  for (const win of ['5m', '15m', '1h', '3h', '6h'] as const) {
     const analysis = analyzeTimeWindow(win, freshLive, [], now);
     const segs = getDisplaySegmentsForAnalysis(analysis, false);
     assert.equal(segs.length, 1);
@@ -270,6 +316,32 @@ test('getDisplaySegmentsForAnalysis preserves >=2 endpoints when live segment is
     );
     assert.equal(segs[0][0].timestamp, freshLive[0].timestamp);
     assert.equal(segs[0][segs[0].length - 1].timestamp, freshLive[freshLive.length - 1].timestamp);
+  }
+});
+
+test('computeMonotoneSplineCurves produces finite bezier segments connecting through the final data point', async () => {
+  const { computeMonotoneSplineCurves } = await import('./timeWindowUtils');
+  for (const count of [2, 3, 10, 100]) {
+    const pts = Array.from({ length: count }, (_, i) => ({
+      x: 60 + i * 8.32,
+      y: 120 + Math.sin(i * 0.7) * 55,
+    }));
+    const curves = computeMonotoneSplineCurves(pts, 12, 224);
+    assert.equal(curves.length, count - 1);
+    for (let i = 0; i < curves.length; i++) {
+      const c = curves[i];
+      assert.ok(Number.isFinite(c.cp1x), `cp1x finite at ${i}`);
+      assert.ok(Number.isFinite(c.cp1y), `cp1y finite at ${i}`);
+      assert.ok(Number.isFinite(c.cp2x), `cp2x finite at ${i}`);
+      assert.ok(Number.isFinite(c.cp2y), `cp2y finite at ${i}`);
+      assert.ok(c.cp1y >= 12 && c.cp1y <= 224, `cp1y clamped at ${i}`);
+      assert.ok(c.cp2y >= 12 && c.cp2y <= 224, `cp2y clamped at ${i}`);
+      assert.equal(c.x, pts[i + 1].x);
+      assert.equal(c.y, pts[i + 1].y);
+    }
+    const last = curves[curves.length - 1];
+    assert.equal(last.x, pts[pts.length - 1].x);
+    assert.equal(last.y, pts[pts.length - 1].y);
   }
 });
 

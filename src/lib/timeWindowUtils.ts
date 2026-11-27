@@ -1,46 +1,46 @@
 import type { TimeWindow, TrafficPoint } from '../types/telemetry';
 import { formatDuration } from './formatters';
 
-export const ALL_TIME_WINDOWS: TimeWindow[] = ['5m', '15m', '1h', '6h', '24h'];
+export const ALL_TIME_WINDOWS: TimeWindow[] = ['5m', '15m', '1h', '3h', '6h'];
 
 export const WINDOW_MS: Record<TimeWindow, number> = {
   '5m': 5 * 60_000,
   '15m': 15 * 60_000,
   '1h': 60 * 60_000,
+  '3h': 3 * 60 * 60_000,
   '6h': 6 * 60 * 60_000,
-  '24h': 24 * 60 * 60_000,
 };
 
 /**
  * Consistent gap thresholds across time windows:
- * - 5m is pure high-res (3s cadence): 90s marks a real outage while tolerating brief reconnects.
- * - 15m and 1h both use 150s so rollup-backed spans and rollup->high-res transitions never produce
- *   phantom gaps on 15m while showing continuous data on 1h.
- * - 6h and 24h use 180s (3 missed 1-minute rollup buckets).
+ * - 5m is pure high-res (3s cadence): 95s marks a real outage while tolerating brief reconnects.
+ * - 15m and 1h use 150s so rollup-backed spans and rollup->high-res transitions never produce
+ *   phantom gaps when switching windows.
+ * - 3h and 6h use 180s (3 missed 1-minute rollup buckets).
  */
 const GAP_THRESHOLD_MS: Record<TimeWindow, number> = {
   '5m': 95_000,
   '15m': 150_000,
   '1h': 150_000,
+  '3h': 180_000,
   '6h': 180_000,
-  '24h': 180_000,
 };
 
 /**
- * Uniform ~60-bucket visual density across ALL 5 time windows:
- * - 5m  / 5s   = 60 buckets
- * - 15m / 15s  = 60 buckets
- * - 1h  / 60s  = 60 buckets (matches 1-minute rollups 1:1)
- * - 6h  / 6m   = 60 buckets
- * - 24h / 24m  = 60 buckets
- * Every time period renders with consistent smoothness, detail, and proportional rhythm.
+ * Uniform 100-point dynamic rhythm across ALL 5 time windows (windowMs / bucketMs === 100):
+ * - 5m  / 3s   = 100 data points (raw 3s ticks)
+ * - 15m / 9s   = 100 data points
+ * - 1h  / 36s  = 100 data points
+ * - 3h  / 108s = 100 data points
+ * - 6h  / 216s = 100 data points
+ * Every time period renders the same 100-point dynamic rhythm with proportionally scaled intervals.
  */
 export const SMOOTH_BUCKET_MS: Record<TimeWindow, number> = {
-  '5m': 5_000,
-  '15m': 15_000,
-  '1h': 60_000,
-  '6h': 360_000,
-  '24h': 1_440_000,
+  '5m': 3_000,
+  '15m': 9_000,
+  '1h': 36_000,
+  '3h': 108_000,
+  '6h': 216_000,
 };
 
 export interface TimeRange {
@@ -116,10 +116,12 @@ function averagePoints(group: TrafficPoint[], timestamp: number): TrafficPoint {
  * Seamlessly stitches 1-minute rollup history and high-resolution history without creating
  * artificial boundary holes or duplicate timestamps.
  *
- * - For short windows (5m, 15m) and zoomed inspection: uses full high-resolution history wherever
- *   available, backfilled cleanly by every 1-minute rollup strictly before `earliestHighRes`.
- * - For long windows (1h, 6h, 24h): uses 1-minute rollups plus 1-minute aggregated tail buckets
- *   from high-res history newer than the last rollup, anchored to the exact latest live sample.
+ * - For 5m, 15m, and 1h: uses full high-resolution history (3s cadence, up to 65m) so 5m (3s),
+ *   15m (9s), and 1h (36s) all achieve full 100-point dynamic resolution, backfilled cleanly by
+ *   any earlier 1-minute rollups strictly before `earliestHighRes`.
+ * - For 3h and 6h: uses 1-minute rollups (3h @ 108s and 6h @ 216s both exceed 60s so 1m rollups
+ *   yield exact 100-point density) plus live tail samples anchored directly to the exact latest
+ *   incoming sample so new data always draws immediately.
  */
 export function buildWindowSeries(
   window: TimeWindow,
@@ -128,7 +130,7 @@ export function buildWindowSeries(
 ): TrafficPoint[] {
   const highRes = sortAndDedupePoints(history);
   const rollups = sortAndDedupePoints(rollupHistory);
-  const isLongWindow = window === '1h' || window === '6h' || window === '24h';
+  const isLongWindow = window === '3h' || window === '6h';
 
   if (isLongWindow) {
     if (rollups.length === 0) return highRes;
@@ -136,7 +138,7 @@ export function buildWindowSeries(
     const lastRollupTs = merged[merged.length - 1].timestamp;
 
     // Include ALL recent high-res points newer than the last completed 1m rollup bucket,
-    // grouped per minute so the right edge always connects smoothly on every live tick.
+    // preserving the exact latest incoming sample un-averaged at the right edge.
     const recentTail = highRes.filter((p) => p.timestamp > lastRollupTs);
     if (recentTail.length > 0) {
       const minuteBuckets = new Map<number, TrafficPoint[]>();
@@ -150,22 +152,33 @@ export function buildWindowSeries(
       for (let i = 0; i < bucketKeys.length; i++) {
         const group = minuteBuckets.get(bucketKeys[i])!;
         const isLastBucket = i === bucketKeys.length - 1;
-        // Anchor the newest partial minute to its exact latest live sample timestamp;
-        // intermediate minutes anchor to their minute floor (strictly > lastRollupTs).
-        const ts = isLastBucket
-          ? group[group.length - 1].timestamp
-          : Math.max(lastRollupTs + 1000, bucketKeys[i]);
-        // Avoid replacing the last completed rollup if recentTail still falls in its same minute
-        if (ts > lastRollupTs) {
-          merged.push(averagePoints(group, ts));
+        if (isLastBucket) {
+          const latest = group[group.length - 1];
+          if (group.length > 1 && latest.timestamp - group[0].timestamp >= 20_000) {
+            const earlier = group.slice(0, -1);
+            const earlierTs = Math.max(
+              lastRollupTs + 1000,
+              Math.round(earlier.reduce((s, p) => s + p.timestamp, 0) / earlier.length)
+            );
+            if (earlierTs > lastRollupTs && earlierTs < latest.timestamp) {
+              merged.push(averagePoints(earlier, earlierTs));
+            }
+          }
+          if (latest.timestamp > lastRollupTs) {
+            merged.push(latest);
+          }
+        } else {
+          const ts = Math.max(lastRollupTs + 1000, bucketKeys[i]);
+          if (ts > lastRollupTs) {
+            merged.push(averagePoints(group, ts));
+          }
         }
       }
     }
     return sortAndDedupePoints(merged);
   }
 
-  // Short windows (5m, 15m): prefer high-res history, seamlessly backfilled by earlier rollups.
-  // Critically: include rollups strictly before earliestHighRes (NO -30_000 cutout that creates false holes!).
+  // 5m, 15m, and 1h: prefer high-res history, seamlessly backfilled by earlier rollups.
   if (highRes.length === 0) return rollups;
   if (rollups.length === 0) return highRes;
 
@@ -417,14 +430,17 @@ export function sliceAnalysisToRange(
 }
 
 /**
- * Downsamples a single continuous segment into evenly spaced time buckets,
- * preserving boundary timestamps so clipped chart edges and no-data gaps stay exact.
+ * Downsamples a single continuous segment into evenly spaced time buckets (~100 points per window).
+ * Preserves the exact start timestamp and ALWAYS emits the exact latest incoming point un-averaged
+ * at the right edge so live ticks draw immediately as they arrive.
  */
 export function downsampleSegment(
   segment: TrafficPoint[],
   bucketMs: number
 ): TrafficPoint[] {
   if (segment.length <= 2 || bucketMs <= 0) return segment;
+  // For native 3s cadence (5m window), return raw ticks directly so jitter never aliases buckets
+  if (bucketMs <= 3_000 && segment.length <= 105) return segment;
 
   const buckets = new Map<number, TrafficPoint[]>();
   for (const p of segment) {
@@ -441,17 +457,29 @@ export function downsampleSegment(
   const result: TrafficPoint[] = [];
   for (let i = 0; i < keys.length; i++) {
     const group = buckets.get(keys[i])!;
+    const isLastBucket = i === keys.length - 1;
+
+    if (isLastBucket) {
+      const latest = group[group.length - 1];
+      if (group.length > 1 && latest.timestamp - group[0].timestamp >= bucketMs * 0.45) {
+        const earlier = group.slice(0, -1);
+        const earlierAvgTs = Math.round(
+          earlier.reduce((sum, p) => sum + p.timestamp, 0) / earlier.length
+        );
+        if (earlierAvgTs < latest.timestamp) {
+          result.push(averagePoints(earlier, earlierAvgTs));
+        }
+      }
+      // Emit the exact newest incoming point directly so live spikes/changes always render immediately
+      result.push(latest);
+      continue;
+    }
+
     let sumTs = 0;
     for (const p of group) sumTs += p.timestamp;
 
-    // Preserve exact start/end timestamps of the segment so gap boundaries stay flush
-    const timestamp =
-      i === 0
-        ? group[0].timestamp
-        : i === keys.length - 1
-          ? group[group.length - 1].timestamp
-          : Math.round(sumTs / group.length);
-
+    // Preserve exact start timestamp so left boundary / gap edges stay flush
+    const timestamp = i === 0 ? group[0].timestamp : Math.round(sumTs / group.length);
     result.push(averagePoints(group, timestamp));
   }
 
@@ -459,9 +487,9 @@ export function downsampleSegment(
 }
 
 /**
- * Normalizes point density consistently across all 5 time windows (~60 buckets per chart width).
- * When zoomed in, returns full raw resolution unless the zoomed slice exceeds 180 points,
- * in which case it smoothly adapts to ~90 buckets.
+ * Normalizes point density consistently across all 5 time windows (~100 data points per chart width):
+ * 5m @ 3s, 15m @ 9s, 1h @ 36s, 3h @ 108s, 6h @ 216s.
+ * When zoomed in, returns full raw resolution unless the zoomed slice exceeds 240 points.
  */
 export function getDisplaySegmentsForAnalysis(
   analysis: TimeWindowAnalysis,
@@ -469,11 +497,11 @@ export function getDisplaySegmentsForAnalysis(
 ): TrafficPoint[][] {
   if (isZoomed) {
     const totalPoints = analysis.segments.reduce((sum, seg) => sum + seg.length, 0);
-    if (totalPoints <= 180) {
+    if (totalPoints <= 240) {
       return analysis.segments;
     }
     const spanMs = Math.max(1000, analysis.windowEnd - analysis.windowStart);
-    const adaptiveBucketMs = Math.max(3_000, Math.floor(spanMs / 90));
+    const adaptiveBucketMs = Math.max(3_000, Math.floor(spanMs / 100));
     return analysis.segments.map((seg) => downsampleSegment(seg, adaptiveBucketMs));
   }
 
@@ -524,4 +552,108 @@ export function buildZoomedRangeAnalysis(
     'No data recorded in zoomed range',
     `Zoomed range (${formatDuration(windowMs / 1000)}) · full resolution`
   );
+}
+
+export interface PlotPoint {
+  x: number;
+  y: number;
+}
+
+export interface CubicBezierSegment {
+  cp1x: number;
+  cp1y: number;
+  cp2x: number;
+  cp2y: number;
+  x: number;
+  y: number;
+}
+
+/**
+ * Computes Fritsch-Carlson monotone cubic Hermite spline segments for sorted plot points.
+ * Clamps control points cleanly between topY and baselineY and guarantees finite coordinates
+ * for every segment including the final trailing segment.
+ */
+export function computeMonotoneSplineCurves(
+  pts: PlotPoint[],
+  topY: number,
+  baselineY: number
+): CubicBezierSegment[] {
+  const n = pts.length;
+  if (n < 2) return [];
+  if (n === 2) {
+    const dx = (pts[1].x - pts[0].x) / 3;
+    const dy = (pts[1].y - pts[0].y) / 3;
+    return [
+      {
+        cp1x: pts[0].x + dx,
+        cp1y: Math.min(baselineY, Math.max(topY, pts[0].y + dy)),
+        cp2x: pts[1].x - dx,
+        cp2y: Math.min(baselineY, Math.max(topY, pts[1].y - dy)),
+        x: pts[1].x,
+        y: pts[1].y,
+      },
+    ];
+  }
+
+  const dx: number[] = new Array(n - 1);
+  const dy: number[] = new Array(n - 1);
+  const slopes: number[] = new Array(n - 1);
+  for (let i = 0; i < n - 1; i++) {
+    dx[i] = Math.max(0.0001, pts[i + 1].x - pts[i].x);
+    dy[i] = pts[i + 1].y - pts[i].y;
+    slopes[i] = dy[i] / dx[i];
+  }
+
+  const tangents: number[] = new Array(n);
+  tangents[0] = slopes[0];
+  tangents[n - 1] = slopes[n - 2];
+
+  for (let i = 1; i < n - 1; i++) {
+    if (slopes[i - 1] * slopes[i] <= 0) {
+      tangents[i] = 0;
+    } else {
+      const w1 = 2 * dx[i] + dx[i - 1];
+      const w2 = dx[i] + 2 * dx[i - 1];
+      tangents[i] = (w1 + w2) / (w1 / slopes[i - 1] + w2 / slopes[i]);
+    }
+  }
+
+  for (let i = 0; i < n - 1; i++) {
+    if (Math.abs(slopes[i]) < 1e-6) {
+      tangents[i] = 0;
+      tangents[i + 1] = 0;
+    } else {
+      const a = tangents[i] / slopes[i];
+      const b = tangents[i + 1] / slopes[i];
+      const sq = a * a + b * b;
+      if (sq > 9) {
+        const t = 3 / Math.sqrt(sq);
+        tangents[i] = t * a * slopes[i];
+        tangents[i + 1] = t * b * slopes[i];
+      }
+    }
+  }
+
+  const curves: CubicBezierSegment[] = new Array(n - 1);
+  for (let i = 0; i < n - 1; i++) {
+    const h = dx[i] / 3;
+    const rawCp1y = pts[i].y + tangents[i] * h;
+    const rawCp2y = pts[i + 1].y - tangents[i + 1] * h;
+    const cp1y = Number.isFinite(rawCp1y)
+      ? Math.min(baselineY, Math.max(topY, rawCp1y))
+      : pts[i].y;
+    const cp2y = Number.isFinite(rawCp2y)
+      ? Math.min(baselineY, Math.max(topY, rawCp2y))
+      : pts[i + 1].y;
+    curves[i] = {
+      cp1x: pts[i].x + h,
+      cp1y,
+      cp2x: pts[i + 1].x - h,
+      cp2y,
+      x: pts[i + 1].x,
+      y: pts[i + 1].y,
+    };
+  }
+
+  return curves;
 }

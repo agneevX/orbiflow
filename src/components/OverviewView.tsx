@@ -53,7 +53,7 @@ export function OverviewView({
   onViewAllFlows,
   onOpenHosts,
 }: OverviewViewProps) {
-  const isLongWindow = timeWindow === '1h' || timeWindow === '6h' || timeWindow === '24h';
+  const isLongWindow = timeWindow === '1h' || timeWindow === '3h' || timeWindow === '6h';
   const activeAnalysis =
     windowAvailability[timeWindow] ||
     analyzeTimeWindow(timeWindow, snapshot.history, snapshot.rollupHistory);
