@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { ArrowDownRight, ArrowRight, ArrowUpRight, MonitorSmartphone } from 'lucide-react';
 import type {
   BandwidthUnit,
@@ -16,7 +15,7 @@ import {
 } from '../lib/timeWindowUtils';
 import { DEFAULT_FEATURE_VISIBILITY } from '../lib/tablePreferences';
 import { ThroughputChart } from './ThroughputChart';
-import { ClientFlowDiagram, type FlowScopeTab } from './ClientFlowDiagram';
+import { ClientFlowDiagram } from './ClientFlowDiagram';
 import {
   computeWindowPeaks,
   formatBandwidth,
@@ -54,8 +53,6 @@ export function OverviewView({
   onViewAllFlows,
   onOpenHosts,
 }: OverviewViewProps) {
-  const [flowsTab, setFlowsTab] = useState<FlowScopeTab>('internet');
-
   const isLongWindow = timeWindow === '1h' || timeWindow === '6h' || timeWindow === '24h';
   const activeAnalysis =
     windowAvailability[timeWindow] ||
@@ -269,58 +266,26 @@ export function OverviewView({
             <div>
               <h2 className="font-display text-sm font-semibold">Flows</h2>
               <p className="text-xs app-text-muted mt-0.5">
-                {flowsTab === 'internet'
-                  ? 'Live internet traffic paths from top active local devices'
-                  : 'Live local network traffic between devices on your LAN'}
+                Live internet traffic paths from top active local devices
               </p>
             </div>
-            <div className="flex items-center gap-3">
-              <div
-                role="tablist"
-                aria-label="Traffic flow scope"
-                className="inline-flex items-center h-8 app-input border rounded-xl p-0.5"
+            {featureVisibility.connections && (
+              <button
+                type="button"
+                data-testid="inspect-connections-btn"
+                onClick={onViewAllFlows}
+                className="inline-flex items-center gap-1 text-xs font-medium text-sky-500 hover:text-sky-400 transition-colors whitespace-nowrap"
               >
-                {(['internet', 'lan'] as FlowScopeTab[]).map((tab) => {
-                  const active = flowsTab === tab;
-                  return (
-                    <button
-                      key={tab}
-                      type="button"
-                      role="tab"
-                      data-testid={`flows-tab-${tab}`}
-                      aria-selected={active}
-                      onClick={() => setFlowsTab(tab)}
-                      className={`px-3 h-full rounded-lg text-xs font-medium transition-colors ${
-                        active
-                          ? 'app-surface font-semibold'
-                          : 'app-text-muted hover:opacity-80'
-                      }`}
-                    >
-                      {tab === 'internet' ? 'Internet' : 'LAN'}
-                    </button>
-                  );
-                })}
-              </div>
-              {featureVisibility.connections && (
-                <button
-                  type="button"
-                  data-testid="inspect-connections-btn"
-                  onClick={onViewAllFlows}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-sky-500 hover:text-sky-400 transition-colors whitespace-nowrap"
-                >
-                  <span>Inspect</span>
-                  <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-              )}
-            </div>
+                <span>Inspect</span>
+                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            )}
           </div>
 
           <ClientFlowDiagram
             links={snapshot.clientLinks}
-            scope={flowsTab}
             unit={unit}
             theme={theme}
-            lanSummary={snapshot.lanSummary}
             onSelectFilter={onSelectFilter}
           />
         </section>

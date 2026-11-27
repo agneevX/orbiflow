@@ -167,7 +167,8 @@ export function analyzeTimeWindow(
   const segments: TrafficPoint[][] = [];
   let currentSegment: TrafficPoint[] = [points[0]];
 
-  if (!leadingAnchor && points[0].timestamp - windowStart > gapThreshold) {
+  const leadingGapThreshold = Math.min(gapThreshold, Math.max(15_000, Math.round(windowMs * 0.03)));
+  if (!leadingAnchor && points[0].timestamp - windowStart > leadingGapThreshold) {
     noDataRanges.push({ start: windowStart, end: points[0].timestamp });
   }
 
@@ -415,7 +416,8 @@ export function downsampleSegment(
   }
 
   const keys = Array.from(buckets.keys()).sort((a, b) => a - b);
-  if (keys.length >= segment.length) return segment;
+  // Never collapse a multi-point continuous segment into a single bucket (which prevents drawing a curve)
+  if (keys.length >= segment.length || keys.length < 2) return segment;
 
   const result: TrafficPoint[] = [];
   for (let i = 0; i < keys.length; i++) {
@@ -544,7 +546,8 @@ export function buildZoomedRangeAnalysis(
   const segments: TrafficPoint[][] = [];
   let currentSegment: TrafficPoint[] = [points[0]];
 
-  if (!leadingAnchor && points[0].timestamp - windowStart > gapThreshold) {
+  const leadingGapThreshold = Math.min(gapThreshold, Math.max(15_000, Math.round(windowMs * 0.03)));
+  if (!leadingAnchor && points[0].timestamp - windowStart > leadingGapThreshold) {
     noDataRanges.push({ start: windowStart, end: points[0].timestamp });
   }
 

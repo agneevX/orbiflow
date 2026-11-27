@@ -1,16 +1,12 @@
 import { useMemo, useState } from 'react';
-import type { BandwidthUnit, ClientDestinationLink, LanTrafficSummary } from '../types/telemetry';
+import type { BandwidthUnit, ClientDestinationLink } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
 import { formatBandwidth, formatBytes, isPrivateIp } from '../lib/formatters';
 
-export type FlowScopeTab = 'internet' | 'lan';
-
 interface ClientFlowDiagramProps {
   links: ClientDestinationLink[];
-  scope: FlowScopeTab;
   unit: BandwidthUnit;
   theme: ThemePalette;
-  lanSummary?: LanTrafficSummary;
   onSelectFilter: (query: string) => void;
 }
 
@@ -29,22 +25,18 @@ interface PositionedNode {
 const MAX_FLOW_DEVICES = 3;
 const MAX_FLOW_DESTINATIONS = 5;
 
-function matchesScope(link: ClientDestinationLink, scope: FlowScopeTab): boolean {
-  const effectiveScope: FlowScopeTab =
-    link.scope === 'lan' || link.scope === 'internet'
-      ? link.scope
-      : link.category === 'Local Network' || (link.dstIp ? isPrivateIp(link.dstIp) : false)
-        ? 'lan'
-        : 'internet';
-  return effectiveScope === scope;
+function isInternetLink(link: ClientDestinationLink): boolean {
+  if (link.scope === 'lan') return false;
+  if (link.scope === 'internet') return true;
+  if (link.category === 'Local Network') return false;
+  if (link.dstIp && isPrivateIp(link.dstIp)) return false;
+  return true;
 }
 
 export function ClientFlowDiagram({
   links,
-  scope,
   unit,
   theme,
-  lanSummary,
   onSelectFilter,
 }: ClientFlowDiagramProps) {
   const [hoveredClient, setHoveredClient] = useState<string | null>(null);
@@ -52,7 +44,7 @@ export function ClientFlowDiagram({
   const [hoveredLinkKey, setHoveredLinkKey] = useState<string | null>(null);
 
   const layout = useMemo(() => {
-    const scopedLinks = links.filter((l) => matchesScope(l, scope));
+    const scopedLinks = links.filter(isInternetLink);
 
     const clientTotals = new Map<string, { name: string; bps: number; bytes: number }>();
     for (const l of scopedLinks) {
@@ -236,7 +228,7 @@ export function ClientFlowDiagram({
       const mx = (x1 + x2) / 2;
 
       return {
-        key: `${scope}:${l.clientIp}=>${l.service}`,
+        key: `internet:${l.clientIp}=>${l.service}`,
         link: l,
         path: `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`,
         thickness,
@@ -245,14 +237,12 @@ export function ClientFlowDiagram({
     });
 
     return { svgWidth, svgHeight, clientNodes, serviceNodes, ribbons };
-  }, [links, scope, theme]);
+  }, [links, theme]);
 
   const activeLink = useMemo(() => {
     if (!hoveredLinkKey) return null;
     return layout.ribbons.find((r) => r.key === hoveredLinkKey)?.link || null;
   }, [hoveredLinkKey, layout.ribbons]);
-
-  const showLanSummary = scope === 'lan' && lanSummary && lanSummary.totalBps > 0;
 
   if (layout.clientNodes.length === 0 || layout.serviceNodes.length === 0) {
     return (
@@ -260,24 +250,7 @@ export function ClientFlowDiagram({
         data-testid="client-flow-empty"
         className="py-8 text-center text-xs app-text-muted space-y-1.5"
       >
-        {scope === 'lan' ? (
-          showLanSummary ? (
-            <>
-              <div className="font-medium app-text-secondary tabular-nums">
-                LAN interface ({lanSummary.iface}): ↓ {formatBandwidth(lanSummary.rxBps, unit)} · ↑{' '}
-                {formatBandwidth(lanSummary.txBps, unit)}
-              </div>
-              <div>
-                Switched LAN traffic detected on {lanSummary.iface} (L2 local traffic bypasses
-                conntrack).
-              </div>
-            </>
-          ) : (
-            <div>No active LAN-to-LAN traffic flows detected right now.</div>
-          )
-        ) : (
-          <div>Waiting for active internet traffic flows...</div>
-        )}
+        <div>Waiting for active internet traffic flows...</div>
       </div>
     );
   }
@@ -286,27 +259,9 @@ export function ClientFlowDiagram({
     <div
       className="relative"
       data-testid="client-flow-diagram"
-      data-scope={scope}
+      data-scope="internet"
       data-client-count={layout.clientNodes.length}
     >
-      {showLanSummary && (
-        <div
-          data-testid="lan-iface-summary"
-          className="mb-2 flex items-center justify-end text-[11px] app-text-muted tabular-nums"
-        >
-          <span>
-            LAN ({lanSummary.iface}):{' '}
-            <span className="font-medium app-text-secondary">
-              ↓ {formatBandwidth(lanSummary.rxBps, unit)}
-            </span>{' '}
-            ·{' '}
-            <span className="font-medium app-text-secondary">
-              ↑ {formatBandwidth(lanSummary.txBps, unit)}
-            </span>
-          </span>
-        </div>
-      )}
-
       {activeLink && (
         <div className="pointer-events-none absolute right-2 top-1 z-10 px-2.5 py-1 rounded-lg border app-border app-floating-bar shadow text-[11px] tabular-nums app-text-secondary">
           {activeLink.clientName} → {activeLink.service} ·{' '}
@@ -320,11 +275,7 @@ export function ClientFlowDiagram({
           viewBox={`0 0 ${layout.svgWidth} ${layout.svgHeight}`}
           className="w-full min-w-[600px] max-h-[260px] h-auto block select-none"
           role="img"
-          aria-label={
-            scope === 'lan'
-              ? 'Local network device-to-device traffic flow diagram'
-              : 'Client to internet service traffic flow diagram'
-          }
+          aria-label="Client to internet service traffic flow diagram"
         >
           {/* Curved Flow Ribbons */}
           <g>

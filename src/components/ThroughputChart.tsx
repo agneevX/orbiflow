@@ -269,6 +269,18 @@ export function ThroughputChart({
       };
     }
 
+    // Never snap hover markers into empty canvas outside the actually drawn data bounds
+    const firstDrawnTs = leadingAnchor ? windowStart : plottedPoints[0].timestamp;
+    const lastDrawnTs = plottedPoints[plottedPoints.length - 1].timestamp;
+    const edgeSnapMargin = Math.max(4_000, Math.min(18_000, span * 0.02));
+    if (hoverTs < firstDrawnTs - edgeSnapMargin || hoverTs > lastDrawnTs + edgeSnapMargin) {
+      return {
+        timestamp: hoverTs,
+        point: null as TrafficPoint | null,
+        isNoData: true,
+      };
+    }
+
     let nearest = plottedPoints[0];
     let bestDist = Math.abs(plottedPoints[0].timestamp - hoverTs);
     for (let i = 1; i < plottedPoints.length; i++) {
@@ -284,7 +296,7 @@ export function ThroughputChart({
       point: nearest,
       isNoData: false,
     };
-  }, [hoverXRatio, dragState, windowStart, windowEnd, noDataRanges, plottedPoints]);
+  }, [hoverXRatio, dragState, windowStart, windowEnd, noDataRanges, plottedPoints, leadingAnchor]);
 
   const clientXToPlot = useCallback(
     (clientX: number) => {
@@ -370,7 +382,8 @@ export function ThroughputChart({
     };
 
     const yForBps = (bps: number) => {
-      const norm = Math.min(1, Math.max(0, bps / maxBps));
+      const safe = Number.isFinite(bps) && bps > 0 ? bps : 0;
+      const norm = Math.min(1, Math.max(0, safe / maxBps));
       return baselineY - norm * plotH;
     };
 
@@ -525,7 +538,7 @@ export function ThroughputChart({
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(padLeft, PAD_TOP - 2, plotW + 2, plotH + 4);
+    ctx.rect(padLeft - 2, PAD_TOP - 4, plotW + 6, plotH + 8);
     ctx.clip();
 
     const drawSeries = (
@@ -547,10 +560,22 @@ export function ThroughputChart({
       for (const seg of renderSegments) {
         if (seg.length === 0) continue;
         if (seg.length === 1) {
-          const px = xForTimeRaw(seg[0].timestamp);
+          const px = Math.min(padLeft + plotW, Math.max(padLeft, xForTimeRaw(seg[0].timestamp)));
           const py = yForBps(accessor(seg[0]));
           ctx.beginPath();
-          ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+          ctx.moveTo(px, py);
+          ctx.lineTo(px, baselineY);
+          ctx.strokeStyle = hexToRgba(baseColor, 0.3);
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(px, py, 6, 0, Math.PI * 2);
+          ctx.fillStyle = hexToRgba(baseColor, 0.22);
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(px, py, 3.2, 0, Math.PI * 2);
           ctx.fillStyle = baseColor;
           ctx.fill();
           continue;

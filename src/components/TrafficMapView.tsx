@@ -1,17 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cable,
-  Crosshair,
+  ChevronDown,
+  ChevronRight,
+  Cpu,
   ExternalLink,
+  Gamepad2,
   Globe,
-  Minus,
-  Pause,
-  Play,
-  Plus,
+  HardDrive,
+  Laptop,
+  Monitor,
+  Network,
   Radio,
+  Router,
   Search,
   Server,
-  SlidersHorizontal,
+  Smartphone,
+  Tv,
   Wifi,
   X,
 } from 'lucide-react';
@@ -20,16 +25,26 @@ import type {
   DashboardSnapshot,
   EthernetPortMetrics,
   HostSummary,
+  SatelliteClientLink,
+  SatelliteTelemetry,
+  WanDetails,
 } from '../types/telemetry';
 import type { ThemePalette } from '../lib/themes';
 import {
-  buildTopologyGraph,
   formatLinkSpeed,
+  formatWifiRatesLabel,
+  inferTopologyDeviceIcon,
   type TopologyDeviceIcon,
-  type TopologyEdge,
-  type TopologyNode,
 } from '../lib/topology';
-import { formatBandwidth, formatBytes, formatDuration } from '../lib/formatters';
+import {
+  compareIpv4,
+  extractWifiBand,
+  formatBandwidth,
+  formatBytes,
+  formatDuration,
+  hasTangibleTraffic,
+} from '../lib/formatters';
+import { normalizeMac } from '../lib/deviceIdentity';
 import { SatelliteManager, type SatelliteSavePayload } from './SatelliteManager';
 
 interface TrafficMapViewProps {
@@ -46,294 +61,137 @@ interface TrafficMapViewProps {
   ) => Promise<{ ok: boolean; error?: string; summary?: string }>;
 }
 
-interface Particle {
-  edgeIdx: number;
-  t: number;
-  speed: number;
-  direction: 1 | -1; // 1 = download (top->bottom), -1 = upload (bottom->top)
-  offsetX: number;
-  radius: number;
-  alpha: number;
-  fixedWired?: boolean;
+type ConnectionFilter = 'all' | 'active' | 'wifi' | 'ethernet';
+type ClientSortMode = 'name' | 'ip' | 'traffic';
+
+type InspectorSelection =
+  | { kind: 'internet' }
+  | { kind: 'router' }
+  | { kind: 'satellite'; satId: string }
+  | { kind: 'client'; ip: string };
+
+interface MapClientEntry {
+  host: HostSummary;
+  apKey: string; // 'router' | `sat:${id}`
+  link?: SatelliteClientLink;
+  connectionType: 'ethernet' | 'wifi';
+  wifiBand?: string;
+  wifiRxMbps?: number;
+  wifiTxMbps?: number;
+  wifiSignalDbm?: number;
+  active: boolean;
+  stale: boolean;
+  lastSeenMs: number;
 }
 
-function isWiredClientEdge(edge: TopologyEdge): boolean {
-  return edge.targetId.startsWith('client:') && edge.connectionType === 'ethernet';
+const CLIENT_GRACE_MS = 5 * 60 * 1000;
+
+function ClientDeviceIcon({ icon, className }: { icon: TopologyDeviceIcon; className?: string }) {
+  const cls = className || 'h-4 w-4 shrink-0';
+  switch (icon) {
+    case 'tv':
+      return <Tv className={cls} aria-hidden="true" />;
+    case 'phone':
+      return <Smartphone className={cls} aria-hidden="true" />;
+    case 'laptop':
+      return <Laptop className={cls} aria-hidden="true" />;
+    case 'nas':
+      return <HardDrive className={cls} aria-hidden="true" />;
+    case 'server':
+      return <Server className={cls} aria-hidden="true" />;
+    case 'gaming':
+      return <Gamepad2 className={cls} aria-hidden="true" />;
+    case 'iot':
+      return <Cpu className={cls} aria-hidden="true" />;
+    default:
+      return <Monitor className={cls} aria-hidden="true" />;
+  }
 }
 
-function cubicBezierPoint(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  t: number
-): { x: number; y: number } {
-  const my = (y1 + y2) / 2;
-  const u = 1 - t;
-  const tt = t * t;
-  const uu = u * u;
-  const uuu = uu * u;
-  const ttt = tt * t;
-
-  const x = uuu * x1 + 3 * uu * t * x1 + 3 * u * tt * x2 + ttt * x2;
-  const y = uuu * y1 + 3 * uu * t * my + 3 * u * tt * my + ttt * y2;
-  return { x, y };
-}
-
-function buildEdgePath(e: TopologyEdge): string {
-  const my = (e.y1 + e.y2) / 2;
-  return `M ${e.x1} ${e.y1} C ${e.x1} ${my}, ${e.x2} ${my}, ${e.x2} ${e.y2}`;
-}
-
-function HardwareGlyph({
-  icon,
-  isDark,
-  connected,
+function PortStrip({
+  ports,
+  expectedCount = 4,
+  isRouter = false,
 }: {
-  icon: TopologyDeviceIcon;
-  isDark: boolean;
-  connected: boolean;
+  ports: EthernetPortMetrics[];
+  expectedCount?: number;
+  isRouter?: boolean;
 }) {
-  const bodyFill = isDark ? '#334155' : '#e2e8f0';
-  const bodyStroke = isDark ? '#64748b' : '#94a3b8';
-  const screenFill = isDark ? '#0f172a' : '#1e293b';
-
-  if (icon === 'internet') {
-    return (
-      <svg viewBox="0 0 48 48" className="w-11 h-11" aria-hidden="true">
-        <defs>
-          <linearGradient id="ispGrad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="#0ea5e9" />
-            <stop offset="100%" stopColor="#6366f1" />
-          </linearGradient>
-        </defs>
-        <circle cx="24" cy="24" r="20" fill="url(#ispGrad)" opacity={isDark ? 0.22 : 0.14} />
-        <circle cx="24" cy="24" r="14" fill="none" stroke="url(#ispGrad)" strokeWidth="2.2" />
-        <ellipse cx="24" cy="24" rx="6.5" ry="14" fill="none" stroke="url(#ispGrad)" strokeWidth="1.6" />
-        <line x1="10" y1="24" x2="38" y2="24" stroke="url(#ispGrad)" strokeWidth="1.6" />
-        <path d="M 13 17 Q 24 20 35 17" fill="none" stroke="url(#ispGrad)" strokeWidth="1.4" />
-        <path d="M 13 31 Q 24 28 35 31" fill="none" stroke="url(#ispGrad)" strokeWidth="1.4" />
-      </svg>
-    );
-  }
-
-  if (icon === 'router') {
-    return (
-      <svg viewBox="0 0 84 40" className="w-[78px] h-10" aria-hidden="true">
-        <defs>
-          <linearGradient id="routerChassis" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={isDark ? '#475569' : '#f8fafc'} />
-            <stop offset="100%" stopColor={isDark ? '#1e293b' : '#cbd5e1'} />
-          </linearGradient>
-        </defs>
-        <rect
-          x="3"
-          y="10"
-          width="78"
-          height="20"
-          rx="4"
-          fill="url(#routerChassis)"
-          stroke={bodyStroke}
-          strokeWidth="1.2"
-        />
-        {/* Status LED */}
-        <circle
-          cx="12"
-          cy="20"
-          r="2.4"
-          fill={connected ? '#0ea5e9' : '#f59e0b'}
-        />
-        {/* Ethernet port bays */}
-        {[34, 42, 50, 58, 66].map((px) => (
-          <rect
-            key={px}
-            x={px}
-            y="16"
-            width="5"
-            height="8"
-            rx="1"
-            fill={screenFill}
-            opacity="0.85"
-          />
-        ))}
-        <rect x="20" y="18" width="9" height="4" rx="1.5" fill={bodyStroke} opacity="0.6" />
-      </svg>
-    );
-  }
-
-  if (icon === 'satellite') {
-    return (
-      <svg viewBox="0 0 56 56" className="w-12 h-12" aria-hidden="true">
-        <defs>
-          <radialGradient id="satDisc" cx="35%" cy="30%" r="70%">
-            <stop offset="0%" stopColor={isDark ? '#64748b' : '#ffffff'} />
-            <stop offset="100%" stopColor={isDark ? '#1e293b' : '#cbd5e1'} />
-          </radialGradient>
-        </defs>
-        <circle
-          cx="28"
-          cy="28"
-          r="21"
-          fill="url(#satDisc)"
-          stroke={bodyStroke}
-          strokeWidth="1.2"
-        />
-        <circle
-          cx="28"
-          cy="28"
-          r="9"
-          fill="none"
-          stroke={connected ? '#38bdf8' : '#f59e0b'}
-          strokeWidth="2.2"
-          opacity="0.9"
-        />
-        <circle cx="28" cy="28" r="3" fill={connected ? '#38bdf8' : '#f59e0b'} opacity="0.35" />
-      </svg>
-    );
-  }
-
-  if (icon === 'tv') {
-    return (
-      <svg viewBox="0 0 48 40" className="w-10 h-9" aria-hidden="true">
-        <rect
-          x="8"
-          y="9"
-          width="32"
-          height="22"
-          rx="6"
-          fill={screenFill}
-          stroke={bodyStroke}
-          strokeWidth="1.2"
-        />
-        <rect x="13" y="14" width="22" height="12" rx="3" fill="#334155" opacity="0.5" />
-        <circle cx="35" cy="27" r="1.4" fill="#e2e8f0" />
-      </svg>
-    );
-  }
-
-  if (icon === 'phone') {
-    return (
-      <svg viewBox="0 0 40 48" className="w-9 h-10" aria-hidden="true">
-        <rect
-          x="10"
-          y="4"
-          width="20"
-          height="40"
-          rx="4.5"
-          fill={screenFill}
-          stroke={bodyStroke}
-          strokeWidth="1.3"
-        />
-        <rect x="12.5" y="8" width="15" height="31" rx="2" fill="#0ea5e9" opacity="0.22" />
-        <rect x="17" y="6" width="6" height="1.5" rx="0.75" fill="#64748b" />
-      </svg>
-    );
-  }
-
-  if (icon === 'laptop') {
-    return (
-      <svg viewBox="0 0 54 40" className="w-11 h-9" aria-hidden="true">
-        <rect
-          x="10"
-          y="6"
-          width="34"
-          height="23"
-          rx="2.5"
-          fill={screenFill}
-          stroke={bodyStroke}
-          strokeWidth="1.2"
-        />
-        <rect
-          x="13"
-          y="9"
-          width="28"
-          height="17"
-          rx="1"
-          fill="url(#ispGrad)"
-          opacity="0.35"
-        />
-        <path d="M 4 30 L 50 30 L 47 34 L 7 34 Z" fill={bodyFill} stroke={bodyStroke} strokeWidth="1" />
-      </svg>
-    );
-  }
-
-  if (icon === 'nas' || icon === 'server') {
-    return (
-      <svg viewBox="0 0 48 44" className="w-10 h-9" aria-hidden="true">
-        <rect
-          x="8"
-          y="6"
-          width="32"
-          height="32"
-          rx="4"
-          fill={bodyFill}
-          stroke={bodyStroke}
-          strokeWidth="1.2"
-        />
-        {[12, 20, 28].map((py) => (
-          <g key={py}>
-            <rect x="12" y={py} width="24" height="5" rx="1.2" fill={screenFill} opacity="0.85" />
-            <circle cx="32" cy={py + 2.5} r="1.1" fill="#34d399" />
-          </g>
-        ))}
-      </svg>
-    );
-  }
-
-  if (icon === 'gaming') {
-    return (
-      <svg viewBox="0 0 44 48" className="w-9 h-10" aria-hidden="true">
-        <rect
-          x="10"
-          y="5"
-          width="24"
-          height="38"
-          rx="3.5"
-          fill={screenFill}
-          stroke={bodyStroke}
-          strokeWidth="1.3"
-        />
-        <line x1="15" y1="10" x2="15" y2="38" stroke="#38bdf8" strokeWidth="1.6" opacity="0.7" />
-        <circle cx="24" cy="18" r="4.5" fill="none" stroke="#8b5cf6" strokeWidth="1.4" opacity="0.8" />
-        <circle cx="24" cy="30" r="4.5" fill="none" stroke="#38bdf8" strokeWidth="1.4" opacity="0.8" />
-      </svg>
-    );
-  }
-
-  if (icon === 'iot') {
-    return (
-      <svg viewBox="0 0 44 44" className="w-9 h-9" aria-hidden="true">
-        <rect
-          x="10"
-          y="7"
-          width="24"
-          height="30"
-          rx="8"
-          fill={bodyFill}
-          stroke={bodyStroke}
-          strokeWidth="1.3"
-        />
-        <circle cx="22" cy="18" r="5" fill={screenFill} />
-        <circle cx="22" cy="18" r="2" fill="#38bdf8" opacity="0.8" />
-        <circle cx="22" cy="30" r="1.6" fill="#64748b" />
-      </svg>
-    );
-  }
+  const displayPorts: Array<EthernetPortMetrics & { placeholder?: boolean }> = useMemo(() => {
+    if (ports.length > 0) return ports.slice(0, expectedCount);
+    // Render clean placeholder port bays if probe hasn't reported port telemetry yet
+    return Array.from({ length: expectedCount }, (_, idx) => {
+      const isWan = isRouter && idx === 0;
+      const lanNum = isRouter ? idx : idx + 1;
+      return {
+        id: `placeholder-${idx}`,
+        label: isWan ? 'WAN' : `LAN ${lanNum}`,
+        role: isWan ? 'wan' : 'lan',
+        linkUp: false,
+        speedMbps: 0,
+        duplex: 'unknown' as const,
+        rxBps: 0,
+        txBps: 0,
+        rxBytes: 0,
+        txBytes: 0,
+        placeholder: true,
+      };
+    });
+  }, [ports, expectedCount, isRouter]);
 
   return (
-    <svg viewBox="0 0 44 44" className="w-9 h-9" aria-hidden="true">
-      <rect
-        x="9"
-        y="9"
-        width="26"
-        height="26"
-        rx="6"
-        fill={bodyFill}
-        stroke={bodyStroke}
-        strokeWidth="1.3"
-      />
-      <circle cx="22" cy="22" r="5" fill={screenFill} opacity="0.75" />
-    </svg>
+    <div
+      className="grid gap-1.5"
+      style={{ gridTemplateColumns: `repeat(${displayPorts.length}, minmax(0, 1fr))` }}
+    >
+      {displayPorts.map((port) => {
+        const isUp = port.linkUp;
+        const speedText = port.placeholder
+          ? '—'
+          : isUp
+            ? formatLinkSpeed(port.speedMbps, 'ethernet', true)
+            : 'Empty';
+        const dotClass = !isUp
+          ? 'bg-slate-400/40'
+          : port.speedMbps >= 2500
+            ? 'bg-violet-500'
+            : port.speedMbps >= 1000
+              ? 'bg-emerald-500'
+              : 'bg-amber-500';
+        const roleTag =
+          port.role === 'wan'
+            ? 'WAN'
+            : port.role === 'backhaul'
+              ? 'Backhaul'
+              : port.label.replace(/\s*\(.+\)$/, '');
+
+        return (
+          <div
+            key={port.id}
+            title={`${port.label} (${port.role.toUpperCase()}) · ${speedText}${
+              isUp && port.duplex && port.duplex !== 'unknown'
+                ? ` ${port.duplex === 'full' ? 'FDX' : 'HDX'}`
+                : ''
+            }`}
+            className={`px-2 py-1.5 rounded-lg border text-left transition-colors ${
+              isUp
+                ? 'app-border app-input'
+                : 'border-dashed app-border opacity-60'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wide truncate">
+                {roleTag}
+              </span>
+              <span className={`h-2 w-2 rounded-full shrink-0 ${dotClass}`} aria-hidden="true" />
+            </div>
+            <div className="mt-0.5 text-[10px] font-mono tabular-nums app-text-muted truncate">
+              {speedText}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -367,7 +225,11 @@ function PortNegotiationTable({
         </thead>
         <tbody className="divide-y app-border font-mono tabular-nums">
           {ports.map((p) => {
-            const speedText = formatLinkSpeed(p.speedMbps, p.role === 'wifi' ? 'wifi' : 'ethernet', p.linkUp);
+            const speedText = formatLinkSpeed(
+              p.speedMbps,
+              p.role === 'wifi' ? 'wifi' : 'ethernet',
+              p.linkUp
+            );
             return (
               <tr key={p.id} className="app-input">
                 <td className="px-2.5 py-2 font-sans min-w-0">
@@ -420,1019 +282,1310 @@ export function TrafficMapView({
   onDeleteSatellite,
   onTestSatellite,
 }: TrafficMapViewProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const displayMenuRef = useRef<HTMLDivElement>(null);
-
-  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
-  const [showPortSpeeds, setShowPortSpeeds] = useState(true);
-  const [showIdleClients, setShowIdleClients] = useState(true);
-  const [animateFlow, setAnimateFlow] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [displayMenuOpen, setDisplayMenuOpen] = useState(false);
+  const [connFilter, setConnFilter] = useState<ConnectionFilter>('all');
+  const [vlanFilter, setVlanFilter] = useState<string>('ALL');
+  const [sortMode, setSortMode] = useState<ClientSortMode>('name');
+  const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(() => new Set());
+  const [selection, setSelection] = useState<InspectorSelection | null>(null);
   const [satelliteModalOpen, setSatelliteModalOpen] = useState(false);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
-  // Pan & zoom transform state
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 24, y: 12 });
-  const [dragging, setDragging] = useState(false);
-  const dragOrigin = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
-  const hasAutoFitRef = useRef(false);
+  // 5-minute grace retention map keyed by IP so devices never flicker/vanish on brief poll gaps
+  const retainedClientsRef = useRef<Map<string, MapClientEntry>>(new Map());
 
-  const graph = useMemo(
+  useEffect(() => {
+    if (!selection) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelection(null);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [selection]);
+
+  const topology = snapshot.topology || {
+    routerPorts: [],
+    routerWanSpeedMbps: 1000,
+    routerClients: [],
+    satellites: [],
+    satelliteConfigs: [],
+  };
+
+  const satellites = useMemo(
     () =>
-      buildTopologyGraph(snapshot, {
-        collapsedIds,
-        showIdleClients,
-        searchQuery,
-      }),
-    [snapshot, collapsedIds, showIdleClients, searchQuery]
+      [...(topology.satellites || [])].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+      ),
+    [topology.satellites]
   );
 
-  const selectedNode: TopologyNode | null = useMemo(
-    () => (selectedNodeId ? graph.nodes.find((n) => n.id === selectedNodeId) || null : null),
-    [graph.nodes, selectedNodeId]
-  );
-
-  const fitToView = useCallback(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    if (rect.width < 100 || rect.height < 100) return;
-    const padX = 56;
-    const padTop = 64;
-    const padBottom = 48;
-    const scaleX = (rect.width - padX) / graph.width;
-    const scaleY = (rect.height - padTop - padBottom) / graph.height;
-    const nextZoom = Math.max(0.55, Math.min(1.12, Math.min(scaleX, scaleY)));
-    const nextPanX = Math.round((rect.width - graph.width * nextZoom) / 2);
-    const nextPanY = Math.round(
-      padTop + (rect.height - padTop - padBottom - graph.height * nextZoom) / 2
-    );
-    setZoom(Number(nextZoom.toFixed(3)));
-    setPan({ x: nextPanX, y: Math.max(36, nextPanY) });
-  }, [graph.width, graph.height]);
-
-  useEffect(() => {
-    if (!hasAutoFitRef.current && graph.nodes.length > 0) {
-      hasAutoFitRef.current = true;
-      fitToView();
+  // Build stabilized client roster with deterministic AP attribution & 5-minute anti-flicker grace
+  const stabilizedClients = useMemo<MapClientEntry[]>(() => {
+    const now = snapshot.probe.lastHeartbeat || Date.now();
+    const satIpSet = new Set(satellites.map((s) => s.host));
+    const satByNameLower = new Map<string, SatelliteTelemetry>();
+    for (const sat of satellites) {
+      satByNameLower.set(sat.name.trim().toLowerCase(), sat);
     }
-  }, [fitToView, graph.nodes.length]);
 
-  useEffect(() => {
-    if (!displayMenuOpen) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (displayMenuRef.current && !displayMenuRef.current.contains(e.target as Node)) {
-        setDisplayMenuOpen(false);
+    const routerClientByMac = new Map<string, SatelliteClientLink>();
+    const routerClientByIp = new Map<string, SatelliteClientLink>();
+    const routerWifiMacs = new Set<string>();
+    const routerWiredMacs = new Set<string>();
+    for (const rc of topology.routerClients || []) {
+      const m = normalizeMac(rc.mac);
+      if (m) {
+        routerClientByMac.set(m, rc);
+        if (rc.connectionType === 'wifi') routerWifiMacs.add(m);
+        else if (rc.connectionType === 'ethernet') routerWiredMacs.add(m);
       }
-    };
-    document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
-  }, [displayMenuOpen]);
+      if (rc.ip) routerClientByIp.set(rc.ip, rc);
+    }
 
-  // Keep latest edges & animation settings in refs so rAF loop never tears down on 3s ticks
-  const edgesRef = useRef<TopologyEdge[]>(graph.edges);
-  const graphSizeRef = useRef({ width: graph.width, height: graph.height });
-  const isDarkRef = useRef(theme.isDark);
-  const animateRef = useRef(animateFlow && !paused);
-
-  edgesRef.current = graph.edges;
-  graphSizeRef.current = { width: graph.width, height: graph.height };
-  isDarkRef.current = theme.isDark;
-  animateRef.current = animateFlow && !paused;
-
-  // UniFi-style glowing flowing dot-particle ribbon renderer on HTML5 Canvas
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const prefersReduced =
-      typeof window !== 'undefined' &&
-      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-
-    let particles: Particle[] = [];
-    let lastEdgeSignature = '';
-
-    const rebuildParticles = (edges: TopologyEdge[]) => {
-      const next: Particle[] = [];
-      edges.forEach((edge, idx) => {
-        // Wired Ethernet clients always show a steady, fixed-pace animation
-        if (isWiredClientEdge(edge)) {
-          const fixedCount = 8;
-          for (let i = 0; i < fixedCount; i++) {
-            next.push({
-              edgeIdx: idx,
-              t: i / fixedCount,
-              speed: 0.0026,
-              direction: 1,
-              offsetX: 0,
-              radius: 1.5,
-              alpha: 0.72,
-              fixedWired: true,
-            });
-          }
-          return;
+    // Index satellite clients by MAC and IP
+    const satClientByMac = new Map<string, { satId: string; link: SatelliteClientLink }>();
+    const satClientByIp = new Map<string, { satId: string; link: SatelliteClientLink }>();
+    for (const sat of satellites) {
+      for (const cLink of sat.clients || []) {
+        const m = normalizeMac(cLink.mac);
+        if (m && routerWifiMacs.has(m) && cLink.connectionType !== 'wifi') continue;
+        if (m && routerWiredMacs.has(m) && cLink.connectionType !== 'ethernet') continue;
+        if (m && !satClientByMac.has(m)) {
+          satClientByMac.set(m, { satId: sat.id, link: cLink });
         }
-
-        if (!edge.active) return;
-        // Scale particle density logarithmically with live throughput
-        const rxScore = edge.rxBps > 0 ? Math.min(1, Math.log10(edge.rxBps + 10) / 7.2) : 0;
-        const txScore = edge.txBps > 0 ? Math.min(1, Math.log10(edge.txBps + 10) / 7.2) : 0;
-
-        const rxCount = edge.rxBps > 0 ? Math.max(10, Math.round(14 + rxScore * 38)) : 0;
-        const txCount = edge.txBps > 0 ? Math.max(6, Math.round(8 + txScore * 24)) : 0;
-        const spread = 3 + Math.max(rxScore, txScore) * 5.5;
-
-        for (let i = 0; i < rxCount; i++) {
-          const seed = (idx * 97 + i * 31) % 1000;
-          next.push({
-            edgeIdx: idx,
-            t: (i / rxCount + (seed % 17) * 0.004) % 1,
-            speed: 0.0022 + rxScore * 0.0042 + ((seed % 11) * 0.00018),
-            direction: 1,
-            offsetX: (((seed % 200) / 100) - 1) * spread,
-            radius: 1.15 + ((seed % 5) * 0.25),
-            alpha: 0.45 + ((seed % 55) / 100),
-          });
+        if (cLink.ip && !satClientByIp.has(cLink.ip)) {
+          satClientByIp.set(cLink.ip, { satId: sat.id, link: cLink });
         }
-        for (let i = 0; i < txCount; i++) {
-          const seed = (idx * 131 + i * 43 + 7) % 1000;
-          next.push({
-            edgeIdx: idx,
-            t: (i / txCount + (seed % 19) * 0.004) % 1,
-            speed: 0.0018 + txScore * 0.0036 + ((seed % 9) * 0.00016),
-            direction: -1,
-            offsetX: (((seed % 200) / 100) - 1) * (spread * 0.85),
-            radius: 1.1 + ((seed % 4) * 0.24),
-            alpha: 0.4 + ((seed % 50) / 100),
-          });
+      }
+    }
+
+    const liveIps = new Set<string>();
+    const retained = retainedClientsRef.current;
+
+    for (const host of snapshot.hosts) {
+      if (satIpSet.has(host.ip)) continue;
+      liveIps.add(host.ip);
+
+      const m = normalizeMac(host.mac);
+      const satMatch = (m ? satClientByMac.get(m) : undefined) || satClientByIp.get(host.ip);
+      const routerMatch = (m ? routerClientByMac.get(m) : undefined) || routerClientByIp.get(host.ip);
+
+      let apKey = 'router';
+      let link: SatelliteClientLink | undefined = routerMatch;
+
+      if (satMatch) {
+        apKey = `sat:${satMatch.satId}`;
+        link = satMatch.link;
+      } else if (host.apName && host.apName !== 'Main AP') {
+        const byName = satByNameLower.get(host.apName.trim().toLowerCase());
+        if (byName) {
+          apKey = `sat:${byName.id}`;
         }
+      }
+
+      const connectionType: 'ethernet' | 'wifi' =
+        link?.connectionType === 'wifi' || host.connectionType === 'wifi'
+          ? 'wifi'
+          : 'ethernet';
+      const wifiRxMbps =
+        connectionType === 'wifi' ? (link?.wifiRxMbps ?? host.wifiRxMbps) : undefined;
+      const wifiTxMbps =
+        connectionType === 'wifi' ? (link?.wifiTxMbps ?? host.wifiTxMbps) : undefined;
+      const wifiSignalDbm =
+        connectionType === 'wifi' ? (link?.signalDbm ?? host.wifiSignalDbm) : undefined;
+      const wifiBand =
+        connectionType === 'wifi'
+          ? link?.wifiBand ||
+            host.wifiBand ||
+            extractWifiBand(link?.portOrRadio || host.linkRadioOrPort)
+          : undefined;
+      const active = hasTangibleTraffic(host.rxBps, host.txBps);
+
+      retained.set(host.ip, {
+        host,
+        apKey,
+        link,
+        connectionType,
+        wifiBand,
+        wifiRxMbps,
+        wifiTxMbps,
+        wifiSignalDbm,
+        active,
+        stale: false,
+        lastSeenMs: now,
       });
-      particles = next;
-    };
+    }
 
-    let rafId = 0;
-    let lastDraw = 0;
+    // Keep recently seen devices anchored for up to 5 minutes so rows don't pop in and out
+    const validApKeys = new Set<string>(['router', ...satellites.map((s) => `sat:${s.id}`)]);
+    for (const [ip, entry] of retained.entries()) {
+      if (satIpSet.has(ip) || now - entry.lastSeenMs > CLIENT_GRACE_MS) {
+        retained.delete(ip);
+        continue;
+      }
+      if (!validApKeys.has(entry.apKey)) {
+        entry.apKey = 'router';
+      }
+      if (!liveIps.has(ip)) {
+        retained.set(ip, {
+          ...entry,
+          host: {
+            ...entry.host,
+            rxBps: 0,
+            txBps: 0,
+            activeFlows: 0,
+          },
+          active: false,
+          stale: true,
+        });
+      }
+    }
 
-    const renderFrame = (ts: number) => {
-      const { width, height } = graphSizeRef.current;
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      const targetW = Math.round(width * dpr);
-      const targetH = Math.round(height * dpr);
-      if (canvas.width !== targetW || canvas.height !== targetH) {
-        canvas.width = targetW;
-        canvas.height = targetH;
+    return Array.from(retained.values());
+  }, [snapshot.hosts, snapshot.probe.lastHeartbeat, satellites, topology.routerClients]);
+
+  // Build VLAN dropdown options from clients and detectedSubnets
+  const vlanOptions = useMemo(() => {
+    const map = new Map<string, { label: string; cidr: string }>();
+    for (const c of stabilizedClients) {
+      if (c.host.vlanName && c.host.vlanCidr) {
+        map.set(c.host.vlanCidr, { label: c.host.vlanName, cidr: c.host.vlanCidr });
+      }
+    }
+    for (const sub of snapshot.detectedSubnets || []) {
+      if (!sub.isPrimary && !map.has(sub.cidr)) {
+        map.set(sub.cidr, {
+          label: sub.name || (sub.vlanId ? `VLAN ${sub.vlanId}` : sub.cidr),
+          cidr: sub.cidr,
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [stabilizedClients, snapshot.detectedSubnets]);
+
+  // Filter & deterministically sort clients
+  const filteredClientsByAp = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const map = new Map<string, MapClientEntry[]>();
+    map.set('router', []);
+    for (const sat of satellites) {
+      map.set(`sat:${sat.id}`, []);
+    }
+
+    for (const entry of stabilizedClients) {
+      if (connFilter === 'active' && !entry.active) continue;
+      if (connFilter === 'wifi' && entry.connectionType !== 'wifi') continue;
+      if (connFilter === 'ethernet' && entry.connectionType !== 'ethernet') continue;
+
+      if (vlanFilter === 'PRIMARY' && entry.host.vlanCidr) continue;
+      if (vlanFilter !== 'ALL' && vlanFilter !== 'PRIMARY' && entry.host.vlanCidr !== vlanFilter) {
+        continue;
       }
 
-      const edges = edgesRef.current;
-      const sig = edges
-        .map(
-          (e) =>
-            `${e.id}:${e.connectionType || ''}:${e.active ? 1 : 0}:${Math.round(Math.log10(e.rxBps + 10) * 4)}:${Math.round(Math.log10(e.txBps + 10) * 4)}`
-        )
-        .join('|');
-      if (sig !== lastEdgeSignature) {
-        lastEdgeSignature = sig;
-        rebuildParticles(edges);
+      if (q) {
+        const hay = [
+          entry.host.hostname,
+          entry.host.ip,
+          entry.host.mac,
+          entry.host.vendor,
+          entry.host.apName || '',
+          entry.host.vlanName || '',
+          entry.host.vlanCidr || '',
+          ...(entry.host.topServices || []),
+          entry.connectionType,
+          entry.wifiBand || '',
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!hay.includes(q)) continue;
       }
 
-      const dt = lastDraw > 0 ? Math.min(48, ts - lastDraw) / 16.67 : 1;
-      lastDraw = ts;
+      const bucket = map.get(entry.apKey) || map.get('router')!;
+      bucket.push(entry);
+    }
 
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, width, height);
-
-      const dark = isDarkRef.current;
-      const shouldMove = animateRef.current && !prefersReduced;
-
-      // Soft luminous ribbon glow under active vertical splines and wired Ethernet links
-      for (const e of edges) {
-        const wiredClient = isWiredClientEdge(e);
-        if (!e.active && !wiredClient) continue;
-        const my = (e.y1 + e.y2) / 2;
-        ctx.beginPath();
-        ctx.moveTo(e.x1, e.y1);
-        ctx.bezierCurveTo(e.x1, my, e.x2, my, e.x2, e.y2);
-        if (wiredClient) {
-          ctx.strokeStyle = dark ? 'rgba(56, 189, 248, 0.10)' : 'rgba(14, 165, 233, 0.11)';
-          ctx.lineWidth = 6;
-        } else {
-          ctx.strokeStyle = dark ? 'rgba(56, 189, 248, 0.14)' : 'rgba(56, 189, 248, 0.16)';
-          ctx.lineWidth = 10;
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        if (sortMode === 'ip') {
+          return compareIpv4(a.host.ip, b.host.ip);
         }
-        ctx.lineCap = 'round';
-        ctx.stroke();
-      }
-
-      // Draw shimmering flow particles (and fixed steady particles on wired clients)
-      for (const p of particles) {
-        const edge = edges[p.edgeIdx];
-        if (!edge) continue;
-        if (shouldMove) {
-          p.t += p.speed * p.direction * dt;
-          if (p.t > 1) p.t -= 1;
-          if (p.t < 0) p.t += 1;
+        if (sortMode === 'traffic') {
+          const diff = b.host.rxBps + b.host.txBps - (a.host.rxBps + a.host.txBps);
+          if (Math.abs(diff) > 100) return diff;
         }
-        const pt = cubicBezierPoint(edge.x1, edge.y1, edge.x2, edge.y2, p.t);
-        // Taper ribbon slightly near node endpoints for crisp vertical entry/exit
-        const taper = Math.sin(p.t * Math.PI);
-        const px = pt.x + p.offsetX * (0.35 + 0.65 * taper);
+        const nameCmp = a.host.hostname.localeCompare(b.host.hostname, undefined, {
+          sensitivity: 'base',
+        });
+        if (nameCmp !== 0) return nameCmp;
+        return compareIpv4(a.host.ip, b.host.ip);
+      });
+    }
 
-        ctx.beginPath();
-        ctx.arc(px, pt.y, p.radius, 0, Math.PI * 2);
-        if (p.fixedWired) {
-          ctx.fillStyle = dark
-            ? `rgba(56, 189, 248, ${p.alpha})`
-            : `rgba(14, 165, 233, ${p.alpha})`;
-        } else if (p.direction === 1) {
-          ctx.fillStyle = dark
-            ? `rgba(56, 189, 248, ${p.alpha})`
-            : `rgba(14, 165, 233, ${p.alpha * 0.9})`;
-        } else {
-          ctx.fillStyle = dark
-            ? `rgba(167, 139, 250, ${p.alpha})`
-            : `rgba(139, 92, 246, ${p.alpha * 0.85})`;
-        }
-        ctx.fill();
-      }
+    return map;
+  }, [stabilizedClients, satellites, connFilter, vlanFilter, searchQuery, sortMode]);
 
-      ctx.restore();
-      rafId = requestAnimationFrame(renderFrame);
-    };
+  const totalCountsByAp = useMemo(() => {
+    const map = new Map<string, { total: number; active: number }>();
+    map.set('router', { total: 0, active: 0 });
+    for (const sat of satellites) {
+      map.set(`sat:${sat.id}`, { total: 0, active: 0 });
+    }
+    for (const c of stabilizedClients) {
+      const slot = map.get(c.apKey) || map.get('router')!;
+      slot.total += 1;
+      if (c.active) slot.active += 1;
+    }
+    return map;
+  }, [stabilizedClients, satellites]);
 
-    rafId = requestAnimationFrame(renderFrame);
-    return () => cancelAnimationFrame(rafId);
-  }, []);
+  const totalActiveCount = useMemo(
+    () => stabilizedClients.filter((c) => c.active).length,
+    [stabilizedClients]
+  );
 
-  const toggleCollapse = (parentId: string) => {
-    setCollapsedIds((prev) => {
+  const totalVisibleClients = useMemo(() => {
+    let n = 0;
+    for (const list of filteredClientsByAp.values()) n += list.length;
+    return n;
+  }, [filteredClientsByAp]);
+
+  const allApKeys = useMemo(
+    () => ['router', ...satellites.map((s) => `sat:${s.id}`)],
+    [satellites]
+  );
+  const allCollapsed = allApKeys.length > 0 && allApKeys.every((k) => collapsedNodes.has(k));
+
+  const toggleNodeCollapse = (apKey: string) => {
+    setCollapsedNodes((prev) => {
       const next = new Set(prev);
-      if (next.has(parentId)) {
-        next.delete(parentId);
-      } else {
-        next.add(parentId);
-      }
+      if (next.has(apKey)) next.delete(apKey);
+      else next.add(apKey);
       return next;
     });
   };
 
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.09 : 0.92;
-    setZoom((z) => Number(Math.max(0.45, Math.min(2.0, z * factor)).toFixed(3)));
+  const toggleCollapseAll = () => {
+    if (allCollapsed) {
+      setCollapsedNodes(new Set());
+    } else {
+      setCollapsedNodes(new Set(allApKeys));
+    }
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('button, input, a')) return;
-    setDragging(true);
-    dragOrigin.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
-  };
+  const wanDetails: WanDetails | undefined = topology.wan;
+  const wanSpeed = wanDetails?.linkSpeedMbps || topology.routerWanSpeedMbps || 1000;
+  const wanActive = hasTangibleTraffic(snapshot.kpis.rxBps, snapshot.kpis.txBps);
+  const ispLabel = snapshot.serverConfig.ispName?.trim() || 'Internet';
+  const routerLabel = snapshot.probe.hostname || 'Orbi Router';
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!dragging) return;
-    const dx = e.clientX - dragOrigin.current.x;
-    const dy = e.clientY - dragOrigin.current.y;
-    setPan({ x: dragOrigin.current.panX + dx, y: dragOrigin.current.panY + dy });
-  };
+  // Resolve Inspector target data
+  const inspectorData = useMemo(() => {
+    if (!selection) return null;
+    if (selection.kind === 'internet') {
+      return {
+        kind: 'internet' as const,
+        title: ispLabel,
+        subtitle: wanDetails?.ip || `${snapshot.serverConfig.ispMaxDownMbps} / ${snapshot.serverConfig.ispMaxUpMbps} Mbps`,
+        rxBps: snapshot.kpis.rxBps,
+        txBps: snapshot.kpis.txBps,
+        wan: wanDetails,
+      };
+    }
+    if (selection.kind === 'router') {
+      return {
+        kind: 'router' as const,
+        title: routerLabel,
+        subtitle: `WAN ${formatLinkSpeed(wanSpeed, 'ethernet', snapshot.probe.connected)} · ${topology.routerPorts.length || 4} physical ports`,
+        rxBps: snapshot.kpis.rxBps,
+        txBps: snapshot.kpis.txBps,
+        ports: topology.routerPorts,
+      };
+    }
+    if (selection.kind === 'satellite') {
+      const sat = satellites.find((s) => s.id === selection.satId);
+      if (!sat) return null;
+      const satClients = stabilizedClients.filter((c) => c.apKey === `sat:${sat.id}`);
+      const childRx = satClients.reduce((acc, c) => acc + c.host.rxBps, 0);
+      const childTx = satClients.reduce((acc, c) => acc + c.host.txBps, 0);
+      return {
+        kind: 'satellite' as const,
+        title: sat.name,
+        subtitle: sat.host,
+        rxBps: sat.rxBps > 0 ? sat.rxBps : childRx,
+        txBps: sat.txBps > 0 ? sat.txBps : childTx,
+        sat,
+      };
+    }
+    const client = stabilizedClients.find((c) => c.host.ip === selection.ip);
+    if (!client) return null;
+    return {
+      kind: 'client' as const,
+      title: client.host.hostname,
+      subtitle: `${client.host.ip}${client.host.mac && client.host.mac !== '00:00:00:00:00:00' ? ` · ${client.host.mac}` : ''}`,
+      rxBps: client.host.rxBps,
+      txBps: client.host.txBps,
+      client,
+    };
+  }, [
+    selection,
+    ispLabel,
+    wanDetails,
+    snapshot.serverConfig.ispMaxDownMbps,
+    snapshot.serverConfig.ispMaxUpMbps,
+    snapshot.kpis.rxBps,
+    snapshot.kpis.txBps,
+    snapshot.probe.connected,
+    routerLabel,
+    wanSpeed,
+    topology.routerPorts,
+    satellites,
+    stabilizedClients,
+  ]);
 
-  const handleMouseUp = () => setDragging(false);
+  const apColumns = useMemo(() => {
+    const routerClients = filteredClientsByAp.get('router') || [];
+    const routerCounts = totalCountsByAp.get('router') || { total: 0, active: 0 };
+    const routerChildRx = routerClients.reduce((acc, c) => acc + c.host.rxBps, 0);
+    const routerChildTx = routerClients.reduce((acc, c) => acc + c.host.txBps, 0);
 
-  const satCount = snapshot.topology?.satellites?.length || 0;
-  const activeClientCount = graph.nodes.filter((n) => n.kind === 'client' && n.active).length;
+    const cols: Array<{
+      key: string;
+      kind: 'router' | 'satellite';
+      name: string;
+      subtitle: string;
+      connected: boolean;
+      backhaulLabel?: string;
+      backhaulType?: 'ethernet' | 'wifi';
+      backhaulSignalDbm?: number;
+      rxBps: number;
+      txBps: number;
+      ports?: EthernetPortMetrics[];
+      clients: MapClientEntry[];
+      totalCount: number;
+      activeCount: number;
+      sat?: SatelliteTelemetry;
+    }> = [
+      {
+        key: 'router',
+        kind: 'router',
+        name: `${routerLabel} (Main AP)`,
+        subtitle: 'Direct Wi-Fi & Wired LAN',
+        connected: snapshot.probe.connected,
+        rxBps: routerChildRx,
+        txBps: routerChildTx,
+        clients: routerClients,
+        totalCount: routerCounts.total,
+        activeCount: routerCounts.active,
+      },
+    ];
+
+    for (const sat of satellites) {
+      const key = `sat:${sat.id}`;
+      const clients = filteredClientsByAp.get(key) || [];
+      const counts = totalCountsByAp.get(key) || { total: 0, active: 0 };
+      const childRx = clients.reduce((acc, c) => acc + c.host.rxBps, 0);
+      const childTx = clients.reduce((acc, c) => acc + c.host.txBps, 0);
+      cols.push({
+        key,
+        kind: 'satellite',
+        name: sat.name,
+        subtitle: sat.host,
+        connected: sat.connected,
+        backhaulLabel: formatLinkSpeed(sat.backhaulSpeedMbps, sat.backhaulType, sat.connected),
+        backhaulType: sat.backhaulType,
+        backhaulSignalDbm: sat.backhaulSignalDbm,
+        rxBps: sat.rxBps > 0 ? sat.rxBps : childRx,
+        txBps: sat.txBps > 0 ? sat.txBps : childTx,
+        ports: sat.ports,
+        clients,
+        totalCount: counts.total,
+        activeCount: counts.active,
+        sat,
+      });
+    }
+
+    return cols;
+  }, [
+    filteredClientsByAp,
+    totalCountsByAp,
+    routerLabel,
+    snapshot.probe.connected,
+    satellites,
+  ]);
+
+  const gridColsClass =
+    apColumns.length <= 1
+      ? 'grid-cols-1 max-w-2xl mx-auto'
+      : apColumns.length === 2
+        ? 'grid-cols-1 lg:grid-cols-2'
+        : 'grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3';
 
   return (
-    <div className="space-y-4">
-      <section
-        ref={containerRef}
-        data-testid="traffic-map-viewport"
-        onWheel={handleWheel}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        className={`relative w-full min-h-[600px] h-[calc(100vh-10.5rem)] rounded-2xl border app-border overflow-clip select-none ${
-          dragging ? 'cursor-grabbing' : 'cursor-grab'
-        }`}
-        style={{
-          backgroundColor: theme.isDark ? 'var(--bg-surface)' : '#ffffff',
-          backgroundImage: theme.isDark
-            ? 'radial-gradient(rgba(148, 163, 184, 0.14) 1px, transparent 1px)'
-            : 'radial-gradient(rgba(148, 163, 184, 0.22) 1px, transparent 1px)',
-          backgroundSize: '24px 24px',
-        }}
-      >
-        {/* Top-Left Floating UniFi-Style Control Bar */}
-        <div
-          ref={displayMenuRef}
-          className="absolute top-4 left-4 z-20 flex items-center gap-2"
-        >
-          <div className="flex items-center app-topbar border rounded-xl p-1 shadow-sm">
+    <div className="space-y-4" data-testid="traffic-map-viewport">
+      {/* Top Controls Toolbar */}
+      <div className="app-surface border rounded-2xl p-3.5 flex flex-wrap items-center gap-2.5">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search
+            className="h-4 w-4 app-text-muted absolute left-3 top-1/2 -translate-y-1/2"
+            aria-hidden="true"
+          />
+          <input
+            type="text"
+            data-testid="map-search-input"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Find device, IP, VLAN, service, or satellite..."
+            aria-label="Filter network map"
+            className="w-full app-input border rounded-xl pl-9 pr-8 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+          />
+          {searchQuery && (
             <button
               type="button"
-              data-testid="map-display-options-btn"
-              onClick={() => setDisplayMenuOpen((v) => !v)}
-              aria-expanded={displayMenuOpen}
-              aria-label="Traffic map display options"
-              title="Display options"
-              className={`inline-flex items-center justify-center h-8 w-8 rounded-lg transition-colors ${
-                displayMenuOpen ? 'bg-sky-500/15 text-sky-500' : 'app-text-secondary app-row-hover'
-              }`}
+              onClick={() => setSearchQuery('')}
+              aria-label="Clear search"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 app-text-muted hover:opacity-80"
             >
-              <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
-            <button
-              type="button"
-              data-testid="map-animate-toggle-btn"
-              onClick={() => setAnimateFlow((v) => !v)}
-              aria-label={animateFlow ? 'Pause flow particles' : 'Play flow particles'}
-              title={animateFlow ? 'Pause flow animation' : 'Play flow animation'}
-              className={`inline-flex items-center justify-center h-8 w-8 rounded-lg transition-colors ${
-                animateFlow ? 'text-sky-500 app-row-hover' : 'app-text-muted app-row-hover'
-              }`}
-            >
-              {animateFlow ? (
-                <Pause className="h-4 w-4" aria-hidden="true" />
-              ) : (
-                <Play className="h-4 w-4" aria-hidden="true" />
-              )}
-            </button>
-          </div>
+          )}
+        </div>
 
+        {/* Connection Filter Segmented Control */}
+        <div
+          className="inline-flex items-center p-0.5 rounded-xl border app-border app-input text-xs"
+          role="group"
+          aria-label="Filter by connection type"
+        >
+          {(
+            [
+              { id: 'all', label: 'All' },
+              { id: 'active', label: `Active (${totalActiveCount})` },
+              { id: 'wifi', label: 'Wi-Fi' },
+              { id: 'ethernet', label: 'Ethernet' },
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setConnFilter(item.id)}
+              className={`px-2.5 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                connFilter === item.id
+                  ? 'app-surface shadow-xs text-sky-500'
+                  : 'app-text-muted hover:opacity-90'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        {/* VLAN Filter (shown whenever secondary VLANs/subnets exist) */}
+        {vlanOptions.length > 0 && (
+          <select
+            aria-label="Filter by VLAN"
+            data-testid="map-vlan-select"
+            value={vlanFilter}
+            onChange={(e) => setVlanFilter(e.target.value)}
+            className="app-input border rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+          >
+            <option value="ALL">All Subnets</option>
+            <option value="PRIMARY">Primary LAN</option>
+            {vlanOptions.map((v) => (
+              <option key={v.cidr} value={v.cidr}>
+                {v.label} ({v.cidr})
+              </option>
+            ))}
+          </select>
+        )}
+
+        {/* Deterministic Sort Selector */}
+        <select
+          aria-label="Sort devices in map"
+          data-testid="map-sort-select"
+          value={sortMode}
+          onChange={(e) => setSortMode(e.target.value as ClientSortMode)}
+          className="app-input border rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+        >
+          <option value="name">Sort: Name (A–Z)</option>
+          <option value="ip">Sort: IP Address</option>
+          <option value="traffic">Sort: Live Traffic</option>
+        </select>
+
+        <button
+          type="button"
+          onClick={toggleCollapseAll}
+          className="px-2.5 py-1.5 rounded-xl border app-border app-input app-row-hover text-xs font-medium app-text-secondary whitespace-nowrap transition-colors"
+        >
+          {allCollapsed ? 'Expand All' : 'Collapse All'}
+        </button>
+
+        <button
+          type="button"
+          data-testid="manage-satellites-btn"
+          onClick={() => setSatelliteModalOpen(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border app-border app-input app-row-hover text-xs font-medium app-text-secondary whitespace-nowrap transition-colors"
+        >
+          <Radio className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+          <span>Satellites ({satellites.length})</span>
+        </button>
+      </div>
+
+      {/* Native-Scale Top-to-Bottom Network Hierarchy */}
+      <div className="space-y-0">
+        {/* TIER 1: Internet Gateway */}
+        <div className="flex justify-center">
           <button
             type="button"
-            data-testid="manage-satellites-btn"
-            onClick={() => setSatelliteModalOpen(true)}
-            className="inline-flex items-center gap-1.5 h-10 px-3 rounded-xl app-topbar border text-xs font-medium app-text-secondary app-row-hover shadow-sm transition-colors whitespace-nowrap"
+            data-testid="map-node-internet"
+            onClick={() =>
+              setSelection((cur) => (cur?.kind === 'internet' ? null : { kind: 'internet' }))
+            }
+            className={`w-full max-w-md text-left rounded-2xl border p-4 transition-all ${
+              selection?.kind === 'internet'
+                ? 'app-surface border-sky-500 ring-2 ring-sky-500/20'
+                : 'app-surface app-border hover:border-sky-500/50'
+            }`}
           >
-            <Radio className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-            <span>Satellites ({satCount})</span>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="h-10 w-10 rounded-xl bg-sky-500/12 border border-sky-500/25 flex items-center justify-center shrink-0">
+                  <Globe className="h-5 w-5 text-sky-500" aria-hidden="true" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-display text-sm font-semibold truncate">{ispLabel}</span>
+                    <span
+                      className={`h-2 w-2 rounded-full shrink-0 ${
+                        snapshot.probe.connected ? 'bg-emerald-500' : 'bg-amber-500'
+                      }`}
+                      aria-hidden="true"
+                    />
+                  </div>
+                  <div className="text-[11px] font-mono app-text-muted tabular-nums truncate">
+                    {wanDetails?.ip
+                      ? `${wanDetails.ip} · ${formatLinkSpeed(wanSpeed, 'ethernet', snapshot.probe.connected)}`
+                      : `Plan ${snapshot.serverConfig.ispMaxDownMbps} / ${snapshot.serverConfig.ispMaxUpMbps} Mbps`}
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-right font-mono text-xs tabular-nums shrink-0">
+                <div style={{ color: theme.rxColor }} className="font-semibold">
+                  ↓ {formatBandwidth(snapshot.kpis.rxBps, unit)}
+                </div>
+                <div style={{ color: theme.txColor }} className="font-semibold">
+                  ↑ {formatBandwidth(snapshot.kpis.txBps, unit)}
+                </div>
+              </div>
+            </div>
           </button>
+        </div>
 
-          {displayMenuOpen && (
+        {/* Vertical WAN Trunk Connector */}
+        <div className="flex justify-center py-0.5" aria-hidden="true">
+          <div className="relative flex flex-col items-center h-9">
             <div
-              data-testid="map-display-popover"
-              className="absolute top-12 left-0 w-64 p-3.5 rounded-2xl border app-border app-surface shadow-xl space-y-3"
-            >
-              <div className="relative">
-                <Search
-                  className="h-3.5 w-3.5 app-text-muted absolute left-2.5 top-1/2 -translate-y-1/2"
-                  aria-hidden="true"
-                />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Find device or satellite..."
-                  aria-label="Filter traffic map devices"
-                  className="w-full app-input border rounded-lg pl-8 pr-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
-                />
+              className={`w-0.5 h-full ${
+                wanActive ? 'bg-sky-500/60' : 'bg-slate-400/35'
+              }`}
+            />
+            {wanActive && !paused && (
+              <span className="absolute top-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-sky-400 animate-ping" />
+            )}
+            <span className="absolute top-1/2 -translate-y-1/2 px-2 py-0.5 rounded-md text-[10px] font-mono app-surface border app-border app-text-muted whitespace-nowrap">
+              WAN · {formatLinkSpeed(wanSpeed, 'ethernet', snapshot.probe.connected)}
+            </span>
+          </div>
+        </div>
+
+        {/* TIER 2: Main Orbi Router + 4 Physical Ports (1 WAN + 3 LAN) */}
+        <div className="flex justify-center">
+          <div
+            data-testid="map-node-router"
+            role="button"
+            tabIndex={0}
+            onClick={() =>
+              setSelection((cur) => (cur?.kind === 'router' ? null : { kind: 'router' }))
+            }
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                setSelection((cur) => (cur?.kind === 'router' ? null : { kind: 'router' }));
+              }
+            }}
+            className={`w-full max-w-2xl rounded-2xl border p-4 cursor-pointer transition-all space-y-3 ${
+              selection?.kind === 'router'
+                ? 'app-surface border-sky-500 ring-2 ring-sky-500/20'
+                : 'app-surface app-border hover:border-sky-500/50'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="h-10 w-10 rounded-xl bg-indigo-500/12 border border-indigo-500/25 flex items-center justify-center shrink-0">
+                  <Router className="h-5 w-5 text-indigo-400" aria-hidden="true" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-display text-sm font-semibold truncate">
+                      {routerLabel}
+                    </span>
+                    <span className="text-[11px] app-text-muted">Main Router</span>
+                  </div>
+                  <div className="text-[11px] font-mono app-text-muted tabular-nums flex flex-wrap items-center gap-x-2">
+                    <span>{totalVisibleClients} shown</span>
+                    <span>·</span>
+                    <span>{satellites.length} satellite{satellites.length === 1 ? '' : 's'}</span>
+                    {snapshot.probe.uptimeSec > 0 && (
+                      <>
+                        <span>·</span>
+                        <span>Up {formatDuration(snapshot.probe.uptimeSec)}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
               </div>
 
-              <div className="space-y-2 text-xs">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={showPortSpeeds}
-                    onChange={(e) => setShowPortSpeeds(e.target.checked)}
-                    className="rounded text-sky-500 focus:ring-sky-500"
-                  />
-                  <span>Show Ethernet &amp; Wi-Fi link rates</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={showIdleClients}
-                    onChange={(e) => setShowIdleClients(e.target.checked)}
-                    className="rounded text-sky-500 focus:ring-sky-500"
-                  />
-                  <span>Show idle devices</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={animateFlow}
-                    onChange={(e) => setAnimateFlow(e.target.checked)}
-                    className="rounded text-sky-500 focus:ring-sky-500"
-                  />
-                  <span>Animate live traffic streams</span>
-                </label>
+              <div className="text-right font-mono text-xs tabular-nums shrink-0">
+                <div style={{ color: theme.rxColor }} className="font-semibold">
+                  ↓ {formatBandwidth(snapshot.kpis.rxBps, unit)}
+                </div>
+                <div style={{ color: theme.txColor }} className="font-semibold">
+                  ↑ {formatBandwidth(snapshot.kpis.txBps, unit)}
+                </div>
               </div>
+            </div>
+
+            {/* 4 Physical Ethernet Ports on Orbi Router: 1 WAN + 3 LAN */}
+            <PortStrip ports={topology.routerPorts} expectedCount={4} isRouter />
+          </div>
+        </div>
+
+        {/* Distribution Stem from Main Router to Tier 3 Access Points / Satellites */}
+        <div className="flex flex-col items-center pt-0.5 pb-2" aria-hidden="true">
+          <div className="w-0.5 h-5 bg-slate-400/35" />
+          {apColumns.length > 1 && (
+            <div className="w-[70%] max-w-4xl border-t-2 border-slate-400/30 h-3 relative">
+              <span className="absolute left-0 top-0 w-0.5 h-3 bg-slate-400/35" />
+              <span className="absolute right-0 top-0 w-0.5 h-3 bg-slate-400/35" />
+              {apColumns.length >= 3 && (
+                <span className="absolute left-1/2 -translate-x-1/2 top-0 w-0.5 h-3 bg-slate-400/35" />
+              )}
             </div>
           )}
         </div>
 
-        {/* Bottom-Right Compact Legend (keeps top canvas uncluttered) */}
-        <div className="absolute bottom-4 right-4 z-10 hidden md:flex items-center gap-3 px-3.5 py-2 rounded-xl app-topbar border text-[11px] font-mono tabular-nums shadow-sm">
-          <span className="text-sky-500 font-medium">↓ Download</span>
-          <span aria-hidden="true" className="app-text-muted">
-            ·
-          </span>
-          <span className="text-violet-500 font-medium">↑ Upload</span>
-          <span aria-hidden="true" className="app-text-muted">
-            ·
-          </span>
-          <span className="app-text-muted">
-            {satCount} satellites · {activeClientCount} active
-          </span>
-        </div>
+        {/* TIER 3: Main AP + Satellites Columns with Scrollable, Rock-Steady Device Rosters */}
+        <div className={`grid gap-4 items-start ${gridColsClass}`}>
+          {apColumns.map((col) => {
+            const isCollapsed = collapsedNodes.has(col.key);
+            const isSelected =
+              (col.kind === 'router' && selection?.kind === 'router') ||
+              (col.kind === 'satellite' &&
+                selection?.kind === 'satellite' &&
+                selection.satId === col.sat?.id);
+            const maxClientRate = col.clients.reduce(
+              (mx, c) => Math.max(mx, c.host.rxBps + c.host.txBps),
+              1
+            );
 
-        {/* Bottom-Left Floating Zoom & Fit Controls (matching UniFi layout) */}
-        <div className="absolute bottom-4 left-4 z-20 flex flex-col app-topbar border rounded-xl p-1 shadow-sm">
-          <button
-            type="button"
-            data-testid="map-fit-btn"
-            onClick={fitToView}
-            aria-label="Center and fit traffic map"
-            title="Fit to screen"
-            className="inline-flex items-center justify-center h-8 w-8 rounded-lg app-text-secondary app-row-hover transition-colors"
-          >
-            <Crosshair className="h-4 w-4" aria-hidden="true" />
-          </button>
-          <div className="h-px app-border bg-current opacity-15 my-0.5" />
-          <button
-            type="button"
-            data-testid="map-zoom-in-btn"
-            onClick={() => setZoom((z) => Number(Math.min(2, z * 1.15).toFixed(3)))}
-            aria-label="Zoom in"
-            title="Zoom in"
-            className="inline-flex items-center justify-center h-8 w-8 rounded-lg app-text-secondary app-row-hover transition-colors"
-          >
-            <Plus className="h-4 w-4" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            data-testid="map-zoom-out-btn"
-            onClick={() => setZoom((z) => Number(Math.max(0.45, z * 0.87).toFixed(3)))}
-            aria-label="Zoom out"
-            title="Zoom out"
-            className="inline-flex items-center justify-center h-8 w-8 rounded-lg app-text-secondary app-row-hover transition-colors"
-          >
-            <Minus className="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-
-        {/* Transformed World Layer: SVG Curves + Canvas Particles + Interactive Nodes */}
-        <div
-          className="origin-top-left will-change-transform"
-          style={{
-            width: `${graph.width}px`,
-            height: `${graph.height}px`,
-            transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
-          }}
-        >
-          {/* Layer 1: Base Bézier Links & Port Negotiation Rate Labels */}
-          <svg
-            width={graph.width}
-            height={graph.height}
-            className="absolute inset-0 pointer-events-none overflow-visible"
-            aria-hidden="true"
-          >
-            {/* Vertical stem connectors from parent hardware card down to its blue collapse junction */}
-            {graph.junctions.map((j) => {
-              const parent = graph.nodes.find((n) => n.id === j.parentId);
-              if (!parent) return null;
-              const startY = parent.y + (parent.kind === 'router' ? 54 : 60);
-              return (
-                <line
-                  key={`stem-${j.parentId}`}
-                  x1={j.x}
-                  y1={startY}
-                  x2={j.x}
-                  y2={j.y}
-                  stroke={
-                    parent.active
-                      ? theme.isDark
-                        ? 'rgba(56, 189, 248, 0.42)'
-                        : 'rgba(56, 189, 248, 0.40)'
-                      : theme.isDark
-                        ? 'rgba(148, 163, 184, 0.28)'
-                        : 'rgba(148, 163, 184, 0.36)'
-                  }
-                  strokeWidth={parent.active ? 2.5 : 1.5}
-                />
-              );
-            })}
-
-            {graph.edges.map((edge) => {
-              const pathD = buildEdgePath(edge);
-              const mid = cubicBezierPoint(edge.x1, edge.y1, edge.x2, edge.y2, 0.5);
-              const wiredClient = isWiredClientEdge(edge);
-              const isSolid = edge.active || wiredClient;
-              return (
-                <g key={edge.id}>
-                  <path
-                    d={pathD}
-                    fill="none"
-                    stroke={
-                      isSolid
-                        ? theme.isDark
-                          ? 'rgba(56, 189, 248, 0.30)'
-                          : 'rgba(56, 189, 248, 0.28)'
-                        : theme.isDark
-                          ? 'rgba(148, 163, 184, 0.22)'
-                          : 'rgba(148, 163, 184, 0.34)'
-                    }
-                    strokeWidth={isSolid ? 2 : 1.5}
-                    strokeDasharray={isSolid ? undefined : '4 5'}
-                  />
-
-                  {showPortSpeeds && edge.linkSpeedLabel && (() => {
-                    const isClientEdge = edge.targetId.startsWith('client:');
-                    const displayLabel = isClientEdge
-                      ? edge.connectionType === 'wifi'
-                        ? edge.portLabel && edge.portLabel !== 'Wi-Fi'
-                          ? edge.portLabel
-                          : 'Wi-Fi'
-                        : 'Ethernet'
-                      : edge.linkSpeedLabel;
-                    const labelWidth = Math.max(42, displayLabel.length * 6.4 + 12);
-                    return (
-                      <g transform={`translate(${mid.x}, ${mid.y})`}>
-                        <rect
-                          x={-labelWidth / 2}
-                          y={-8}
-                          width={labelWidth}
-                          height={16}
-                          rx={5}
-                          fill={theme.isDark ? 'rgba(15, 23, 42, 0.90)' : 'rgba(255, 255, 255, 0.94)'}
-                          stroke={theme.isDark ? 'rgba(148, 163, 184, 0.24)' : 'rgba(148, 163, 184, 0.30)'}
-                          strokeWidth="0.75"
-                        />
-                        <text
-                          textAnchor="middle"
-                          y={3.5}
-                          className="font-mono"
-                          fontSize="10"
-                          fontWeight={edge.active ? '600' : '500'}
-                          fill={
-                            edge.active
-                              ? theme.isDark
-                                ? '#e2e8f0'
-                                : '#334155'
-                              : theme.isDark
-                                ? '#64748b'
-                                : '#94a3b8'
-                          }
-                        >
-                          {displayLabel}
-                        </text>
-                      </g>
-                    );
-                  })()}
-                </g>
-              );
-            })}
-          </svg>
-
-          {/* Layer 2: Animated UniFi Flowing Particle Streams */}
-          <canvas
-            ref={canvasRef}
-            data-testid="traffic-map-canvas"
-            style={{ width: `${graph.width}px`, height: `${graph.height}px` }}
-            className="absolute inset-0 pointer-events-none"
-          />
-
-          {/* Layer 3A: Blue Circular Collapse/Expand Branch Junctions (rendered above nodes) */}
-          {graph.junctions.map((j) => (
-            <button
-              key={`junc-${j.parentId}`}
-              type="button"
-              data-testid={`junction-${j.parentId}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleCollapse(j.parentId);
-              }}
-              aria-label={
-                j.collapsed
-                  ? `Expand ${j.hiddenCount} downstream devices`
-                  : `Collapse ${j.hiddenCount} downstream devices`
-              }
-              title={
-                j.collapsed
-                  ? `Expand ${j.hiddenCount} devices`
-                  : `Collapse ${j.hiddenCount} devices`
-              }
-              style={{
-                left: `${j.x}px`,
-                top: `${j.y}px`,
-              }}
-              className="absolute -translate-x-1/2 -translate-y-1/2 z-30 h-5 w-5 rounded-full bg-blue-600 hover:bg-blue-500 text-white shadow-sm ring-2 ring-white/80 dark:ring-slate-900/80 flex items-center justify-center transition-transform hover:scale-110"
-            >
-              {j.collapsed ? (
-                <Plus className="h-3 w-3 stroke-[2.5]" aria-hidden="true" />
-              ) : (
-                <Minus className="h-3 w-3 stroke-[2.5]" aria-hidden="true" />
-              )}
-            </button>
-          ))}
-
-          {/* Layer 3B: Crisp Accessible Hardware / Device Nodes (icon center anchored to node.y) */}
-          {graph.nodes.map((node) => {
-            const isSelected = selectedNodeId === node.id;
-            const showRates = node.kind !== 'internet';
             return (
-              <button
-                key={node.id}
-                type="button"
-                data-testid={`map-node-${node.id}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSelectedNodeId((cur) => (cur === node.id ? null : node.id));
-                }}
-                style={{
-                  left: `${node.x}px`,
-                  top: `${node.y}px`,
-                  transform: 'translate(-50%, -30px)',
-                }}
-                className={`absolute z-20 flex flex-col items-center text-center px-2 py-1.5 rounded-2xl transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 ${
+              <section
+                key={col.key}
+                data-testid={col.kind === 'satellite' ? `map-node-sat:${col.sat?.id}` : 'map-ap-router'}
+                className={`rounded-2xl border overflow-hidden transition-colors ${
                   isSelected
-                    ? theme.isDark
-                      ? 'bg-sky-500/15 ring-1 ring-sky-400/60'
-                      : 'bg-sky-50 ring-1 ring-sky-400/70'
-                    : theme.isDark
-                      ? 'hover:bg-slate-800/65'
-                      : 'hover:bg-slate-100/80'
+                    ? 'app-surface border-sky-500 ring-2 ring-sky-500/20'
+                    : 'app-surface app-border'
                 }`}
               >
-                <div className="flex items-center justify-center">
-                  <HardwareGlyph
-                    icon={node.icon}
-                    isDark={theme.isDark}
-                    connected={node.connected}
-                  />
+                {/* AP / Satellite Column Header */}
+                <div className="p-3.5 border-b app-border space-y-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (col.kind === 'router') {
+                          setSelection((cur) =>
+                            cur?.kind === 'router' ? null : { kind: 'router' }
+                          );
+                        } else if (col.sat) {
+                          const satId = col.sat.id;
+                          setSelection((cur) =>
+                            cur?.kind === 'satellite' && cur.satId === satId
+                              ? null
+                              : { kind: 'satellite', satId }
+                          );
+                        }
+                      }}
+                      className="flex items-center gap-2.5 min-w-0 text-left flex-1 group"
+                    >
+                      <div
+                        className={`h-9 w-9 rounded-xl border flex items-center justify-center shrink-0 ${
+                          col.kind === 'satellite'
+                            ? 'bg-sky-500/12 border-sky-500/25 text-sky-500'
+                            : 'bg-indigo-500/12 border-indigo-500/25 text-indigo-400'
+                        }`}
+                      >
+                        {col.kind === 'satellite' ? (
+                          <Radio className="h-4 w-4" aria-hidden="true" />
+                        ) : (
+                          <Network className="h-4 w-4" aria-hidden="true" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <h3 className="font-display text-sm font-semibold truncate group-hover:text-sky-500 transition-colors">
+                            {col.name}
+                          </h3>
+                          <span
+                            className={`h-2 w-2 rounded-full shrink-0 ${
+                              col.connected ? 'bg-emerald-500' : 'bg-amber-500'
+                            }`}
+                            title={col.connected ? 'Online' : 'Offline'}
+                          />
+                        </div>
+                        <div className="text-[11px] app-text-muted flex flex-wrap items-center gap-x-1.5 font-mono tabular-nums">
+                          <span>{col.subtitle}</span>
+                          {col.backhaulLabel && (
+                            <>
+                              <span>·</span>
+                              <span className="inline-flex items-center gap-1">
+                                {col.backhaulType === 'wifi' ? (
+                                  <Wifi className="h-3 w-3 text-sky-500" aria-hidden="true" />
+                                ) : (
+                                  <Cable className="h-3 w-3 text-emerald-500" aria-hidden="true" />
+                                )}
+                                {col.backhaulLabel}
+                              </span>
+                            </>
+                          )}
+                          {col.backhaulSignalDbm !== undefined && (
+                            <span>({col.backhaulSignalDbm} dBm)</span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div className="text-right font-mono text-[11px] tabular-nums">
+                        <div style={{ color: theme.rxColor }}>
+                          ↓ {formatBandwidth(col.rxBps, unit)}
+                        </div>
+                        <div style={{ color: theme.txColor }}>
+                          ↑ {formatBandwidth(col.txBps, unit)}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => toggleNodeCollapse(col.key)}
+                        aria-expanded={!isCollapsed}
+                        aria-label={isCollapsed ? `Expand ${col.name}` : `Collapse ${col.name}`}
+                        className="p-1.5 rounded-lg border app-border app-row-hover app-text-muted"
+                      >
+                        {isCollapsed ? (
+                          <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Satellite 4 Physical LAN Ports Bar */}
+                  {col.kind === 'satellite' && (
+                    <PortStrip ports={col.ports || []} expectedCount={4} />
+                  )}
+
+                  {/* AP Roster Summary Bar */}
+                  <div className="flex items-center justify-between text-[11px] app-text-muted">
+                    <span className="tabular-nums">
+                      {col.clients.length === col.totalCount
+                        ? `${col.totalCount} device${col.totalCount === 1 ? '' : 's'}`
+                        : `${col.clients.length} of ${col.totalCount} devices`}
+                    </span>
+                    <span className="tabular-nums">
+                      {col.activeCount} active
+                    </span>
+                  </div>
                 </div>
 
-                <div
-                  className={`mt-1.5 text-xs font-semibold leading-tight max-w-[155px] truncate ${
-                    node.active || node.kind === 'internet' || node.kind === 'router'
-                      ? theme.isDark
-                        ? 'text-sky-400'
-                        : 'text-sky-700'
-                      : 'app-text-secondary'
-                  }`}
-                >
-                  {node.label}
-                </div>
+                {/* Scrollable, Deterministic Client Roster */}
+                {!isCollapsed && (
+                  <div className="max-h-[440px] overflow-y-auto divide-y app-border">
+                    {col.clients.length === 0 ? (
+                      <div className="py-8 px-4 text-center text-xs app-text-muted">
+                        {col.totalCount === 0
+                          ? 'No clients currently attached to this node.'
+                          : 'No clients match the active filters.'}
+                      </div>
+                    ) : (
+                      col.clients.map((entry) => {
+                        const { host } = entry;
+                        const isClientSelected =
+                          selection?.kind === 'client' && selection.ip === host.ip;
+                        const icon = inferTopologyDeviceIcon(host);
+                        const rateSum = host.rxBps + host.txBps;
+                        const barPct = entry.active
+                          ? Math.max(6, Math.min(100, Math.round((rateSum / maxClientRate) * 100)))
+                          : 0;
 
-                {showRates ? (
-                  <div
-                    className={`mt-0.5 flex items-center gap-1.5 font-mono text-[11px] tabular-nums whitespace-nowrap ${
-                      node.active ? '' : 'app-text-muted opacity-65'
-                    }`}
-                  >
-                    <span className={node.active ? 'text-sky-500' : ''}>
-                      ↓ {formatBandwidth(node.rxBps, unit)}
-                    </span>
-                    <span className={node.active ? 'text-violet-500' : ''}>
-                      ↑ {formatBandwidth(node.txBps, unit)}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="mt-0.5 text-[10px] font-mono app-text-muted tabular-nums whitespace-nowrap">
-                    {node.sublabel}
+                        return (
+                          <button
+                            key={host.ip}
+                            type="button"
+                            data-testid={`map-node-client:${host.ip}`}
+                            onClick={() =>
+                              setSelection((cur) =>
+                                cur?.kind === 'client' && cur.ip === host.ip
+                                  ? null
+                                  : { kind: 'client', ip: host.ip }
+                              )
+                            }
+                            className={`w-full text-left px-3.5 py-2.5 transition-colors relative ${
+                              isClientSelected
+                                ? 'bg-sky-500/12'
+                                : 'app-row-hover'
+                            } ${entry.stale ? 'opacity-65' : ''}`}
+                          >
+                            <div className="flex items-center justify-between gap-2.5">
+                              {/* Left: Device Icon + Name + IP + VLAN + Link */}
+                              <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                <div
+                                  className={`h-8 w-8 rounded-lg border flex items-center justify-center shrink-0 ${
+                                    entry.active
+                                      ? 'border-sky-500/35 bg-sky-500/10 text-sky-500'
+                                      : 'app-border app-input app-text-muted'
+                                  }`}
+                                >
+                                  <ClientDeviceIcon icon={icon} className="h-4 w-4" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span
+                                      className={`text-xs truncate ${
+                                        entry.active ? 'font-semibold' : 'font-medium app-text-secondary'
+                                      }`}
+                                      title={host.hostname}
+                                    >
+                                      {host.hostname}
+                                    </span>
+                                    {entry.stale && (
+                                      <span className="text-[10px] app-text-muted shrink-0">
+                                        Idle
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] app-text-muted">
+                                    <span className="font-mono tabular-nums">{host.ip}</span>
+                                    {host.vlanName && (
+                                      <span
+                                        title={host.vlanCidr}
+                                        className="px-1.5 py-0 rounded bg-violet-500/15 text-violet-400 text-[10px] font-medium leading-4"
+                                      >
+                                        {host.vlanName}
+                                      </span>
+                                    )}
+                                    <span aria-hidden="true">·</span>
+                                    {entry.connectionType === 'wifi' ? (
+                                      <span className="inline-flex items-center gap-1">
+                                        <Wifi className="h-3 w-3 text-sky-500 shrink-0" aria-hidden="true" />
+                                        <span>{entry.wifiBand || 'Wi-Fi'}</span>
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1">
+                                        <Cable className="h-3 w-3 text-emerald-500 shrink-0" aria-hidden="true" />
+                                        <span>Ethernet</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Right: Live Rx / Tx */}
+                              <div className="text-right font-mono text-[11px] tabular-nums shrink-0">
+                                <div
+                                  style={entry.active ? { color: theme.rxColor } : undefined}
+                                  className={entry.active ? 'font-medium' : 'app-text-muted'}
+                                >
+                                  ↓ {formatBandwidth(host.rxBps, unit)}
+                                </div>
+                                <div
+                                  style={entry.active ? { color: theme.txColor } : undefined}
+                                  className={entry.active ? 'font-medium' : 'app-text-muted'}
+                                >
+                                  ↑ {formatBandwidth(host.txBps, unit)}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Subtle live throughput micro-bar */}
+                            {barPct > 0 && (
+                              <div className="mt-1.5 h-0.5 w-full rounded-full bg-slate-500/15 overflow-hidden">
+                                <div
+                                  className="h-full rounded-full bg-sky-500/70 transition-all duration-500"
+                                  style={{ width: `${barPct}%` }}
+                                />
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
                 )}
-
-                {showPortSpeeds && node.kind !== 'internet' && node.linkSpeedLabel && (
-                  <div className="mt-0.5 text-[10px] font-mono app-text-muted whitespace-nowrap">
-                    {node.kind === 'client'
-                      ? node.connectionType === 'wifi'
-                        ? node.linkSpeedLabel
-                        : 'Ethernet'
-                      : `${node.portLabel ? `${node.portLabel} · ` : ''}${node.linkSpeedLabel}`}
-                  </div>
-                )}
-              </button>
+              </section>
             );
           })}
         </div>
+      </div>
 
-        {/* Slide-Over Node Inspector Panel (Router / Satellite Ethernet Ports & Client Details) */}
-        {selectedNode && (
-          <aside
-            data-testid="map-node-inspector"
-            aria-label={`Details for ${selectedNode.label}`}
-            className="absolute top-4 right-4 bottom-4 z-40 w-[376px] max-w-[calc(100%-2rem)] rounded-2xl border app-border app-surface shadow-2xl flex flex-col overflow-hidden"
-          >
-            <div className="px-4 py-3.5 border-b app-border flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-[11px] font-medium app-text-muted capitalize">
-                  {selectedNode.kind === 'router'
-                    ? 'Main Router'
-                    : selectedNode.kind === 'satellite'
-                      ? 'Orbi Satellite'
-                      : selectedNode.kind === 'internet'
-                        ? 'Internet Uplink'
-                        : 'Connected Device'}
+      {/* Fixed Slide-Over Inspector Drawer */}
+      {inspectorData && (
+        <aside
+          data-testid="map-node-inspector"
+          aria-label={`Details for ${inspectorData.title}`}
+          className="fixed top-20 right-4 bottom-4 z-40 w-[380px] max-w-[calc(100vw-2rem)] rounded-2xl border app-border app-surface shadow-2xl flex flex-col overflow-hidden"
+        >
+          <div className="px-4 py-3.5 border-b app-border flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-[11px] font-medium app-text-muted">
+                {inspectorData.kind === 'router'
+                  ? 'Main Router'
+                  : inspectorData.kind === 'satellite'
+                    ? 'Orbi Satellite'
+                    : inspectorData.kind === 'internet'
+                      ? 'Internet Uplink'
+                      : 'Connected Device'}
+              </div>
+              <h3 className="font-display text-sm font-semibold truncate mt-0.5">
+                {inspectorData.title}
+              </h3>
+              {inspectorData.subtitle && (
+                <div className="text-[11px] font-mono app-text-muted tabular-nums mt-0.5 truncate">
+                  {inspectorData.subtitle}
                 </div>
-                <h3 className="font-display text-sm font-semibold truncate mt-0.5">
-                  {selectedNode.label}
-                </h3>
-                {selectedNode.ip && (
-                  <div className="text-[11px] font-mono app-text-muted tabular-nums mt-0.5">
-                    {selectedNode.ip}
-                    {selectedNode.mac ? ` · ${selectedNode.mac}` : ''}
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelection(null)}
+              aria-label="Close node inspector"
+              className="p-1.5 rounded-lg app-text-muted app-row-hover"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            {/* Live Rx / Tx Summary */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="p-3 rounded-xl border app-border app-input">
+                <div className="text-[11px] app-text-muted">Download (Rx)</div>
+                <div
+                  className="mt-1 font-mono text-sm font-semibold tabular-nums"
+                  style={{ color: theme.rxColor }}
+                >
+                  ↓ {formatBandwidth(inspectorData.rxBps, unit)}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl border app-border app-input">
+                <div className="text-[11px] app-text-muted">Upload (Tx)</div>
+                <div
+                  className="mt-1 font-mono text-sm font-semibold tabular-nums"
+                  style={{ color: theme.txColor }}
+                >
+                  ↑ {formatBandwidth(inspectorData.txBps, unit)}
+                </div>
+              </div>
+            </div>
+
+            {/* Internet WAN Details */}
+            {inspectorData.kind === 'internet' && (
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold flex items-center gap-1.5">
+                  <Globe className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                  <span>WAN Interface Details</span>
+                </h4>
+                {inspectorData.wan ? (
+                  <div className="p-3 rounded-xl border app-border app-input space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="app-text-muted">Public IP</span>
+                      <span className="font-mono app-text-secondary tabular-nums">
+                        {inspectorData.wan.ip || 'Unavailable'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="app-text-muted">Default Gateway</span>
+                      <span className="font-mono app-text-secondary tabular-nums">
+                        {inspectorData.wan.gateway || 'Unavailable'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="app-text-muted">DNS Servers</span>
+                      <span className="font-mono app-text-secondary tabular-nums text-right truncate max-w-[200px]">
+                        {inspectorData.wan.dns.length > 0
+                          ? inspectorData.wan.dns.join(', ')
+                          : 'Unavailable'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="app-text-muted">Interface</span>
+                      <span className="font-mono app-text-secondary">
+                        {inspectorData.wan.iface}
+                        {inspectorData.wan.state ? ` (${inspectorData.wan.state})` : ''}
+                      </span>
+                    </div>
+                    {inspectorData.wan.linkSpeedMbps > 0 && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="app-text-muted">Link Rate</span>
+                        <span className="font-mono app-text-secondary tabular-nums">
+                          {formatLinkSpeed(
+                            inspectorData.wan.linkSpeedMbps,
+                            'ethernet',
+                            inspectorData.wan.state !== 'down'
+                          )}
+                          {inspectorData.wan.duplex && inspectorData.wan.duplex !== 'unknown'
+                            ? ` ${inspectorData.wan.duplex === 'full' ? 'FDX' : 'HDX'}`
+                            : ''}
+                        </span>
+                      </div>
+                    )}
+                    {inspectorData.wan.mtu && inspectorData.wan.mtu > 0 && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="app-text-muted">MTU</span>
+                        <span className="font-mono app-text-secondary tabular-nums">
+                          {inspectorData.wan.mtu}
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-2 pt-1.5 border-t app-border">
+                      <span className="app-text-muted">Configured Plan</span>
+                      <span className="font-mono app-text-secondary tabular-nums">
+                        {snapshot.serverConfig.ispMaxDownMbps} /{' '}
+                        {snapshot.serverConfig.ispMaxUpMbps} Mbps
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-xl border app-border app-input space-y-2 text-xs">
+                    <p className="app-text-muted">
+                      WAN interface details have not been reported by the router agent yet.
+                    </p>
+                    <div className="flex items-center justify-between gap-2 pt-1.5 border-t app-border">
+                      <span className="app-text-muted">Configured Plan</span>
+                      <span className="font-mono app-text-secondary tabular-nums">
+                        {snapshot.serverConfig.ispMaxDownMbps} /{' '}
+                        {snapshot.serverConfig.ispMaxUpMbps} Mbps
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={() => setSelectedNodeId(null)}
-                aria-label="Close node inspector"
-                className="p-1.5 rounded-lg app-text-muted app-row-hover"
-              >
-                <X className="h-4 w-4" aria-hidden="true" />
-              </button>
-            </div>
+            )}
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {/* Live Rx / Tx Summary */}
-              <div className="grid grid-cols-2 gap-2.5">
-                <div className="p-3 rounded-xl border app-border app-input">
-                  <div className="text-[11px] app-text-muted">Download (Rx)</div>
-                  <div className="mt-1 font-mono text-sm font-semibold tabular-nums text-sky-500">
-                    ↓ {formatBandwidth(selectedNode.rxBps, unit)}
-                  </div>
-                </div>
-                <div className="p-3 rounded-xl border app-border app-input">
-                  <div className="text-[11px] app-text-muted">Upload (Tx)</div>
-                  <div className="mt-1 font-mono text-sm font-semibold tabular-nums text-violet-500">
-                    ↑ {formatBandwidth(selectedNode.txBps, unit)}
-                  </div>
-                </div>
-              </div>
-
-              {/* Link Metadata */}
-              {selectedNode.linkSpeedLabel && (
-                <div className="p-3 rounded-xl border app-border app-input space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-1.5 app-text-muted">
-                      {selectedNode.connectionType === 'wifi' ? (
-                        <Wifi className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-                      ) : (
-                        <Cable className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-                      )}
-                      <span>
-                        {selectedNode.kind === 'satellite'
-                          ? selectedNode.connectionType === 'wifi'
-                            ? 'Wi-Fi Backhaul'
-                            : 'Ethernet Backhaul'
-                          : selectedNode.kind === 'router'
-                            ? 'WAN Negotiation'
-                            : selectedNode.kind === 'internet'
-                              ? 'WAN Link'
-                              : selectedNode.connectionType === 'wifi'
-                                ? 'Wi-Fi RX / TX'
-                                : 'Connection'}
+            {/* Router Details + 4 Ports */}
+            {inspectorData.kind === 'router' && (
+              <div className="space-y-3">
+                <div className="space-y-1.5 text-xs app-text-muted">
+                  {snapshot.probe.uptimeSec > 0 && (
+                    <div className="flex items-center justify-between">
+                      <span>Uptime</span>
+                      <span className="font-mono app-text-secondary tabular-nums">
+                        {formatDuration(snapshot.probe.uptimeSec)}
                       </span>
-                    </span>
-                    <span className="font-mono font-semibold tabular-nums">
-                      {selectedNode.kind === 'client' && selectedNode.connectionType === 'ethernet'
-                        ? 'Ethernet'
-                        : selectedNode.linkSpeedLabel}
-                    </span>
-                  </div>
-                  {selectedNode.kind === 'client' &&
-                    selectedNode.connectionType === 'wifi' &&
-                    (selectedNode.portLabel || selectedNode.wifiSignalDbm !== undefined) && (
-                      <div className="flex items-center justify-between text-[11px] app-text-muted font-mono tabular-nums">
-                        <span>{selectedNode.portLabel || 'Wireless'}</span>
-                        {selectedNode.wifiSignalDbm !== undefined && (
-                          <span>Signal {selectedNode.wifiSignalDbm} dBm</span>
-                        )}
-                      </div>
-                    )}
-                </div>
-              )}
-
-              {/* Router WAN Details for Internet Node */}
-              {selectedNode.kind === 'internet' && (
-                <div data-testid="internet-wan-details" className="space-y-2">
-                  <h4 className="text-xs font-semibold flex items-center gap-1.5">
-                    <Globe className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-                    <span>Router WAN Details</span>
-                  </h4>
-                  {selectedNode.wan ? (
-                    <div className="p-3 rounded-xl border app-border app-input space-y-2 text-xs">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="app-text-muted">WAN IP</span>
-                        <span className="font-mono app-text-secondary tabular-nums">
-                          {selectedNode.wan.ip || 'Unavailable'}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="app-text-muted">Default Gateway</span>
-                        <span className="font-mono app-text-secondary tabular-nums">
-                          {selectedNode.wan.gateway || 'Unavailable'}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="app-text-muted">DNS Servers</span>
-                        <span className="font-mono app-text-secondary tabular-nums text-right truncate max-w-[200px]">
-                          {selectedNode.wan.dns.length > 0
-                            ? selectedNode.wan.dns.join(', ')
-                            : 'Unavailable'}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="app-text-muted">Interface</span>
-                        <span className="font-mono app-text-secondary">
-                          {selectedNode.wan.iface}
-                          {selectedNode.wan.state ? ` (${selectedNode.wan.state})` : ''}
-                        </span>
-                      </div>
-                      {selectedNode.wan.linkSpeedMbps > 0 && (
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="app-text-muted">Link Rate</span>
-                          <span className="font-mono app-text-secondary tabular-nums">
-                            {formatLinkSpeed(
-                              selectedNode.wan.linkSpeedMbps,
-                              'ethernet',
-                              selectedNode.wan.state !== 'down'
-                            )}
-                            {selectedNode.wan.duplex && selectedNode.wan.duplex !== 'unknown'
-                              ? ` ${selectedNode.wan.duplex === 'full' ? 'FDX' : 'HDX'}`
-                              : ''}
-                          </span>
-                        </div>
-                      )}
-                      {selectedNode.wan.mtu && selectedNode.wan.mtu > 0 && (
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="app-text-muted">MTU</span>
-                          <span className="font-mono app-text-secondary tabular-nums">
-                            {selectedNode.wan.mtu}
-                          </span>
-                        </div>
-                      )}
-                      {selectedNode.wan.connectionType && (
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="app-text-muted">Connection Type</span>
-                          <span className="font-mono app-text-secondary">
-                            {selectedNode.wan.connectionType}
-                          </span>
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between gap-2 pt-1.5 border-t app-border">
-                        <span className="app-text-muted">Configured Plan</span>
-                        <span className="font-mono app-text-secondary tabular-nums">
-                          {snapshot.serverConfig.ispMaxDownMbps} /{' '}
-                          {snapshot.serverConfig.ispMaxUpMbps} Mbps
-                        </span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="p-3 rounded-xl border app-border app-input space-y-2 text-xs">
-                      <p className="app-text-muted">
-                        WAN interface details have not been reported by the router agent yet. Update
-                        your router agent script to stream WAN IP, gateway, and DNS telemetry.
-                      </p>
-                      <div className="flex items-center justify-between gap-2 pt-1.5 border-t app-border">
-                        <span className="app-text-muted">Configured Plan</span>
-                        <span className="font-mono app-text-secondary tabular-nums">
-                          {snapshot.serverConfig.ispMaxDownMbps} /{' '}
-                          {snapshot.serverConfig.ispMaxUpMbps} Mbps
-                        </span>
-                      </div>
                     </div>
                   )}
+                  <div className="flex items-center justify-between">
+                    <span>Load Average (1m)</span>
+                    <span className="font-mono app-text-secondary tabular-nums">
+                      {snapshot.probe.load1m.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Memory</span>
+                    <span className="font-mono app-text-secondary tabular-nums">
+                      {snapshot.probe.memUsedPct}%
+                    </span>
+                  </div>
                 </div>
-              )}
 
-              {/* Satellite metadata */}
-              {selectedNode.satellite && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-semibold flex items-center gap-1.5">
+                      <Server className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                      <span>Ethernet Ports (1 WAN + 3 LAN)</span>
+                    </h4>
+                    <span className="text-[11px] font-mono app-text-muted tabular-nums">
+                      {inspectorData.ports.length} ports
+                    </span>
+                  </div>
+                  <PortNegotiationTable
+                    ports={inspectorData.ports}
+                    unit={unit}
+                    theme={theme}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Satellite Details + 4 LAN Ports */}
+            {inspectorData.kind === 'satellite' && (
+              <div className="space-y-3">
                 <div className="space-y-1.5 text-xs app-text-muted">
                   <div className="flex items-center justify-between">
                     <span>Backhaul Mode</span>
                     <span className="font-mono app-text-secondary">
-                      {selectedNode.satellite.backhaulType === 'wifi' ? 'Wi-Fi' : 'Ethernet'}
-                      {selectedNode.satellite.backhaulIface
-                        ? ` (${selectedNode.satellite.backhaulIface})`
+                      {inspectorData.sat.backhaulType === 'wifi' ? 'Wi-Fi' : 'Ethernet'}
+                      {inspectorData.sat.backhaulIface
+                        ? ` (${inspectorData.sat.backhaulIface})`
                         : ''}
                     </span>
                   </div>
-                  {selectedNode.satellite.backhaulStatus && (
+                  {inspectorData.sat.backhaulStatus && (
                     <div className="flex items-center justify-between">
                       <span>Backhaul Status</span>
                       <span className="font-mono app-text-secondary">
-                        {selectedNode.satellite.backhaulStatus}
+                        {inspectorData.sat.backhaulStatus}
                       </span>
                     </div>
                   )}
-                  {selectedNode.satellite.backhaulSignalDbm !== undefined && (
+                  {inspectorData.sat.backhaulSignalDbm !== undefined && (
                     <div className="flex items-center justify-between">
                       <span>Backhaul Signal</span>
                       <span className="font-mono app-text-secondary tabular-nums">
-                        {selectedNode.satellite.backhaulSignalDbm} dBm
+                        {inspectorData.sat.backhaulSignalDbm} dBm
                       </span>
                     </div>
                   )}
                   <div className="flex items-center justify-between">
                     <span>Telemetry Source</span>
                     <span className="font-mono app-text-secondary">
-                      {selectedNode.satellite.source === 'ssh'
+                      {inspectorData.sat.source === 'ssh'
                         ? 'Stateless SSH'
-                        : selectedNode.satellite.source === 'router'
+                        : inspectorData.sat.source === 'router'
                           ? 'Router (/usr/sbin/satelliteinfo)'
                           : 'Dev Simulator'}
                     </span>
                   </div>
-                  {selectedNode.satellite.uptimeSec > 0 && (
+                  {inspectorData.sat.uptimeSec > 0 && (
                     <div className="flex items-center justify-between">
                       <span>Uptime</span>
                       <span className="font-mono app-text-secondary tabular-nums">
-                        {formatDuration(selectedNode.satellite.uptimeSec)}
+                        {formatDuration(inspectorData.sat.uptimeSec)}
                       </span>
                     </div>
                   )}
                   <div className="flex items-center justify-between">
                     <span>Total Transferred</span>
                     <span className="font-mono app-text-secondary tabular-nums">
-                      {formatBytes(
-                        selectedNode.satellite.rxBytes + selectedNode.satellite.txBytes
-                      )}
+                      {formatBytes(inspectorData.sat.rxBytes + inspectorData.sat.txBytes)}
                     </span>
                   </div>
-                  {selectedNode.satellite.lastError && !selectedNode.satellite.connected && (
+                  {inspectorData.sat.lastError && !inspectorData.sat.connected && (
                     <div className="text-[11px] text-amber-500 pt-1">
-                      {selectedNode.satellite.lastError}
+                      {inspectorData.sat.lastError}
                     </div>
                   )}
                 </div>
-              )}
 
-              {/* Ethernet Ports Table for Main Router and Satellites */}
-              {(selectedNode.kind === 'router' || selectedNode.kind === 'satellite') && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold flex items-center gap-1.5">
                       <Server className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-                      <span>Ethernet Port Negotiation</span>
+                      <span>Ethernet Ports (4 LAN)</span>
                     </h4>
                     <span className="text-[11px] font-mono app-text-muted tabular-nums">
-                      {selectedNode.ports?.length || 0} ports
+                      {inspectorData.sat.ports?.length || 0} ports
                     </span>
                   </div>
                   <PortNegotiationTable
-                    ports={selectedNode.ports || []}
+                    ports={inspectorData.sat.ports || []}
                     unit={unit}
                     theme={theme}
                   />
                 </div>
-              )}
+              </div>
+            )}
 
-              {/* Client Details */}
-              {selectedNode.host && (
-                <div className="space-y-3">
-                  <div className="space-y-1.5 text-xs app-text-muted">
-                    <div className="flex items-center justify-between gap-2">
-                      <span>Vendor</span>
-                      <span className="app-text-secondary truncate max-w-[160px]">
-                        {selectedNode.host.vendor}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span>Active Connections</span>
-                      <span className="font-mono app-text-secondary tabular-nums">
-                        {selectedNode.host.activeFlows}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span>Total Data</span>
-                      <span className="font-mono app-text-secondary tabular-nums">
-                        {formatBytes(selectedNode.host.totalBytes)}
-                      </span>
-                    </div>
-                    {selectedNode.host.topServices.length > 0 && (
-                      <div className="pt-1">
-                        <div className="app-text-muted mb-1">Top Services</div>
-                        <div className="app-text-secondary leading-snug">
-                          {selectedNode.host.topServices.join(', ')}
-                        </div>
-                      </div>
-                    )}
+            {/* Client Details */}
+            {inspectorData.kind === 'client' && (
+              <div className="space-y-3">
+                <div className="space-y-1.5 text-xs app-text-muted">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>Connection</span>
+                    <span className="font-mono app-text-secondary">
+                      {inspectorData.client.connectionType === 'wifi'
+                        ? `${inspectorData.client.wifiBand || 'Wi-Fi'} · ${formatWifiRatesLabel(
+                            inspectorData.client.wifiRxMbps,
+                            inspectorData.client.wifiTxMbps
+                          )}`
+                        : 'Ethernet'}
+                    </span>
                   </div>
-
-                  {connectionsEnabled && (
-                    <button
-                      type="button"
-                      onClick={() => onInspectHostFlows(selectedNode.host!)}
-                      className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl app-btn-primary text-xs font-semibold transition-colors"
-                    >
-                      <span>Inspect Live Connections</span>
-                      <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
+                  {inspectorData.client.wifiSignalDbm !== undefined && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span>Wi-Fi Signal</span>
+                      <span className="font-mono app-text-secondary tabular-nums">
+                        {inspectorData.client.wifiSignalDbm} dBm
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-2">
+                    <span>Access Point</span>
+                    <span className="app-text-secondary">
+                      {inspectorData.client.host.apName || 'Main AP'}
+                    </span>
+                  </div>
+                  {inspectorData.client.host.vlanName && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span>VLAN / Subnet</span>
+                      <span className="font-mono text-violet-400">
+                        {inspectorData.client.host.vlanName} ({inspectorData.client.host.vlanCidr})
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-2">
+                    <span>Vendor</span>
+                    <span className="app-text-secondary truncate max-w-[180px]">
+                      {inspectorData.client.host.vendor}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span>Active Connections</span>
+                    <span className="font-mono app-text-secondary tabular-nums">
+                      {inspectorData.client.host.activeFlows}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span>Total Data</span>
+                    <span className="font-mono app-text-secondary tabular-nums">
+                      {formatBytes(inspectorData.client.host.totalBytes)}
+                    </span>
+                  </div>
+                  {inspectorData.client.host.topServices.length > 0 && (
+                    <div className="pt-1">
+                      <div className="app-text-muted mb-1">Top Services</div>
+                      <div className="app-text-secondary leading-snug">
+                        {inspectorData.client.host.topServices.join(', ')}
+                      </div>
+                    </div>
                   )}
                 </div>
-              )}
-            </div>
-          </aside>
-        )}
-      </section>
+
+                {connectionsEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => onInspectHostFlows(inspectorData.client.host)}
+                    className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl app-btn-primary text-xs font-semibold transition-colors"
+                  >
+                    <span>Inspect Live Connections</span>
+                    <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
 
       {/* SSH Satellite Configuration Modal */}
       {satelliteModalOpen && (
@@ -1471,8 +1624,8 @@ export function TrafficMapView({
 
             <div className="p-5">
               <SatelliteManager
-                configs={snapshot.topology?.satelliteConfigs || []}
-                satellites={snapshot.topology?.satellites || []}
+                configs={topology.satelliteConfigs || []}
+                satellites={topology.satellites || []}
                 unit={unit}
                 onSaveSatellite={onSaveSatellite}
                 onDeleteSatellite={onDeleteSatellite}

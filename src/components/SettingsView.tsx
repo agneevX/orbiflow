@@ -13,11 +13,16 @@ import {
   KeyRound,
   LayoutGrid,
   MonitorSmartphone,
+  Network,
+  Plus,
   Radio,
   RefreshCw,
+  Server,
+  Trash2,
 } from 'lucide-react';
 import type {
   BandwidthUnit,
+  DetectedSubnet,
   FeatureVisibility,
   PersistenceMode,
   PublicSatelliteConfig,
@@ -25,6 +30,7 @@ import type {
   ServerConfig,
   ServerStats,
   TimeFormat,
+  VlanConfig,
 } from '../types/telemetry';
 import { formatBytes } from '../lib/formatters';
 import {
@@ -32,12 +38,14 @@ import {
   sanitizeFeatureVisibility,
   validateDnsServer,
 } from '../lib/tablePreferences';
+import { sanitizeVlanConfigs, validateVlanCidr } from '../lib/vlanUtils';
 import { TechTerm } from './TechTerm';
 import { SatelliteManager, type SatelliteSavePayload } from './SatelliteManager';
 
 interface SettingsViewProps {
   serverConfig: ServerConfig;
   serverStats: ServerStats;
+  detectedSubnets?: DetectedSubnet[];
   satellites: SatelliteTelemetry[];
   satelliteConfigs: PublicSatelliteConfig[];
   unit: BandwidthUnit;
@@ -66,6 +74,7 @@ function generateClientRandomToken(): string {
 export function SettingsView({
   serverConfig,
   serverStats,
+  detectedSubnets = [],
   satellites,
   satelliteConfigs,
   unit,
@@ -87,12 +96,25 @@ export function SettingsView({
   );
   const [rdnsServer, setRdnsServer] = useState(serverConfig.rdnsServer || '');
   const [rdnsServerError, setRdnsServerError] = useState('');
+  const [lanDnsEnabled, setLanDnsEnabled] = useState(serverConfig.lanDnsEnabled !== false);
+  const [lanDnsServer, setLanDnsServer] = useState(serverConfig.lanDnsServer || '');
+  const [lanDnsServerError, setLanDnsServerError] = useState('');
+  const [stripLanDomain, setStripLanDomain] = useState(serverConfig.stripLanDomain !== false);
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(serverConfig.timeFormat || '12h');
   const [featureVisibility, setFeatureVisibility] = useState<FeatureVisibility>(() =>
     sanitizeFeatureVisibility(serverConfig.featureVisibility)
   );
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
+
+  // VLAN editor state (managed in its own section so additions/removals save immediately)
+  const [vlanNameInput, setVlanNameInput] = useState('');
+  const [vlanCidrInput, setVlanCidrInput] = useState('');
+  const [vlanIdInput, setVlanIdInput] = useState('');
+  const [vlanError, setVlanError] = useState('');
+  const [savingVlan, setSavingVlan] = useState(false);
+
+  const configuredVlans = sanitizeVlanConfigs(serverConfig.vlans);
 
   // Serialize server-side config fields so periodic 3s telemetry ticks never undo unsaved checkboxes
   const serverConfigSignature = JSON.stringify({
@@ -101,6 +123,9 @@ export function SettingsView({
     cacheDir: serverConfig.cacheDir || '/config/cache',
     inferDeviceNames: serverConfig.inferDeviceNames !== false,
     rdnsServer: serverConfig.rdnsServer || '',
+    lanDnsEnabled: serverConfig.lanDnsEnabled !== false,
+    lanDnsServer: serverConfig.lanDnsServer || '',
+    stripLanDomain: serverConfig.stripLanDomain !== false,
     timeFormat: serverConfig.timeFormat || '12h',
     featureVisibility: sanitizeFeatureVisibility(serverConfig.featureVisibility),
   });
@@ -114,6 +139,9 @@ export function SettingsView({
     setCacheDir(serverConfig.cacheDir || '/config/cache');
     setInferDeviceNames(serverConfig.inferDeviceNames !== false);
     setRdnsServer(serverConfig.rdnsServer || '');
+    setLanDnsEnabled(serverConfig.lanDnsEnabled !== false);
+    setLanDnsServer(serverConfig.lanDnsServer || '');
+    setStripLanDomain(serverConfig.stripLanDomain !== false);
     setTimeFormat(serverConfig.timeFormat || '12h');
     setFeatureVisibility(sanitizeFeatureVisibility(serverConfig.featureVisibility));
   }, [serverConfigSignature, serverConfig]);
@@ -141,7 +169,13 @@ export function SettingsView({
       setRdnsServerError(dnsCheck.error || 'Invalid reverse DNS server address');
       return;
     }
+    const lanDnsCheck = validateDnsServer(lanDnsServer);
+    if (!lanDnsCheck.ok) {
+      setLanDnsServerError(lanDnsCheck.error || 'Invalid private DNS server address');
+      return;
+    }
     setRdnsServerError('');
+    setLanDnsServerError('');
     setSaving(true);
     try {
       await onSaveSettings({
@@ -150,6 +184,9 @@ export function SettingsView({
         cacheDir: cacheDir.trim() || '/config/cache',
         inferDeviceNames,
         rdnsServer: dnsCheck.value,
+        lanDnsEnabled,
+        lanDnsServer: lanDnsCheck.value,
+        stripLanDomain,
         timeFormat,
         featureVisibility,
       });
@@ -157,6 +194,60 @@ export function SettingsView({
       setTimeout(() => setSavedNotice(''), 2500);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleAddVlan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = vlanNameInput.trim().slice(0, 40);
+    if (!cleanName) {
+      setVlanError('Enter a VLAN name (e.g. Docker Containers, IoT, Guest)');
+      return;
+    }
+    const cidrCheck = validateVlanCidr(vlanCidrInput);
+    if (!cidrCheck.ok) {
+      setVlanError(cidrCheck.error || 'Invalid subnet CIDR');
+      return;
+    }
+    let parsedVlanId: number | undefined;
+    if (vlanIdInput.trim()) {
+      const n = Number(vlanIdInput.trim());
+      if (!Number.isInteger(n) || n < 1 || n > 4094) {
+        setVlanError('VLAN ID must be an integer between 1 and 4094');
+        return;
+      }
+      parsedVlanId = n;
+    }
+
+    setVlanError('');
+    setSavingVlan(true);
+    try {
+      const nextEntry: VlanConfig = {
+        id: `vlan-${cidrCheck.value.replace(/[^a-zA-Z0-9]/g, '-')}`,
+        name: cleanName,
+        cidr: cidrCheck.value,
+        ...(parsedVlanId !== undefined ? { vlanId: parsedVlanId } : {}),
+      };
+      const nextList = [
+        ...configuredVlans.filter((v) => v.cidr !== cidrCheck.value),
+        nextEntry,
+      ];
+      await onSaveSettings({ vlans: nextList });
+      setVlanNameInput('');
+      setVlanCidrInput('');
+      setVlanIdInput('');
+    } finally {
+      setSavingVlan(false);
+    }
+  };
+
+  const handleRemoveVlan = async (cidr: string) => {
+    setSavingVlan(true);
+    try {
+      const nextList = configuredVlans.filter((v) => v.cidr !== cidr);
+      await onSaveSettings({ vlans: nextList });
+    } finally {
+      setSavingVlan(false);
     }
   };
 
@@ -410,8 +501,8 @@ export function SettingsView({
               <span>Reverse DNS &amp; Display</span>
             </h2>
             <p className="text-xs app-text-muted mt-1">
-              Configure a custom DNS resolver for public internet PTR lookups and choose how
-              timestamps are displayed across the dashboard.
+              Configure reverse PTR lookups for both public internet IPs and private LAN/VLAN IPs,
+              plus speed units and clock format.
             </p>
           </div>
 
@@ -433,7 +524,7 @@ export function SettingsView({
                   }}
                   className="text-[11px] text-sky-500 hover:text-sky-400"
                 >
-                  Use system DNS
+                  Use container DNS
                 </button>
               )}
             </div>
@@ -446,7 +537,7 @@ export function SettingsView({
                 setRdnsServer(e.target.value);
                 if (rdnsServerError) setRdnsServerError('');
               }}
-              placeholder="System default (e.g. 1.1.1.1, 8.8.8.8, or 9.9.9.9)"
+              placeholder="Container DNS default (e.g. 1.1.1.1, 8.8.8.8, or 9.9.9.9)"
               className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
             />
             {rdnsServerError ? (
@@ -455,10 +546,105 @@ export function SettingsView({
               </p>
             ) : (
               <p className="text-[11px] app-text-muted leading-relaxed">
-                Used only for reverse PTR lookups of non-private internet IP addresses. Leave blank
-                to use the container&apos;s default DNS resolver.
+                Used for reverse PTR lookups of public internet IP addresses. Leave blank to use
+                the container&apos;s default DNS resolver.
               </p>
             )}
+          </div>
+
+          {/* Private IP Reverse DNS (PTR Lookups) */}
+          <div className="pt-3 border-t app-border space-y-3">
+            <label className="flex items-start gap-3 p-3.5 rounded-xl border app-border app-input cursor-pointer">
+              <input
+                type="checkbox"
+                data-testid="lan-dns-enabled-toggle"
+                checked={lanDnsEnabled}
+                onChange={(e) => setLanDnsEnabled(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded text-sky-500 focus:ring-sky-500"
+              />
+              <div>
+                <div className="text-xs font-semibold">
+                  Resolve Reverse PTR for Private IPs (LAN &amp; VLANs)
+                </div>
+                <div className="text-xs app-text-muted mt-0.5">
+                  Look up hostnames for private RFC1918 addresses (e.g. 10.x, 192.168.x, 172.16–31.x)
+                  via reverse PTR queries. Uses the container&apos;s DNS resolver by default.
+                </div>
+              </div>
+            </label>
+
+            {lanDnsEnabled && (
+              <div className="space-y-3 pl-1">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="lan-dns-server-input"
+                      className="flex items-center gap-1.5 text-xs font-medium"
+                    >
+                      <Server className="h-3.5 w-3.5 app-text-muted" aria-hidden="true" />
+                      Private Reverse DNS Server
+                    </label>
+                    {lanDnsServer && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLanDnsServer('');
+                          setLanDnsServerError('');
+                        }}
+                        className="text-[11px] text-sky-500 hover:text-sky-400"
+                      >
+                        Use container DNS
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    id="lan-dns-server-input"
+                    data-testid="lan-dns-server-input"
+                    type="text"
+                    value={lanDnsServer}
+                    onChange={(e) => {
+                      setLanDnsServer(e.target.value);
+                      if (lanDnsServerError) setLanDnsServerError('');
+                    }}
+                    placeholder="Container DNS default (e.g. 10.0.0.1, 192.168.1.1, or Pi-hole IP)"
+                    className="w-full app-input border rounded-xl px-3.5 py-2 text-xs font-mono focus:outline-none focus:border-sky-500"
+                  />
+                  {lanDnsServerError ? (
+                    <p role="alert" className="text-[11px] text-rose-500 font-medium">
+                      {lanDnsServerError}
+                    </p>
+                  ) : (
+                    <p className="text-[11px] app-text-muted leading-relaxed">
+                      Leave blank to query the container&apos;s default DNS server (
+                      <span className="font-mono">/etc/resolv.conf</span>). Or enter a local router,
+                      Pi-hole, or AdGuard Home IP.
+                    </p>
+                  )}
+                </div>
+
+                <label className="flex items-center gap-2.5 text-xs cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    data-testid="strip-lan-domain-toggle"
+                    checked={stripLanDomain}
+                    onChange={(e) => setStripLanDomain(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded text-sky-500 focus:ring-sky-500"
+                  />
+                  <span className="app-text-secondary">
+                    Strip local domain suffix (e.g. show <span className="font-mono">nas</span>{' '}
+                    instead of <span className="font-mono">nas.lan</span>)
+                  </span>
+                </label>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono app-text-muted tabular-nums">
+              <span>
+                Private PTR: {serverStats.lanDnsResolved} resolved · {serverStats.lanDnsCacheSize}{' '}
+                cached
+              </span>
+              <span>Public PTR: {serverStats.rdnsCacheSize} cached</span>
+            </div>
           </div>
 
           <div className="pt-3 border-t app-border flex flex-wrap items-center justify-between gap-3">
@@ -560,7 +746,7 @@ export function SettingsView({
                 {
                   key: 'flows',
                   label: 'Flows Diagram',
-                  desc: 'Internet & LAN traffic flow diagram on Home',
+                  desc: 'Internet traffic flow diagram on Home',
                 },
                 {
                   key: 'topDevices',
@@ -642,6 +828,193 @@ export function SettingsView({
           </button>
         </div>
       </form>
+
+      {/* VLANs & Subnets Management — saves immediately outside main settings form */}
+      <section
+        data-testid="vlans-section"
+        className="app-surface border rounded-2xl p-5 space-y-4"
+      >
+        <div>
+          <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+            <Network className="h-4 w-4 text-sky-500 shrink-0" aria-hidden="true" />
+            <span>VLANs &amp; Subnets</span>
+          </h2>
+          <p className="text-xs app-text-muted mt-1">
+            Secondary subnets (such as a Docker container VLAN like{' '}
+            <span className="font-mono app-text-secondary">10.0.1.0/24</span>) are auto-detected
+            from router interfaces and observed traffic. Name any subnet here to label and filter
+            devices across Devices and Network Map.
+          </p>
+        </div>
+
+        {/* Auto-Detected Subnets */}
+        {detectedSubnets.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-medium app-text-muted">Detected Subnets</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {detectedSubnets.map((sub) => {
+                const alreadyConfigured = configuredVlans.some((v) => v.cidr === sub.cidr);
+                return (
+                  <div
+                    key={sub.cidr}
+                    className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl border app-border app-input text-xs"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-mono font-medium truncate">{sub.cidr}</span>
+                        {sub.isPrimary && (
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 shrink-0">
+                            Primary
+                          </span>
+                        )}
+                        {!sub.isPrimary && sub.vlanId !== undefined && (
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 shrink-0">
+                            VLAN {sub.vlanId}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] app-text-muted truncate mt-0.5">
+                        {sub.name || 'Unnamed subnet'} · {sub.hostCount}{' '}
+                        {sub.hostCount === 1 ? 'device' : 'devices'}
+                        {sub.iface ? ` · ${sub.iface}` : ''}
+                      </div>
+                    </div>
+                    {!sub.isPrimary && !alreadyConfigured && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setVlanCidrInput(sub.cidr);
+                          setVlanIdInput(sub.vlanId !== undefined ? String(sub.vlanId) : '');
+                          setVlanNameInput(
+                            sub.vlanId !== undefined ? `VLAN ${sub.vlanId}` : 'Docker VLAN'
+                          );
+                        }}
+                        className="text-[11px] font-medium text-sky-500 hover:text-sky-400 shrink-0"
+                      >
+                        Name
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Configured Custom VLANs */}
+        {configuredVlans.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-medium app-text-muted">Named VLANs</div>
+            <div className="divide-y app-border border app-border rounded-xl overflow-hidden">
+              {configuredVlans.map((v) => (
+                <div
+                  key={v.cidr}
+                  data-testid={`vlan-row-${v.cidr}`}
+                  className="flex items-center justify-between gap-3 px-3.5 py-2.5 app-input text-xs"
+                >
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate flex items-center gap-2">
+                      <span>{v.name}</span>
+                      {v.vlanId !== undefined && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400">
+                          ID {v.vlanId}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] font-mono app-text-muted">{v.cidr}</div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={savingVlan}
+                    onClick={() => void handleRemoveVlan(v.cidr)}
+                    aria-label={`Remove VLAN ${v.name}`}
+                    className="p-1.5 rounded-lg app-text-muted hover:text-rose-500 transition-colors shrink-0"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Add VLAN Form */}
+        <form onSubmit={handleAddVlan} className="pt-2 border-t app-border space-y-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+            <div className="sm:col-span-5">
+              <label htmlFor="vlan-name-input" className="block text-[11px] app-text-muted mb-1">
+                VLAN Name
+              </label>
+              <input
+                id="vlan-name-input"
+                data-testid="vlan-name-input"
+                type="text"
+                value={vlanNameInput}
+                onChange={(e) => {
+                  setVlanNameInput(e.target.value);
+                  if (vlanError) setVlanError('');
+                }}
+                placeholder="e.g. Docker Containers"
+                className="w-full app-input border rounded-xl px-3 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+              />
+            </div>
+            <div className="sm:col-span-4">
+              <label htmlFor="vlan-cidr-input" className="block text-[11px] app-text-muted mb-1">
+                Subnet CIDR
+              </label>
+              <input
+                id="vlan-cidr-input"
+                data-testid="vlan-cidr-input"
+                type="text"
+                value={vlanCidrInput}
+                onChange={(e) => {
+                  setVlanCidrInput(e.target.value);
+                  if (vlanError) setVlanError('');
+                }}
+                placeholder="e.g. 10.0.1.0/24"
+                className="w-full app-input border rounded-xl px-3 py-1.5 text-xs font-mono focus:outline-none focus:border-sky-500"
+              />
+            </div>
+            <div className="sm:col-span-3">
+              <label htmlFor="vlan-id-input" className="block text-[11px] app-text-muted mb-1">
+                VLAN ID (opt.)
+              </label>
+              <input
+                id="vlan-id-input"
+                data-testid="vlan-id-input"
+                type="number"
+                min={1}
+                max={4094}
+                value={vlanIdInput}
+                onChange={(e) => {
+                  setVlanIdInput(e.target.value);
+                  if (vlanError) setVlanError('');
+                }}
+                placeholder="10"
+                className="w-full app-input border rounded-xl px-3 py-1.5 text-xs font-mono focus:outline-none focus:border-sky-500"
+              />
+            </div>
+          </div>
+
+          {vlanError && (
+            <p role="alert" className="text-[11px] text-rose-500 font-medium">
+              {vlanError}
+            </p>
+          )}
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              data-testid="vlan-add-btn"
+              disabled={savingVlan}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl app-btn-primary text-xs font-semibold disabled:opacity-60"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{savingVlan ? 'Saving...' : 'Add / Update VLAN'}</span>
+            </button>
+          </div>
+        </form>
+      </section>
 
       {/* Orbi Satellites (Stateless SSH Polling) — separate from main settings form so nested forms never occur */}
       <section className="app-surface border rounded-2xl p-5 space-y-4">

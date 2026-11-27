@@ -115,16 +115,27 @@ test('resolveHostIdentity prioritizes alias > LAN DNS PTR > DHCP > fingerprint >
   assert.equal(noInfer.deviceHint, 'Apple Device');
 });
 
-test('LanResolver only resolves private IPs and parses custom DNS server lists', () => {
+test('LanResolver only resolves private IPs, honors enabled toggle, and defaults to container DNS', () => {
   assert.deepEqual(parseDnsServers('192.168.1.2, 192.168.1.1:5353'), [
     '192.168.1.2',
     '192.168.1.1:5353',
   ]);
+  assert.deepEqual(parseDnsServers(''), []);
 
-  const resolver = new LanResolver({ enabled: false, server: '192.168.1.2', ttlSec: 300 });
-  resolver.setEntry('192.168.1.24', 'macbook-pro.lan');
-  assert.equal(resolver.lookup('192.168.1.24'), 'macbook-pro.lan');
-  // Public IPs are ignored even if cached
-  assert.equal(resolver.lookup('1.1.1.1'), null);
-  assert.equal(resolver.getStats().resolved, 1);
+  // Default config uses container DNS (server === '') and enabled === true
+  const defaultResolver = new LanResolver();
+  assert.equal(defaultResolver.getConfig().enabled, true);
+  assert.equal(defaultResolver.getConfig().server, '');
+
+  // Disabled resolver returns null even for cached private IPs
+  const disabled = new LanResolver({ enabled: false, server: '192.168.1.2', ttlSec: 300 });
+  disabled.setEntry('192.168.1.24', 'macbook-pro.lan');
+  assert.equal(disabled.lookup('192.168.1.24'), null);
+
+  // Enabled resolver returns cached private IP PTRs and ignores public IPs
+  const enabled = new LanResolver({ enabled: true, server: '', ttlSec: 300 });
+  enabled.setEntry('192.168.1.24', 'macbook-pro.lan');
+  assert.equal(enabled.lookup('192.168.1.24'), 'macbook-pro.lan');
+  assert.equal(enabled.lookup('1.1.1.1'), null);
+  assert.equal(enabled.getStats().resolved, 1);
 });

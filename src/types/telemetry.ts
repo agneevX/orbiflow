@@ -195,6 +195,31 @@ export interface TopologyTelemetry {
   satelliteConfigs: PublicSatelliteConfig[];
 }
 
+export interface ProbeSubnetEntry {
+  cidr: string;
+  iface: string;
+  vlanId?: number;
+  source?: 'interface' | 'vlan' | 'route';
+}
+
+export interface VlanConfig {
+  id: string;
+  name: string;
+  cidr: string;
+  vlanId?: number;
+  description?: string;
+}
+
+export interface DetectedSubnet {
+  cidr: string;
+  iface?: string;
+  vlanId?: number;
+  hostCount: number;
+  name?: string;
+  isPrimary?: boolean;
+  source?: 'router' | 'configured' | 'hosts';
+}
+
 export interface ProbeSnapshot {
   probeId: string;
   timestamp: number;
@@ -207,6 +232,7 @@ export interface ProbeSnapshot {
   rawConntrackLines?: string[];
   ports?: EthernetPortMetrics[];
   wan?: WanDetails;
+  subnets?: ProbeSubnetEntry[];
   satelliteInfo?: SatelliteInfoEntry[];
   routerClients?: SatelliteClientLink[];
   satellites?: SatelliteTelemetry[];
@@ -283,6 +309,9 @@ export interface HostSummary {
   wifiRxMbps?: number;
   wifiTxMbps?: number;
   wifiSignalDbm?: number;
+  vlanName?: string;
+  vlanCidr?: string;
+  vlanId?: number;
 }
 
 export interface ProtocolSummary {
@@ -447,6 +476,7 @@ export interface ServerConfig {
   ispMaxDownMbps: number;
   ispMaxUpMbps: number;
   timeFormat: TimeFormat;
+  vlans?: VlanConfig[];
   tablePreferences: TablePreferences;
   featureVisibility: FeatureVisibility;
 }
@@ -490,6 +520,7 @@ export interface DashboardSnapshot {
     peakTxBps: number;
   };
   lanSummary?: LanTrafficSummary;
+  detectedSubnets?: DetectedSubnet[];
   history: TrafficPoint[];
   rollupHistory: TrafficPoint[];
   flows: EnrichedFlow[];

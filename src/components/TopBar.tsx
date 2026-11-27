@@ -142,7 +142,7 @@ export function TopBar({
         >
           <PanelLeft className="h-4 w-4 sm:h-[18px] sm:w-[18px]" strokeWidth={1.85} aria-hidden="true" />
         </button>
-        <h1 className="font-display text-sm sm:text-base font-semibold tracking-tight truncate max-w-[92px] sm:max-w-[150px] md:max-w-none">
+        <h1 className="font-display text-sm sm:text-base font-bold tracking-tight truncate max-w-[92px] sm:max-w-[150px] md:max-w-none">
           {TAB_TITLES[activeTab]}
         </h1>
       </div>
@@ -187,9 +187,10 @@ export function TopBar({
               </div>
             </div>
 
-            {/* Right bar: Load (% left, label right) */}
+            {/* Right bar: Load (label left, % right) */}
             <div className="min-w-0 flex flex-col gap-1">
               <div className="flex items-center justify-between gap-1.5 text-[11px] leading-none font-medium tabular-nums">
+                <span className="app-text-secondary truncate">Load</span>
                 <span
                   data-testid="topbar-load-pct"
                   className="font-semibold shrink-0"
@@ -197,7 +198,6 @@ export function TopBar({
                 >
                   {routerLoadPct}%
                 </span>
-                <span className="app-text-secondary truncate text-right">Load</span>
               </div>
               <div
                 className="h-1 w-full rounded-full bg-slate-500/20 overflow-hidden"

@@ -690,3 +690,53 @@ test('convertProbeToTelemetry filters tagged CPU switch ports and 0M/0M ghost Wi
   );
   assert.equal(telemetry.clients[0].wifiBand, '5 GHz');
 });
+
+test('convertProbeToTelemetry filters 7-port QCA8337 satellite switch down to 4 physical LAN ports (1..4)', () => {
+  const cfg: SatelliteConfig = {
+    id: 'sat-qca7',
+    name: 'Garage Satellite',
+    host: '192.168.1.6',
+    port: 22,
+    username: 'root',
+    authMethod: 'password',
+    pollIntervalSec: 5,
+    enabled: true,
+  };
+
+  const raw = [
+    '===META===',
+    'HOST=RBS50-Garage',
+    'UPTIME=5000.00 9000.00',
+    '===IFACES===',
+    'eth0|up|1000|full|100000|50000|0',
+    'eth0.1|up|1000|full|100000|50000|0',
+    'eth0.10|up|1000|full|20000|10000|0',
+    '===SWCONFIG===',
+    'Port 0:',
+    '  link: port:0 link:up speed:1000baseT full-duplex',
+    'Port 1:',
+    '  link: port:1 link:up speed:1000baseT full-duplex',
+    'Port 2:',
+    '  link: port:2 link:down',
+    'Port 3:',
+    '  link: port:3 link:up speed:1000baseT full-duplex',
+    'Port 4:',
+    '  link: port:4 link:down',
+    'Port 5:',
+    '  link: port:5 link:up speed:1000baseT full-duplex',
+    'Port 6:',
+    '  link: port:6 link:up speed:1000baseT full-duplex',
+  ].join('\n');
+
+  const { telemetry } = convertProbeToTelemetry(cfg, raw, null, 1_700_000_000_000);
+  assert.equal(telemetry.ports.length, 4);
+  assert.deepEqual(
+    telemetry.ports.map((p) => p.id),
+    ['port1', 'port2', 'port3', 'port4']
+  );
+  assert.deepEqual(
+    telemetry.ports.map((p) => p.label),
+    ['LAN 1 (Backhaul)', 'LAN 2', 'LAN 3', 'LAN 4']
+  );
+});
+

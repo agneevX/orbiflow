@@ -33,6 +33,12 @@ import {
   DEFAULT_TABLE_PREFERENCES,
   sanitizeFeatureVisibility,
 } from './lib/tablePreferences';
+import {
+  buildRouteUrl,
+  getDocumentTitle,
+  parseRouteFromLocation,
+  type DevicesSubTab,
+} from './lib/routing';
 import type {
   AlertRule,
   BandwidthUnit,
@@ -91,8 +97,15 @@ function loadInitialThemeState(): {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>('overview');
-  const [devicesSubTab, setDevicesSubTab] = useState<'list' | 'map'>('list');
+  const initialRoute = useMemo(() => {
+    if (typeof window === 'undefined') {
+      return { tab: 'overview' as NavTab, devicesSubTab: 'list' as DevicesSubTab, query: '' };
+    }
+    return parseRouteFromLocation(window.location.pathname, window.location.search);
+  }, []);
+
+  const [activeTab, setActiveTab] = useState<NavTab>(initialRoute.tab);
+  const [devicesSubTab, setDevicesSubTab] = useState<DevicesSubTab>(initialRoute.devicesSubTab);
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('5m');
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
@@ -117,14 +130,60 @@ export default function App() {
 
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
   const [selectedFlow, setSelectedFlow] = useState<EnrichedFlow | null>(null);
+  const [flowSearchSeed, setFlowSearchSeed] = useState(initialRoute.query);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  const navigate = (
+    tab: NavTab,
+    subTab: DevicesSubTab = tab === 'hosts' ? devicesSubTab : 'list',
+    query = '',
+    replace = false
+  ) => {
+    setActiveTab(tab);
+    if (tab === 'hosts') {
+      setDevicesSubTab(subTab);
+    }
+    if (tab === 'flows') {
+      setFlowSearchSeed(query);
+    } else {
+      setFlowSearchSeed('');
+    }
+    if (typeof window !== 'undefined') {
+      const targetUrl = buildRouteUrl(tab, subTab, tab === 'flows' ? query : '');
+      const currentUrl = `${window.location.pathname}${window.location.search}`;
+      if (targetUrl !== currentUrl) {
+        if (replace) {
+          window.history.replaceState(null, '', targetUrl);
+        } else {
+          window.history.pushState(null, '', targetUrl);
+        }
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onPopState = () => {
+      const parsed = parseRouteFromLocation(window.location.pathname, window.location.search);
+      setActiveTab(parsed.tab);
+      setDevicesSubTab(parsed.devicesSubTab);
+      setFlowSearchSeed(parsed.query);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.title = getDocumentTitle(activeTab, devicesSubTab);
+    }
+  }, [activeTab, devicesSubTab]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
       window.scrollTo(0, 0);
     }
-  }, [activeTab]);
-  const [flowSearchSeed, setFlowSearchSeed] = useState('');
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  }, [activeTab, devicesSubTab]);
 
   const effectiveIsDark = resolveEffectiveIsDark(themeMode, systemPrefersDark);
   const effectiveThemeId = resolveThemeId(themeMode, systemPrefersDark, darkThemeId, lightThemeId);
@@ -483,26 +542,33 @@ export default function App() {
       (activeTab === 'alerts' && !featureVisibility.alerts) ||
       (activeTab === 'setup' && !featureVisibility.agent);
     if (tabDisabled) {
-      setActiveTab('overview');
+      navigate('overview', 'list', '', true);
     }
   }, [activeTab, featureVisibility, devicesPageEnabled]);
 
   useEffect(() => {
     if (devicesSubTab === 'list' && !featureVisibility.devices && featureVisibility.trafficMap) {
-      setDevicesSubTab('map');
+      if (activeTab === 'hosts') {
+        navigate('hosts', 'map', '', true);
+      } else {
+        setDevicesSubTab('map');
+      }
     } else if (
       devicesSubTab === 'map' &&
       !featureVisibility.trafficMap &&
       featureVisibility.devices
     ) {
-      setDevicesSubTab('list');
+      if (activeTab === 'hosts') {
+        navigate('hosts', 'list', '', true);
+      } else {
+        setDevicesSubTab('list');
+      }
     }
-  }, [devicesSubTab, featureVisibility.devices, featureVisibility.trafficMap]);
+  }, [activeTab, devicesSubTab, featureVisibility.devices, featureVisibility.trafficMap]);
 
   const handleFilterConnections = (query: string) => {
     if (!featureVisibility.connections) return;
-    setFlowSearchSeed(query);
-    setActiveTab('flows');
+    navigate('flows', 'list', query);
   };
 
   const handleSelectHost = (host: HostSummary) => {
@@ -601,8 +667,13 @@ export default function App() {
       <Sidebar
         activeTab={activeTab}
         onSelectTab={(tab) => {
-          if (tab !== 'flows') setFlowSearchSeed('');
-          setActiveTab(tab);
+          const nextSub =
+            tab === 'hosts'
+              ? !featureVisibility.devices && featureVisibility.trafficMap
+                ? 'map'
+                : devicesSubTab
+              : 'list';
+          navigate(tab, nextSub, '');
         }}
         probe={snapshot.probe}
         unackAlerts={unackAlerts}
@@ -653,13 +724,11 @@ export default function App() {
               onSelectFilter={handleFilterConnections}
               onViewAllFlows={() => {
                 if (!featureVisibility.connections) return;
-                setFlowSearchSeed('');
-                setActiveTab('flows');
+                navigate('flows', 'list', '');
               }}
               onOpenHosts={() => {
                 if (!devicesPageEnabled) return;
-                setDevicesSubTab(featureVisibility.devices ? 'list' : 'map');
-                setActiveTab('hosts');
+                navigate('hosts', featureVisibility.devices ? 'list' : 'map', '');
               }}
             />
           )}
@@ -694,7 +763,7 @@ export default function App() {
                     role="tab"
                     data-testid="devices-tab-list"
                     aria-selected={devicesSubTab === 'list'}
-                    onClick={() => setDevicesSubTab('list')}
+                    onClick={() => navigate('hosts', 'list', '')}
                     className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                       devicesSubTab === 'list'
                         ? 'app-surface font-semibold shadow-sm'
@@ -709,7 +778,7 @@ export default function App() {
                     role="tab"
                     data-testid="devices-tab-map"
                     aria-selected={devicesSubTab === 'map'}
-                    onClick={() => setDevicesSubTab('map')}
+                    onClick={() => navigate('hosts', 'map', '')}
                     className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                       devicesSubTab === 'map'
                         ? 'app-surface font-semibold shadow-sm'
@@ -725,6 +794,7 @@ export default function App() {
               {devicesSubTab === 'list' && featureVisibility.devices && (
                 <HostsView
                   hosts={snapshot.hosts}
+                  detectedSubnets={snapshot.detectedSubnets || []}
                   unit={unit}
                   theme={activeTheme}
                   prefs={
@@ -779,6 +849,7 @@ export default function App() {
             <SettingsView
               serverConfig={snapshot.serverConfig}
               serverStats={snapshot.serverStats}
+              detectedSubnets={snapshot.detectedSubnets || []}
               satellites={snapshot.topology?.satellites || []}
               satelliteConfigs={snapshot.topology?.satelliteConfigs || []}
               unit={unit}

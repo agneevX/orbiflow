@@ -154,6 +154,7 @@ export interface ParsedSatelliteProbe {
     isCpuPort?: boolean;
   }>;
   cpuPortNums?: number[];
+  vlanMemberPortNums?: number[];
   switchFdb: Array<{
     portNum: number;
     mac: string;
@@ -398,6 +399,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
     interfaces: [],
     switchPorts: [],
     cpuPortNums: [],
+    vlanMemberPortNums: [],
     switchFdb: [],
     bridgeMacs: [],
     wifiIfaces: [],
@@ -408,6 +410,7 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
   let section = '';
   const satelliteInfoLines: string[] = [];
   const taggedCpuPorts = new Set<number>();
+  const untaggedVlanPorts = new Set<number>();
   let currentSwitchPort: {
     portNum: number;
     linkUp: boolean;
@@ -576,6 +579,11 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
           const tagged = tok.match(/^(\d+)t$/i);
           if (tagged) {
             taggedCpuPorts.add(parseInt(tagged[1], 10));
+          } else {
+            const untagged = tok.match(/^(\d+)u?\*?$/i);
+            if (untagged) {
+              untaggedVlanPorts.add(parseInt(untagged[1], 10));
+            }
           }
         }
         continue;
@@ -832,6 +840,9 @@ export function parseSatelliteSshOutput(rawOutput: string): ParsedSatelliteProbe
         sp.isCpuPort = true;
       }
     }
+  }
+  if (untaggedVlanPorts.size > 0) {
+    result.vlanMemberPortNums = Array.from(untaggedVlanPorts);
   }
   if (satelliteInfoLines.length > 0) {
     result.satelliteInfo = parseSatelliteInfoWifi(satelliteInfoLines.join('\n'));

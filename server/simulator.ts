@@ -77,6 +77,20 @@ const LAN_DEVICES: ArpEntry[] = [
     mac: 'da:a1:19:4c:82:10',
     device: 'br0',
   },
+  {
+    ip: '10.0.1.10',
+    mac: '02:42:0a:00:01:0a',
+    device: 'eth1.10',
+    hostname: 'plex-docker',
+    vendor: 'Docker Container',
+  },
+  {
+    ip: '10.0.1.20',
+    mac: '02:42:0a:00:01:14',
+    device: 'eth1.10',
+    hostname: 'adguard-docker',
+    vendor: 'Docker Container',
+  },
 ];
 
 const FLOW_TEMPLATES: Array<{
@@ -313,6 +327,26 @@ const FLOW_TEMPLATES: Array<{
     rxWeight: 620_000,
     txWeight: 140_000,
   },
+  // Docker VLAN (10.0.1.0/24) container flows
+  {
+    proto: 'tcp',
+    state: 'ESTABLISHED',
+    src: '10.0.1.10',
+    dst: '185.199.108.133',
+    sport: 44312,
+    dport: 443,
+    rxWeight: 610_000,
+    txWeight: 95_000,
+  },
+  {
+    proto: 'udp',
+    src: '10.0.1.20',
+    dst: '1.1.1.1',
+    sport: 53810,
+    dport: 53,
+    rxWeight: 8_400,
+    txWeight: 6_200,
+  },
 ];
 
 export class OrbiProbeSimulator {
@@ -415,6 +449,7 @@ export class OrbiProbeSimulator {
     this.satOfficeRxBytes += satOfficeRxBps * stepSeconds;
     this.satOfficeTxBytes += satOfficeTxBps * stepSeconds;
 
+    // Orbi Router has 4 physical Ethernet ports: 1 WAN + 3 LAN
     const routerPorts: EthernetPortMetrics[] = [
       {
         id: 'eth0',
@@ -429,7 +464,7 @@ export class OrbiProbeSimulator {
         txBps: Math.round(tickTx / stepSeconds),
       },
       {
-        id: 'lan1',
+        id: 'port1',
         label: 'LAN 1 · Living Room',
         role: 'backhaul',
         linkUp: true,
@@ -441,7 +476,7 @@ export class OrbiProbeSimulator {
         txBps: satLivingRxBps,
       },
       {
-        id: 'lan2',
+        id: 'port2',
         label: 'LAN 2 · Office',
         role: 'backhaul',
         linkUp: true,
@@ -453,28 +488,16 @@ export class OrbiProbeSimulator {
         txBps: satOfficeRxBps,
       },
       {
-        id: 'lan3',
-        label: 'LAN 3 · Synology NAS',
+        id: 'port3',
+        label: 'LAN 3 · Homelab & NAS',
         role: 'lan',
         linkUp: true,
         speedMbps: 1000,
         duplex: 'full',
-        rxBytes: synology.txBytes,
-        txBytes: synology.rxBytes,
-        rxBps: synology.txBps,
-        txBps: synology.rxBps,
-      },
-      {
-        id: 'lan4',
-        label: 'LAN 4 · Homelab',
-        role: 'lan',
-        linkUp: true,
-        speedMbps: 1000,
-        duplex: 'full',
-        rxBytes: homelab.txBytes,
-        txBytes: homelab.rxBytes,
-        rxBps: homelab.txBps,
-        txBps: homelab.rxBps,
+        rxBytes: synology.txBytes + homelab.txBytes,
+        txBytes: synology.rxBytes + homelab.rxBytes,
+        rxBps: synology.txBps + homelab.txBps,
+        txBps: synology.rxBps + homelab.rxBps,
       },
     ];
 
@@ -494,7 +517,7 @@ export class OrbiProbeSimulator {
         mac: 'e4:5f:01:8a:22:14',
         ip: '192.168.1.10',
         connectionType: 'ethernet',
-        portOrRadio: 'LAN 4',
+        portOrRadio: 'LAN 3',
         linkSpeedMbps: 0,
         rxBytes: homelab.rxBytes,
         txBytes: homelab.txBytes,
@@ -667,6 +690,18 @@ export class OrbiProbeSimulator {
             rxBps: 0,
             txBps: 0,
           },
+          {
+            id: 'port4',
+            label: 'LAN 4',
+            role: 'lan',
+            linkUp: false,
+            speedMbps: 0,
+            duplex: 'unknown',
+            rxBytes: 0,
+            txBytes: 0,
+            rxBps: 0,
+            txBps: 0,
+          },
         ],
         clients: [
           {
@@ -758,6 +793,10 @@ export class OrbiProbeSimulator {
         connectionType: 'DHCP',
         mac: 'a0:04:60:7c:18:01',
       },
+      subnets: [
+        { cidr: '192.168.1.0/24', iface: 'br0' },
+        { cidr: '10.0.1.0/24', iface: 'eth1.10', vlanId: 10 },
+      ],
       routerClients,
       satellites,
       ...(includeSystem

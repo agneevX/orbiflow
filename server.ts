@@ -27,6 +27,7 @@ import {
   PersistenceStore,
   generateRandomProbeToken,
 } from './server/storage';
+import { sanitizeVlanConfigs } from './src/lib/vlanUtils';
 import type {
   AlertEvent,
   AlertRule,
@@ -35,6 +36,7 @@ import type {
   ProbeSnapshot,
   SatelliteConfig,
   TimeFormat,
+  VlanConfig,
 } from './src/types/telemetry';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -92,6 +94,7 @@ async function startServer() {
   let initialIspMaxDownMbps = DEFAULT_ISP_MAX_DOWN_MBPS;
   let initialIspMaxUpMbps = DEFAULT_ISP_MAX_UP_MBPS;
   let initialTimeFormat: TimeFormat = DEFAULT_TIME_FORMAT;
+  let initialVlans: VlanConfig[] = [];
   let initialTablePreferences = sanitizeTablePreferences(DEFAULT_TABLE_PREFERENCES);
   let initialFeatureVisibility = sanitizeFeatureVisibility(DEFAULT_FEATURE_VISIBILITY);
   let initialSatellites: SatelliteConfig[] = [];
@@ -178,6 +181,9 @@ async function startServer() {
     if (savedUserConfig.timeFormat === '12h' || savedUserConfig.timeFormat === '24h') {
       initialTimeFormat = savedUserConfig.timeFormat;
     }
+    if (Array.isArray(savedUserConfig.vlans)) {
+      initialVlans = sanitizeVlanConfigs(savedUserConfig.vlans);
+    }
     if (savedUserConfig.tablePreferences) {
       initialTablePreferences = sanitizeTablePreferences(savedUserConfig.tablePreferences);
     }
@@ -225,6 +231,7 @@ async function startServer() {
     ispMaxDownMbps: initialIspMaxDownMbps,
     ispMaxUpMbps: initialIspMaxUpMbps,
     timeFormat: initialTimeFormat,
+    vlans: initialVlans,
     tablePreferences: initialTablePreferences,
     featureVisibility: initialFeatureVisibility,
   });
@@ -283,6 +290,7 @@ async function startServer() {
       ispMaxDownMbps: snap.serverConfig.ispMaxDownMbps,
       ispMaxUpMbps: snap.serverConfig.ispMaxUpMbps,
       timeFormat: snap.serverConfig.timeFormat,
+      vlans: snap.serverConfig.vlans || [],
       tablePreferences: snap.serverConfig.tablePreferences,
       featureVisibility: snap.serverConfig.featureVisibility,
       satellites: satellitePoller.getConfigs(),
@@ -540,6 +548,37 @@ async function startServer() {
       rdnsCache.updateConfig({ server: nextRdnsServer });
     }
 
+    const nextLanDnsEnabled =
+      typeof body.lanDnsEnabled === 'boolean'
+        ? body.lanDnsEnabled
+        : currentCfg.lanDnsEnabled;
+
+    let nextLanDnsServer = currentCfg.lanDnsServer;
+    if (body.lanDnsServer !== undefined) {
+      const lanDnsCheck = validateDnsServer(body.lanDnsServer);
+      if (!lanDnsCheck.ok) {
+        res.status(400).json({ error: lanDnsCheck.error || 'Invalid private reverse DNS server address' });
+        return;
+      }
+      nextLanDnsServer = lanDnsCheck.value;
+    }
+
+    const nextStripLanDomain =
+      typeof body.stripLanDomain === 'boolean'
+        ? body.stripLanDomain
+        : currentCfg.stripLanDomain;
+
+    lanResolver.updateConfig({
+      enabled: nextLanDnsEnabled,
+      server: nextLanDnsServer,
+      stripDomain: nextStripLanDomain,
+    });
+
+    const nextVlans =
+      body.vlans !== undefined
+        ? sanitizeVlanConfigs(body.vlans)
+        : currentCfg.vlans || [];
+
     const nextTimeFormat: TimeFormat =
       body.timeFormat === '12h' || body.timeFormat === '24h'
         ? body.timeFormat
@@ -573,12 +612,16 @@ async function startServer() {
       persistenceMode: storage.getMode(),
       cacheDir: storage.getConfiguredCacheDir(),
       rdnsServer: nextRdnsServer,
+      lanDnsEnabled: lanResolver.getConfig().enabled,
+      lanDnsServer: lanResolver.getConfig().server,
+      stripLanDomain: lanResolver.getConfig().stripDomain,
       inferDeviceNames: nextInferDeviceNames,
       dhcpLeasesPath: nextDhcpLeasesPath,
       ispName: nextIspName,
       ispMaxDownMbps: nextIspMaxDownMbps,
       ispMaxUpMbps: nextIspMaxUpMbps,
       timeFormat: nextTimeFormat,
+      vlans: nextVlans,
       tablePreferences: nextTablePreferences,
       featureVisibility: nextFeatureVisibility,
     });
@@ -802,7 +845,11 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(DIST_PATH));
-    app.get('*', (_req, res) => {
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: 'API route not found' });
+        return;
+      }
       res.sendFile(path.join(DIST_PATH, 'index.html'));
     });
   }

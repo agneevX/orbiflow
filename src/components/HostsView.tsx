@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import type {
   BandwidthUnit,
+  DetectedSubnet,
   DeviceNameSource,
   DevicesTablePrefs,
   HostSummary,
@@ -33,6 +34,7 @@ import { TechTerm } from './TechTerm';
 
 interface HostsViewProps {
   hosts: HostSummary[];
+  detectedSubnets?: DetectedSubnet[];
   unit: BandwidthUnit;
   theme: ThemePalette;
   prefs: DevicesTablePrefs;
@@ -86,6 +88,7 @@ const DEVICE_COLUMN_ITEMS: Array<{
 
 export function HostsView({
   hosts,
+  detectedSubnets = [],
   unit,
   theme,
   prefs,
@@ -101,6 +104,7 @@ export function HostsView({
 
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<HostTypeFilter>('ALL');
+  const [vlanFilter, setVlanFilter] = useState<string>('ALL');
   const [showIdle, setShowIdle] = useState(true);
   // Default to Total Data descending so rows remain calm and do not jump every poll tick
   const [sortKey, setSortKey] = useState<HostSortKey>('totalBytes');
@@ -170,10 +174,34 @@ export function HostsView({
     );
   };
 
+  const vlanOptions = useMemo(() => {
+    const map = new Map<string, { label: string; cidr: string }>();
+    for (const h of hosts) {
+      if (h.vlanName && h.vlanCidr) {
+        map.set(h.vlanCidr, { label: h.vlanName, cidr: h.vlanCidr });
+      }
+    }
+    for (const sub of detectedSubnets) {
+      if (!sub.isPrimary && !map.has(sub.cidr)) {
+        map.set(sub.cidr, {
+          label: sub.name || (sub.vlanId ? `VLAN ${sub.vlanId}` : sub.cidr),
+          cidr: sub.cidr,
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [hosts, detectedSubnets]);
+
   const filteredHosts = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = hosts.filter((h) => {
       if (!showIdle && !hasTangibleTraffic(h.rxBps, h.txBps)) return false;
+
+      if (vlanFilter === 'PRIMARY') {
+        if (h.vlanCidr) return false;
+      } else if (vlanFilter !== 'ALL') {
+        if (h.vlanCidr !== vlanFilter) return false;
+      }
 
       if (typeFilter === 'NAMED') {
         if (h.nameSource !== 'alias' && h.nameSource !== 'lan-dns' && h.nameSource !== 'dhcp') {
@@ -193,7 +221,8 @@ export function HostsView({
         h.connectionType === 'wifi'
           ? `wifi wi-fi ${h.wifiBand || ''} ${h.apName || 'main ap'}`
           : `ethernet wired ${h.apName || 'main ap'}`;
-      const haystack = `${h.hostname} ${h.ip} ${h.mac} ${h.vendor} ${services} ${connHint} ${h.ptrHostname || ''}`.toLowerCase();
+      const vlanHint = `${h.vlanName || ''} ${h.vlanCidr || ''}`;
+      const haystack = `${h.hostname} ${h.ip} ${h.mac} ${h.vendor} ${services} ${connHint} ${vlanHint} ${h.ptrHostname || ''}`.toLowerCase();
       return haystack.includes(q);
     });
 
@@ -210,7 +239,7 @@ export function HostsView({
       if (cmp !== 0) return cmp * dir;
       return compareIpv4(a.ip, b.ip);
     });
-  }, [hosts, search, typeFilter, showIdle, sortKey, sortDir]);
+  }, [hosts, search, typeFilter, vlanFilter, showIdle, sortKey, sortDir]);
 
   const startEdit = (host: HostSummary) => {
     setEditingIp(host.ip);
@@ -307,6 +336,29 @@ export function HostsView({
             <option value="PRIVATE_MAC">Private MAC</option>
           </select>
         </div>
+
+        {vlanOptions.length > 0 && (
+          <div className="flex items-center gap-2">
+            <label htmlFor="hosts-vlan-filter" className="text-xs app-text-muted whitespace-nowrap">
+              VLAN
+            </label>
+            <select
+              id="hosts-vlan-filter"
+              data-testid="hosts-vlan-select"
+              value={vlanFilter}
+              onChange={(e) => setVlanFilter(e.target.value)}
+              className="app-input border rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
+            >
+              <option value="ALL">All Subnets</option>
+              <option value="PRIMARY">Primary LAN</option>
+              {vlanOptions.map((v) => (
+                <option key={v.cidr} value={v.cidr}>
+                  {v.label} ({v.cidr})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <label className="inline-flex items-center gap-1.5 text-xs app-text-muted cursor-pointer whitespace-nowrap select-none">
           <input
@@ -682,7 +734,15 @@ export function HostsView({
 
                       {localPrefs.showIp && (
                         <td className="py-2.5 px-3 align-middle whitespace-nowrap tabular-nums">
-                          {host.ip}
+                          <div>{host.ip}</div>
+                          {host.vlanName && (
+                            <div
+                              className="mt-0.5 inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400"
+                              title={host.vlanCidr}
+                            >
+                              {host.vlanName}
+                            </div>
+                          )}
                         </td>
                       )}
 

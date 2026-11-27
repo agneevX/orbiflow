@@ -13,6 +13,7 @@ import type {
   TablePreferences,
   TimeFormat,
   TrafficPoint,
+  VlanConfig,
 } from '../src/types/telemetry';
 
 export const DEFAULT_CONFIG_DIR = '/config';
@@ -42,6 +43,7 @@ export interface PersistedUserConfig {
   ispMaxDownMbps?: number;
   ispMaxUpMbps?: number;
   timeFormat?: TimeFormat;
+  vlans?: VlanConfig[];
   tablePreferences?: TablePreferences;
   featureVisibility?: FeatureVisibility;
   satellites?: SatelliteConfig[];

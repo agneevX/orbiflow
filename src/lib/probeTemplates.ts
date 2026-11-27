@@ -411,6 +411,12 @@ def read_swconfig_ports(swconfig_bin):
     if cur is not None:
         ports.append(cur)
 
+    # Collect all untagged VLAN member ports (physical switch ports assigned to a VLAN)
+    all_vlan_untagged = set()
+    for members in vlan_members.values():
+        for m in members:
+            all_vlan_untagged.add(m)
+
     # Identify WAN switch port when a dedicated single-port VLAN exists alongside a multi-port LAN VLAN
     if len(vlan_members) >= 2:
         single_port_vlans = [m for m in vlan_members.values() if len(m) == 1]
@@ -419,35 +425,51 @@ def read_swconfig_ports(swconfig_bin):
             for members in single_port_vlans:
                 wan_ports.add(members[0])
 
-    # Always exclude internal CPU switch ports (tagged in VLANs, or port 0 when multiple ports exist)
-    if not cpu_ports and len(ports) > 1:
+    # Always exclude internal CPU/GMAC ports (port 0, tagged VLAN ports, non-VLAN-member ports, and QCA8337 ports >= 5)
+    if len(ports) > 1:
         cpu_ports.add(0)
-    filtered = [p for p in ports if p.get("_pnum", -1) not in cpu_ports]
-
-    lan_idx = 1
-    for p in filtered:
+    has_ports_1_to_4 = any(1 <= p.get("_pnum", -1) <= 4 for p in ports)
+    filtered = []
+    for p in ports:
         pnum = p.get("_pnum", -1)
-        if pnum in wan_ports:
-            p["role"] = "wan"
-            p["label"] = "WAN"
-        else:
-            p["role"] = "lan"
-            p["label"] = f"LAN {lan_idx}"
-            lan_idx += 1
+        if pnum in cpu_ports:
+            continue
+        if all_vlan_untagged and pnum not in all_vlan_untagged:
+            continue
+        if has_ports_1_to_4 and pnum >= 5:
+            continue
+        filtered.append(p)
+
+    # Orbi routers have 4 physical Ethernet ports: 1 WAN + 3 LAN
+    lan_candidates = [p for p in filtered if p.get("_pnum", -1) not in wan_ports]
+    wan_candidates = [p for p in filtered if p.get("_pnum", -1) in wan_ports]
+    if len(lan_candidates) > 3:
+        lan_candidates = lan_candidates[:3]
+
+    final_ports = []
+    for p in wan_candidates[:1]:
+        p["role"] = "wan"
+        p["label"] = "WAN"
         p.pop("_pnum", None)
-    return filtered, cpu_ports, wan_ports
+        final_ports.append(p)
+    for idx, p in enumerate(lan_candidates, 1):
+        p["role"] = "lan"
+        p["label"] = f"LAN {idx}"
+        p.pop("_pnum", None)
+        final_ports.append(p)
+    return final_ports, cpu_ports, wan_ports
 
 
 def read_router_ports(wan_iface, swconfig_bin):
     dev_map = read_proc_net_dev()
     sw_ports, cpu_ports, wan_switch_ports = read_swconfig_ports(swconfig_bin)
-    sw_lan_ports = [p for p in sw_ports if p.get("role") != "wan"]
+    sw_lan_ports = [p for p in sw_ports if p.get("role") != "wan"][:3]
     sw_wan_ports = [p for p in sw_ports if p.get("role") == "wan"]
 
     ports = []
     seen = set()
 
-    def build_sysfs_port(name, force_wan=False):
+    def build_sysfs_port(name, force_wan=False, custom_label=None):
         base = f"/sys/class/net/{name}"
         oper = read_text(f"{base}/operstate").strip().lower()
         speed = read_int(f"{base}/speed")
@@ -460,7 +482,7 @@ def read_router_ports(wan_iface, swconfig_bin):
         is_wan = force_wan or name == wan_iface
         return {
             "id": name,
-            "label": f"WAN ({name})" if is_wan else name,
+            "label": custom_label or (f"WAN ({name})" if is_wan else name),
             "role": "wan" if is_wan else "lan",
             "linkUp": oper == "up" or speed > 0,
             "speedMbps": speed,
@@ -497,8 +519,11 @@ def read_router_ports(wan_iface, swconfig_bin):
     except OSError:
         names = []
 
+    lan_added = 0
     for name in names:
         if name == "lo" or name in seen:
+            continue
+        if "." in name or "@" in name or ":" in name:
             continue
         if not (
             name.startswith("eth") or name.startswith("en") or name.startswith("lan") or name.startswith("wan")
@@ -506,10 +531,124 @@ def read_router_ports(wan_iface, swconfig_bin):
             continue
         if os.path.isdir(f"/sys/class/net/{name}/wireless"):
             continue
-        ports.append(build_sysfs_port(name))
+        lan_added += 1
+        ports.append(build_sysfs_port(name, custom_label=f"LAN {lan_added} ({name})"))
         seen.add(name)
+        if lan_added >= 3:
+            break
 
     return ports, cpu_ports, wan_switch_ports, sw_lan_ports
+
+
+def _ipv4_network_cidr(ip_str, prefix_len):
+    try:
+        if prefix_len < 8 or prefix_len > 30:
+            return None
+        packed = socket.inet_aton(ip_str)
+        ip_int = struct.unpack("!I", packed)[0]
+        mask = (0xFFFFFFFF << (32 - prefix_len)) & 0xFFFFFFFF
+        net_int = ip_int & mask
+        net_str = socket.inet_ntoa(struct.pack("!I", net_int))
+        return f"{net_str}/{prefix_len}"
+    except Exception:
+        return None
+
+
+def _mask_int_to_prefix(mask_int):
+    bits = 0
+    for shift in range(31, -1, -1):
+        if (mask_int >> shift) & 1:
+            bits += 1
+        else:
+            break
+    expected = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF if bits > 0 else 0
+    return bits if mask_int == expected else -1
+
+
+def read_router_subnets(wan_iface, ip_bin):
+    vlan_id_by_iface = {}
+    vlan_cfg = read_text("/proc/net/vlan/config")
+    for raw in vlan_cfg.splitlines():
+        if "|" not in raw:
+            continue
+        parts = [p.strip() for p in raw.split("|")]
+        if len(parts) >= 2 and parts[1].isdigit():
+            vlan_id_by_iface[parts[0]] = int(parts[1])
+
+    subnets_by_cidr = {}
+
+    if ip_bin:
+        try:
+            out = subprocess.check_output(
+                [ip_bin, "-4", "-o", "addr", "show"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", errors="ignore")
+            for raw in out.splitlines():
+                parts = raw.split()
+                if len(parts) < 4:
+                    continue
+                iface = parts[1].split("@", 1)[0]
+                if iface == "lo" or iface == wan_iface:
+                    continue
+                inet_idx = -1
+                for idx, tok in enumerate(parts):
+                    if tok == "inet" and idx + 1 < len(parts):
+                        inet_idx = idx + 1
+                        break
+                if inet_idx < 0 or "/" not in parts[inet_idx]:
+                    continue
+                ip_part, pfx_part = parts[inet_idx].split("/", 1)
+                if not pfx_part.isdigit() or not is_private_lan_ip(ip_part):
+                    continue
+                cidr = _ipv4_network_cidr(ip_part, int(pfx_part))
+                if not cidr:
+                    continue
+                vlan_id = vlan_id_by_iface.get(iface)
+                if vlan_id is None and "." in iface:
+                    tail = iface.rsplit(".", 1)[-1]
+                    if tail.isdigit():
+                        vlan_id = int(tail)
+                entry = {"cidr": cidr, "iface": iface}
+                if vlan_id is not None:
+                    entry["vlanId"] = vlan_id
+                subnets_by_cidr[cidr] = entry
+        except Exception:
+            pass
+
+    # Also inspect /proc/net/route for statically routed private VLAN subnets
+    for raw in read_text("/proc/net/route").splitlines()[1:]:
+        parts = raw.split()
+        if len(parts) < 8:
+            continue
+        iface = parts[0]
+        if iface == "lo" or iface == wan_iface:
+            continue
+        dest_ip = _decode_proc_route_hex_ip(parts[1])
+        if not dest_ip or not is_private_lan_ip(dest_ip):
+            continue
+        try:
+            mask_host = int(parts[7], 16)
+            mask_be = struct.unpack("!I", struct.pack("=I", mask_host))[0]
+            pfx = _mask_int_to_prefix(mask_be)
+        except Exception:
+            continue
+        if pfx < 16 or pfx > 30:
+            continue
+        cidr = _ipv4_network_cidr(dest_ip, pfx)
+        if not cidr or cidr in subnets_by_cidr:
+            continue
+        vlan_id = vlan_id_by_iface.get(iface)
+        if vlan_id is None and "." in iface:
+            tail = iface.rsplit(".", 1)[-1]
+            if tail.isdigit():
+                vlan_id = int(tail)
+        entry = {"cidr": cidr, "iface": iface}
+        if vlan_id is not None:
+            entry["vlanId"] = vlan_id
+        subnets_by_cidr[cidr] = entry
+
+    return list(subnets_by_cidr.values())
 
 
 def discover_dnsmasq_files(custom_lease_path=""):
@@ -1607,6 +1746,7 @@ def main():
     router_clients = []
     wan_details = None
     satellite_info = []
+    router_subnets = []
     cpu_ports = set()
     wan_switch_ports = set()
     sw_lan_ports = []
@@ -1644,6 +1784,7 @@ def main():
                 if now_ts - last_ports_refresh >= cfg["ports_interval"]:
                     wan_details = read_wan_details(cfg["iface"], ip_bin, ifconfig_bin, nvram_bin)
                     satellite_info = read_satelliteinfo_wifi(satinfo_bin)
+                    router_subnets = read_router_subnets(cfg["iface"], ip_bin)
                     ports_payload, cpu_ports, wan_switch_ports, sw_lan_ports = read_router_ports(
                         cfg["iface"], swconfig_bin
                     )
@@ -1678,6 +1819,8 @@ def main():
 
                 if ports_payload is not None:
                     data["ports"] = ports_payload
+                    if router_subnets:
+                        data["subnets"] = router_subnets
                     if wan_details:
                         data["wan"] = wan_details
                     if satellite_info:

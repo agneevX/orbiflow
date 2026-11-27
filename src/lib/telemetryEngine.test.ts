@@ -1096,5 +1096,77 @@ test('TrafficMonitorEngine computes pure LAN traffic from eth1 minus WAN and res
   assert.deepEqual(host.topServices, ['Apple']);
 });
 
+test('TrafficMonitorEngine caps router ports to 4 (1 WAN + 3 LAN), detects VLANs, and tracks dual-endpoint inter-VLAN hosts', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_770_000_000_000;
+
+  // Configure custom Docker VLAN name
+  engine.updateServerConfig({
+    vlans: [{ id: 'vlan-docker', name: 'Docker Containers', cidr: '10.0.1.0/24', vlanId: 10 }],
+  });
+
+  // Simulate an older/noisy probe reporting 7 ports (WAN + 6 switch/virtual ports) + Docker VLAN subnet
+  const { dashboard } = engine.ingest({
+    probeId: 'orbi-rbr50',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 500_000, txBytes: 250_000 },
+    ports: [
+      { id: 'eth0', label: 'WAN (eth0)', role: 'wan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 500_000, txBytes: 250_000, rxBps: 0, txBps: 0 },
+      { id: 'port0', label: 'Port 0', role: 'lan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 0, txBytes: 0, rxBps: 0, txBps: 0 },
+      { id: 'port1', label: 'LAN 1', role: 'lan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 0, txBytes: 0, rxBps: 0, txBps: 0 },
+      { id: 'port2', label: 'LAN 2', role: 'lan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 0, txBytes: 0, rxBps: 0, txBps: 0 },
+      { id: 'port3', label: 'LAN 3', role: 'lan', linkUp: false, speedMbps: 0, duplex: 'unknown', rxBytes: 0, txBytes: 0, rxBps: 0, txBps: 0 },
+      { id: 'port5', label: 'LAN 5', role: 'lan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 0, txBytes: 0, rxBps: 0, txBps: 0 },
+      { id: 'eth1.10', label: 'eth1.10', role: 'lan', linkUp: true, speedMbps: 1000, duplex: 'full', rxBytes: 0, txBytes: 0, rxBps: 0, txBps: 0 },
+    ],
+    subnets: [
+      { cidr: '10.0.0.0/24', iface: 'br0', source: 'interface' },
+      { cidr: '10.0.1.0/24', iface: 'br0.10', vlanId: 10, source: 'vlan' },
+    ],
+    arp: [
+      { ip: '10.0.0.15', mac: 'aa:bb:cc:00:00:15', device: 'br0', hostname: 'workstation' },
+    ],
+    flows: [
+      // Inter-VLAN flow: primary LAN host -> Docker container on 10.0.1.20 (not in ARP)
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '10.0.0.15',
+        dst: '10.0.1.20',
+        sport: 54000,
+        dport: 8080,
+        txBytes: 12_000,
+        rxBytes: 85_000,
+      },
+    ],
+  });
+
+  // Router ports strictly normalized to 4: 1 WAN + 3 LAN (port0, port5, eth1.10 dropped)
+  const routerPorts = dashboard.topology?.routerPorts || [];
+  assert.equal(routerPorts.length, 4);
+  assert.equal(routerPorts[0].role, 'wan');
+  assert.equal(routerPorts.filter((p) => p.role === 'lan').length, 3);
+
+  // Both endpoints of inter-VLAN flow exist as hosts, and 10.0.1.20 is tagged with Docker Containers VLAN
+  const workstation = dashboard.hosts.find((h) => h.ip === '10.0.0.15');
+  const container = dashboard.hosts.find((h) => h.ip === '10.0.1.20');
+  assert.ok(workstation);
+  assert.equal(workstation.vlanName, undefined);
+  assert.ok(container, 'Expected Docker container 10.0.1.20 to be discovered from inter-VLAN flow');
+  assert.equal(container.vlanName, 'Docker Containers');
+  assert.equal(container.vlanCidr, '10.0.1.0/24');
+  assert.equal(container.vlanId, 10);
+
+  // Detected subnets list includes primary 10.0.0.0/24 and VLAN 10.0.1.0/24
+  assert.ok(dashboard.detectedSubnets && dashboard.detectedSubnets.length >= 2);
+  const dockerSub = dashboard.detectedSubnets.find((s) => s.cidr === '10.0.1.0/24');
+  assert.ok(dockerSub);
+  assert.equal(dockerSub.name, 'Docker Containers');
+  assert.equal(dockerSub.isPrimary, false);
+  assert.equal(dockerSub.hostCount, 1);
+});
+
+
 
 

@@ -292,17 +292,34 @@ export function convertProbeToTelemetry(
   const gatewayBridgeIface =
     gatewayBridgePortNum !== undefined ? bridgeIfaceByPortNum.get(gatewayBridgePortNum) : undefined;
 
-  // Exclude internal CPU / RGMII tagged switch ports (port 0 or any port tagged 't' in VLAN config)
+  // Exclude internal CPU / RGMII / unused QCA8337 switch ports:
+  // On 7-port Orbi switches (ports 0..6), port 0 and ports 5/6 are internal CPU/GMAC/unused ports
+  // while ports 1..4 are the 4 physical RJ45 LAN ports on the satellite.
   const cpuPortNums = new Set<number>(parsed.cpuPortNums || []);
-  const physicalSwitchPorts = parsed.switchPorts.filter(
-    (sp) =>
-      !sp.isCpuPort &&
-      !cpuPortNums.has(sp.portNum) &&
-      !(sp.portNum === 0 && parsed.switchPorts.length > 1)
-  );
+  const vlanMemberSet = new Set<number>(parsed.vlanMemberPortNums || []);
+  const hasCoreRj45Range = parsed.switchPorts.some((sp) => sp.portNum >= 1 && sp.portNum <= 4);
+
+  const rawPhysicalSwitchPorts = parsed.switchPorts.filter((sp) => {
+    if (sp.isCpuPort || cpuPortNums.has(sp.portNum)) return false;
+    if (sp.portNum === 0 && parsed.switchPorts.length > 1) return false;
+    if (vlanMemberSet.size > 0 && !vlanMemberSet.has(sp.portNum)) return false;
+    if (hasCoreRj45Range && sp.portNum >= 5 && parsed.switchPorts.length >= 5) return false;
+    return true;
+  });
+
+  // Satellites have 4 physical LAN RJ45 ports
+  const physicalSwitchPorts = rawPhysicalSwitchPorts
+    .sort((a, b) => a.portNum - b.portNum)
+    .slice(0, 4);
+  const physicalPortNumSet = new Set(physicalSwitchPorts.map((sp) => sp.portNum));
+
   const gatewaySwitchPortNum = gatewayMac
     ? parsed.switchFdb.find(
-        (e) => e.mac === gatewayMac && e.portNum !== 0 && !cpuPortNums.has(e.portNum)
+        (e) =>
+          e.mac === gatewayMac &&
+          e.portNum !== 0 &&
+          !cpuPortNums.has(e.portNum) &&
+          (physicalPortNumSet.size === 0 || physicalPortNumSet.has(e.portNum))
       )?.portNum
     : undefined;
 
@@ -510,8 +527,9 @@ export function convertProbeToTelemetry(
   const ports: EthernetPortMetrics[] = [];
 
   if (physicalSwitchPorts.length > 0) {
-    for (const sp of physicalSwitchPorts) {
+    physicalSwitchPorts.forEach((sp, idx) => {
       const id = `port${sp.portNum}`;
+      const lanNum = idx + 1;
       const prevCounters = prev?.portBytes.get(id);
       const rxBps = computeCounterDeltaBps(sp.rxBytes, prevCounters?.rx, dtSec);
       const txBps = computeCounterDeltaBps(sp.txBytes, prevCounters?.tx, dtSec);
@@ -520,7 +538,7 @@ export function convertProbeToTelemetry(
       const isBackhaulPort = backhaulType === 'ethernet' && uplinkSwitchPortNum === sp.portNum;
       ports.push({
         id,
-        label: isBackhaulPort ? `Port ${sp.portNum} (Backhaul)` : `LAN ${sp.portNum}`,
+        label: isBackhaulPort ? `LAN ${lanNum} (Backhaul)` : `LAN ${lanNum}`,
         role: isBackhaulPort ? 'backhaul' : 'lan',
         linkUp: sp.linkUp,
         speedMbps: sp.speedMbps,
@@ -530,12 +548,18 @@ export function convertProbeToTelemetry(
         rxBps,
         txBps,
       });
-    }
+    });
   } else {
-    // No swconfig switch ports: expose physical eth*/en*/lan*/wan* interfaces (never br0)
-    const ethIfaces = parsed.interfaces.filter(
-      (iface) => !iface.isWireless && /^(eth|en|lan|wan)/i.test(iface.name)
-    );
+    // No swconfig switch ports: expose only physical Ethernet interfaces (exclude br0 and VLAN subinterfaces like eth0.1)
+    const ethIfaces = parsed.interfaces
+      .filter(
+        (iface) =>
+          !iface.isWireless &&
+          !iface.name.includes('.') &&
+          !iface.name.includes('@') &&
+          /^(eth|en|lan|wan)\d*$/i.test(iface.name)
+      )
+      .slice(0, 4);
     for (const iface of ethIfaces) {
       const prevCounters = prev?.portBytes.get(iface.name);
       const rxBps = computeCounterDeltaBps(iface.rxBytes, prevCounters?.rx, dtSec);

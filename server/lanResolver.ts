@@ -22,7 +22,7 @@ export class LanResolver {
   private cache = new Map<string, LanCacheEntry>();
   private inFlight = new Set<string>();
   private config: LanResolverConfig;
-  private resolver: dns.promises.Resolver;
+  private resolver: dns.promises.Resolver | null;
   private hits = 0;
   private misses = 0;
   private readonly maxEntries = 1000;
@@ -38,17 +38,19 @@ export class LanResolver {
     this.resolver = this.buildResolver(this.config.server);
   }
 
-  private buildResolver(serverSpec: string): dns.promises.Resolver {
-    const res = new dns.promises.Resolver();
+  private buildResolver(serverSpec: string): dns.promises.Resolver | null {
     const servers = parseDnsServers(serverSpec);
-    if (servers.length > 0) {
-      try {
-        res.setServers(servers);
-      } catch {
-        // Invalid server syntax falls back to system default resolver
-      }
+    if (servers.length === 0) {
+      // Null resolver delegates directly to Node's default container DNS (/etc/resolv.conf)
+      return null;
     }
-    return res;
+    const res = new dns.promises.Resolver();
+    try {
+      res.setServers(servers);
+      return res;
+    } catch {
+      return null;
+    }
   }
 
   public getConfig(): LanResolverConfig {
@@ -58,16 +60,18 @@ export class LanResolver {
   public updateConfig(next: Partial<LanResolverConfig>): LanResolverConfig {
     const nextServer =
       typeof next.server === 'string' ? next.server.trim() : this.config.server;
+    const nextEnabled = next.enabled ?? this.config.enabled;
     const serverChanged = nextServer !== this.config.server;
+    const newlyEnabled = nextEnabled && !this.config.enabled;
 
     this.config = {
-      enabled: next.enabled ?? this.config.enabled,
+      enabled: nextEnabled,
       server: nextServer,
       ttlSec: Math.max(30, Math.min(86400, Number(next.ttlSec) || this.config.ttlSec)),
       stripDomain: next.stripDomain ?? this.config.stripDomain,
     };
 
-    if (serverChanged) {
+    if (serverChanged || newlyEnabled) {
       this.resolver = this.buildResolver(this.config.server);
       this.clear();
     }
@@ -99,7 +103,7 @@ export class LanResolver {
    * configured local DNS server (or system DNS) for private IPs only.
    */
   public lookup(ip: string, now = Date.now()): string | null {
-    if (!ip || !isPrivateIp(ip)) return null;
+    if (!this.config.enabled || !ip || !isPrivateIp(ip)) return null;
 
     const entry = this.cache.get(ip);
     if (entry && entry.expiresAt > now) {
@@ -111,7 +115,7 @@ export class LanResolver {
       this.cache.delete(ip);
     }
 
-    if (this.config.enabled && !this.inFlight.has(ip) && this.inFlight.size < this.maxConcurrent) {
+    if (!this.inFlight.has(ip) && this.inFlight.size < this.maxConcurrent) {
       this.misses += 1;
       this.scheduleResolve(ip);
     }
@@ -126,7 +130,11 @@ export class LanResolver {
       setTimeout(() => reject(new Error('LAN PTR timeout')), 1500)
     );
 
-    Promise.race([activeResolver.reverse(ip), timeout])
+    const lookupPromise = activeResolver
+      ? activeResolver.reverse(ip)
+      : dns.promises.reverse(ip);
+
+    Promise.race([lookupPromise, timeout])
       .then((names) => {
         const raw = Array.isArray(names) && names.length > 0 ? names[0].trim() : null;
         const hostname = raw ? raw.replace(/\.+$/, '') : null;

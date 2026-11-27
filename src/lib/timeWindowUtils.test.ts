@@ -207,3 +207,28 @@ test('analyzeTimeWindow stitches all live history points newer than last rollup 
   const lastPoint = res.points[res.points.length - 1];
   assert.equal(lastPoint.timestamp, now);
 });
+
+test('getDisplaySegmentsForAnalysis preserves >=2 endpoints when live segment is shorter than bucket size on 15m/1h windows', async () => {
+  const { getDisplaySegmentsForAnalysis } = await import('./timeWindowUtils');
+  const now = 1_700_000_000_000;
+  // Fresh boot with only 4 live samples (every 3s = 9s span, much smaller than 15m 18s bucket)
+  const freshLive: TrafficPoint[] = [
+    { timestamp: now - 9_000, rxBps: 1_000_000, txBps: 200_000, activeFlows: 4 },
+    { timestamp: now - 6_000, rxBps: 1_500_000, txBps: 250_000, activeFlows: 5 },
+    { timestamp: now - 3_000, rxBps: 1_200_000, txBps: 220_000, activeFlows: 5 },
+    { timestamp: now, rxBps: 2_000_000, txBps: 300_000, activeFlows: 6 },
+  ];
+
+  for (const win of ['15m', '1h', '6h', '24h'] as const) {
+    const analysis = analyzeTimeWindow(win, freshLive, [], now);
+    const segs = getDisplaySegmentsForAnalysis(analysis, false);
+    assert.equal(segs.length, 1);
+    assert.ok(
+      segs[0].length >= 2,
+      `Expected >=2 drawable points on ${win} for 4 live samples, got ${segs[0].length}`
+    );
+    assert.equal(segs[0][0].timestamp, freshLive[0].timestamp);
+    assert.equal(segs[0][segs[0].length - 1].timestamp, freshLive[freshLive.length - 1].timestamp);
+  }
+});
+

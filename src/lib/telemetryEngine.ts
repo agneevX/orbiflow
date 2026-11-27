@@ -4,6 +4,7 @@ import type {
   ArpEntry,
   ClientDestinationLink,
   DashboardSnapshot,
+  DetectedSubnet,
   DeviceAlias,
   EnrichedFlow,
   EthernetPortMetrics,
@@ -13,6 +14,7 @@ import type {
   NotificationConfig,
   ProbeSnapshot,
   ProbeStatus,
+  ProbeSubnetEntry,
   ProtocolSummary,
   PublicSatelliteConfig,
   RawConntrackFlow,
@@ -50,6 +52,13 @@ import {
   sanitizeFeatureVisibility,
   sanitizeTablePreferences,
 } from './tablePreferences';
+import {
+  findMatchingVlan,
+  getIpv4Slash24,
+  ipMatchesCidr,
+  parseIpv4Cidr,
+  sanitizeVlanConfigs,
+} from './vlanUtils';
 
 interface FlowTrackRecord {
   firstSeen: number;
@@ -287,6 +296,7 @@ export class TrafficMonitorEngine {
     ispMaxDownMbps: 1000,
     ispMaxUpMbps: 200,
     timeFormat: '12h',
+    vlans: [],
     tablePreferences: sanitizeTablePreferences(DEFAULT_TABLE_PREFERENCES),
     featureVisibility: sanitizeFeatureVisibility(DEFAULT_FEATURE_VISIBILITY),
   };
@@ -294,6 +304,7 @@ export class TrafficMonitorEngine {
   private hostTopServicesCache = new Map<string, { services: string[]; updatedAt: number }>();
   private readonly topServicesRefreshMs = 15_000;
   private routerPorts: EthernetPortMetrics[] = [];
+  private routerSubnets: ProbeSubnetEntry[] = [];
   private prevRouterPortBytes = new Map<string, { rx: number; tx: number }>();
   private prevLanIfaceBytes = new Map<string, { rx: number; tx: number }>();
   private latestLanSummary: LanTrafficSummary | undefined = undefined;
@@ -364,6 +375,7 @@ export class TrafficMonitorEngine {
       protocols: [],
       remotes: [],
       clientLinks: [],
+      detectedSubnets: [],
       topology: this.buildTopologyTelemetry(),
       rules: this.rules.map((r) => ({ ...r })),
       alerts: [],
@@ -377,20 +389,77 @@ export class TrafficMonitorEngine {
     };
   }
 
+  private normalizePhysicalPorts(
+    ports: EthernetPortMetrics[],
+    mode: 'router' | 'satellite',
+    wanIface?: string
+  ): EthernetPortMetrics[] {
+    if (!Array.isArray(ports) || ports.length === 0) return [];
+    const cleaned = ports.filter((p) => {
+      const id = String(p.id || '').trim();
+      if (!id) return false;
+      // Exclude virtual VLAN subinterfaces / aliases (e.g. eth0.1, eth1.10, eth1@if2)
+      if (id.includes('.') || id.includes('@') || id.includes(':')) return false;
+      // Exclude QCA8337 internal CPU/GMAC ports (port0, port5, port6)
+      const portMatch = /^port(\d+)$/i.exec(id);
+      if (portMatch) {
+        const num = Number(portMatch[1]);
+        if (num === 0 || num >= 5) return false;
+      }
+      return true;
+    });
+
+    if (mode === 'router') {
+      const wanPort =
+        cleaned.find((p) => p.role === 'wan') ||
+        (wanIface ? cleaned.find((p) => p.id === wanIface) : undefined);
+      const lanPorts = cleaned
+        .filter((p) => p !== wanPort && p.role !== 'wan')
+        .slice(0, 3)
+        .map((p, idx) => ({
+          ...p,
+          role: 'lan' as const,
+          label: /^LAN\s+\d+/i.test(p.label) ? `LAN ${idx + 1}` : p.label || `LAN ${idx + 1}`,
+        }));
+      return wanPort ? [{ ...wanPort, role: 'wan' as const }, ...lanPorts] : lanPorts;
+    }
+
+    // Satellite: all 4 physical ports are LAN (one may serve as Ethernet backhaul)
+    return cleaned.slice(0, 4).map((p, idx) => {
+      const isBackhaul = p.role === 'backhaul' || /backhaul/i.test(p.label || '');
+      return {
+        ...p,
+        role: isBackhaul ? ('backhaul' as const) : ('lan' as const),
+        label: isBackhaul ? `LAN ${idx + 1} (Backhaul)` : `LAN ${idx + 1}`,
+      };
+    });
+  }
+
   private buildTopologyTelemetry(): TopologyTelemetry {
+    const normalizedRouterPorts = this.normalizePhysicalPorts(
+      this.routerPorts,
+      'router',
+      this.probeStatus.iface
+    );
     const wanPort =
-      this.routerPorts.find((p) => p.role === 'wan') ||
-      this.routerPorts.find((p) => p.id === this.probeStatus.iface) ||
-      this.routerPorts.find((p) => p.linkUp && p.speedMbps > 0);
+      normalizedRouterPorts.find((p) => p.role === 'wan') ||
+      normalizedRouterPorts.find((p) => p.id === this.probeStatus.iface) ||
+      normalizedRouterPorts.find((p) => p.linkUp && p.speedMbps > 0);
     const routerWanSpeedMbps = this.wanDetails?.linkSpeedMbps || wanPort?.speedMbps || 1000;
 
     // Combine SSH-polled satellites with any probe-reported/simulated satellites (SSH takes precedence by id)
     const mergedById = new Map<string, SatelliteTelemetry>();
     for (const sat of this.probeSatellites) {
-      mergedById.set(sat.id, { ...sat });
+      mergedById.set(sat.id, {
+        ...sat,
+        ports: this.normalizePhysicalPorts(sat.ports, 'satellite'),
+      });
     }
     for (const sat of this.sshSatellites) {
-      mergedById.set(sat.id, { ...sat });
+      mergedById.set(sat.id, {
+        ...sat,
+        ports: this.normalizePhysicalPorts(sat.ports, 'satellite'),
+      });
     }
 
     // Merge authoritative Orbi `/usr/sbin/satelliteinfo wifi` entries reported by the main router
@@ -460,7 +529,7 @@ export class TrafficMonitorEngine {
         : undefined;
 
     return {
-      routerPorts: this.routerPorts.map((p) => ({ ...p })),
+      routerPorts: normalizedRouterPorts.map((p) => ({ ...p })),
       routerWanSpeedMbps,
       ...(wan ? { wan } : {}),
       routerClients: this.routerClients.map((c) => ({ ...c })),
@@ -522,6 +591,7 @@ export class TrafficMonitorEngine {
       this.serverConfig = {
         ...this.serverConfig,
         ...saved.serverConfig,
+        vlans: sanitizeVlanConfigs(saved.serverConfig.vlans),
         tablePreferences: sanitizeTablePreferences(saved.serverConfig.tablePreferences),
         featureVisibility: sanitizeFeatureVisibility(saved.serverConfig.featureVisibility),
       };
@@ -551,15 +621,21 @@ export class TrafficMonitorEngine {
   public updateServerConfig(cfg: Partial<ServerConfig>, stats?: Partial<ServerStats>): void {
     const prevInfer = this.serverConfig.inferDeviceNames;
     const prevStrip = this.serverConfig.stripLanDomain;
+    const prevVlansSig = JSON.stringify(this.serverConfig.vlans || []);
     const nextTablePrefs = cfg.tablePreferences
       ? sanitizeTablePreferences(cfg.tablePreferences, this.serverConfig.tablePreferences)
       : this.serverConfig.tablePreferences;
     const nextFeatureVis = cfg.featureVisibility
       ? sanitizeFeatureVisibility(cfg.featureVisibility, this.serverConfig.featureVisibility)
       : this.serverConfig.featureVisibility;
+    const nextVlans =
+      cfg.vlans !== undefined
+        ? sanitizeVlanConfigs(cfg.vlans)
+        : sanitizeVlanConfigs(this.serverConfig.vlans);
     this.serverConfig = {
       ...this.serverConfig,
       ...cfg,
+      vlans: nextVlans,
       tablePreferences: nextTablePrefs,
       featureVisibility: nextFeatureVis,
     };
@@ -570,6 +646,7 @@ export class TrafficMonitorEngine {
       ...this.latestSnapshot,
       serverConfig: {
         ...this.serverConfig,
+        vlans: nextVlans,
         tablePreferences: sanitizeTablePreferences(this.serverConfig.tablePreferences),
         featureVisibility: sanitizeFeatureVisibility(this.serverConfig.featureVisibility),
       },
@@ -577,7 +654,8 @@ export class TrafficMonitorEngine {
     };
     if (
       prevInfer !== this.serverConfig.inferDeviceNames ||
-      prevStrip !== this.serverConfig.stripLanDomain
+      prevStrip !== this.serverConfig.stripLanDomain ||
+      prevVlansSig !== JSON.stringify(nextVlans)
     ) {
       this.reapplyAliasesToLatestSnapshot();
     }
@@ -772,9 +850,164 @@ export class TrafficMonitorEngine {
     return this.getDeviceAliases();
   }
 
+  private applyVlanTagsAndBuildSubnets(hosts: HostSummary[]): {
+    hosts: HostSummary[];
+    detectedSubnets: DetectedSubnet[];
+  } {
+    const userVlans = sanitizeVlanConfigs(this.serverConfig.vlans);
+    const routerSubnetsNormalized: Array<{ cidr: string; iface?: string; vlanId?: number }> = [];
+    for (const rs of this.routerSubnets) {
+      const parsed = parseIpv4Cidr(rs.cidr);
+      if (!parsed) continue;
+      routerSubnetsNormalized.push({
+        cidr: parsed.normalized,
+        iface: rs.iface,
+        vlanId: rs.vlanId,
+      });
+    }
+
+    // Count hosts per /24 to determine primary LAN subnet when router does not explicitly report br0
+    const slash24Counts = new Map<string, number>();
+    for (const h of hosts) {
+      const s24 = getIpv4Slash24(h.ip);
+      if (s24) slash24Counts.set(s24, (slash24Counts.get(s24) || 0) + 1);
+    }
+
+    const explicitPrimaryRouter = routerSubnetsNormalized.find(
+      (s) =>
+        s.vlanId === undefined &&
+        (s.iface === 'br0' || s.iface === 'br-lan' || s.iface === 'eth1')
+    );
+
+    let primaryCidr = explicitPrimaryRouter?.cidr || '';
+    if (!primaryCidr) {
+      // Exclude user-named VLANs when picking primary LAN if other subnets exist
+      const userCidrs = new Set(userVlans.map((v) => v.cidr));
+      const ranked = Array.from(slash24Counts.entries()).sort((a, b) => b[1] - a[1]);
+      const nonUser = ranked.find(([c]) => !userCidrs.has(c));
+      primaryCidr = nonUser?.[0] || ranked[0]?.[0] || '';
+    }
+
+    const taggedHosts = hosts.map((h) => {
+      const matchedUser = findMatchingVlan(h.ip, userVlans);
+      if (matchedUser) {
+        return {
+          ...h,
+          vlanName: matchedUser.name,
+          vlanCidr: matchedUser.cidr,
+          ...(matchedUser.vlanId !== undefined ? { vlanId: matchedUser.vlanId } : { vlanId: undefined }),
+        };
+      }
+
+      // Check router-reported VLAN / secondary subnets (longest prefix match)
+      const matchedRouter = routerSubnetsNormalized
+        .filter((rs) => ipMatchesCidr(h.ip, rs.cidr))
+        .sort((a, b) => {
+          const pa = parseIpv4Cidr(a.cidr)?.prefix ?? 0;
+          const pb = parseIpv4Cidr(b.cidr)?.prefix ?? 0;
+          return pb - pa;
+        })[0];
+
+      if (matchedRouter && (matchedRouter.vlanId !== undefined || (primaryCidr && matchedRouter.cidr !== primaryCidr))) {
+        const autoName =
+          matchedRouter.vlanId !== undefined
+            ? `VLAN ${matchedRouter.vlanId}`
+            : `Subnet ${matchedRouter.cidr}`;
+        return {
+          ...h,
+          vlanName: autoName,
+          vlanCidr: matchedRouter.cidr,
+          vlanId: matchedRouter.vlanId,
+        };
+      }
+
+      const hostSlash24 = getIpv4Slash24(h.ip);
+      if (hostSlash24 && primaryCidr && !ipMatchesCidr(h.ip, primaryCidr)) {
+        return {
+          ...h,
+          vlanName: `VLAN ${hostSlash24}`,
+          vlanCidr: hostSlash24,
+          vlanId: undefined,
+        };
+      }
+
+      return {
+        ...h,
+        vlanName: undefined,
+        vlanCidr: undefined,
+        vlanId: undefined,
+      };
+    });
+
+    // Build detectedSubnets summary combining routerSubnets, userVlans, and observed /24s
+    const subnetMap = new Map<string, DetectedSubnet>();
+    const ensureSubnet = (cidr: string, patch: Partial<DetectedSubnet>) => {
+      const parsed = parseIpv4Cidr(cidr);
+      if (!parsed) return;
+      const key = parsed.normalized;
+      const cur = subnetMap.get(key) || {
+        cidr: key,
+        isPrimary: key === primaryCidr,
+        hostCount: 0,
+        source: 'hosts' as const,
+      };
+      subnetMap.set(key, {
+        ...cur,
+        ...patch,
+        cidr: key,
+        isPrimary: cur.isPrimary || key === primaryCidr,
+      });
+    };
+
+    for (const rs of routerSubnetsNormalized) {
+      ensureSubnet(rs.cidr, {
+        iface: rs.iface,
+        vlanId: rs.vlanId,
+        source: 'router',
+      });
+    }
+    for (const uv of userVlans) {
+      ensureSubnet(uv.cidr, {
+        name: uv.name,
+        vlanId: uv.vlanId,
+        source: 'configured',
+      });
+    }
+    for (const s24 of slash24Counts.keys()) {
+      // Only add observed /24 if not already covered by an existing router/configured subnet
+      const alreadyCovered = Array.from(subnetMap.keys()).some((existing) =>
+        ipMatchesCidr(s24.split('/')[0], existing)
+      );
+      if (!alreadyCovered) {
+        ensureSubnet(s24, { source: 'hosts' });
+      }
+    }
+
+    // Count matching hosts for each detected subnet
+    for (const sub of subnetMap.values()) {
+      sub.hostCount = taggedHosts.filter((h) => ipMatchesCidr(h.ip, sub.cidr)).length;
+      if (!sub.name) {
+        if (sub.isPrimary) {
+          sub.name = 'Primary LAN';
+        } else if (sub.vlanId !== undefined) {
+          sub.name = `VLAN ${sub.vlanId}`;
+        }
+      }
+    }
+
+    const detectedSubnets = Array.from(subnetMap.values()).sort((a, b) => {
+      if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+      if (a.source === 'configured' && b.source !== 'configured') return -1;
+      if (b.source === 'configured' && a.source !== 'configured') return 1;
+      return b.hostCount - a.hostCount || a.cidr.localeCompare(b.cidr);
+    });
+
+    return { hosts: taggedHosts, detectedSubnets };
+  }
+
   private reapplyAliasesToLatestSnapshot(): void {
     const hostNameByIp = new Map<string, string>();
-    const updatedHosts = this.latestSnapshot.hosts.map((h) => {
+    const renamedHosts = this.latestSnapshot.hosts.map((h) => {
       const identity = resolveHostIdentity({
         ip: h.ip,
         mac: h.mac,
@@ -798,6 +1031,8 @@ export class TrafficMonitorEngine {
       };
     });
 
+    const { hosts: updatedHosts, detectedSubnets } = this.applyVlanTagsAndBuildSubnets(renamedHosts);
+
     const updatedFlows = this.latestSnapshot.flows.map((f) => {
       const resolvedSrc = hostNameByIp.get(f.srcIp);
       return resolvedSrc ? { ...f, srcHost: resolvedSrc } : f;
@@ -811,6 +1046,7 @@ export class TrafficMonitorEngine {
     this.latestSnapshot = {
       ...this.latestSnapshot,
       hosts: updatedHosts,
+      detectedSubnets,
       flows: updatedFlows,
       clientLinks: updatedLinks,
       deviceAliases: { ...this.deviceAliases },
@@ -963,6 +1199,11 @@ export class TrafficMonitorEngine {
       }
     }
 
+    if (Array.isArray(snapshot.subnets)) {
+      this.routerSubnets = snapshot.subnets
+        .filter((s) => s && typeof s.cidr === 'string' && parseIpv4Cidr(s.cidr))
+        .map((s) => ({ ...s }));
+    }
     if (snapshot.wan && typeof snapshot.wan === 'object') {
       this.wanDetails = {
         ...snapshot.wan,
@@ -1342,29 +1583,27 @@ export class TrafficMonitorEngine {
     for (const f of activeEnrichedFlows) {
       totalFlowBytes += f.totalBytes;
 
-      const lanIp = this.isLanClientIp(f.srcIp)
-        ? f.srcIp
-        : this.isLanClientIp(f.dstIp)
-          ? f.dstIp
-          : null;
+      const srcIsLan = this.isLanClientIp(f.srcIp);
+      const dstIsLan = this.isLanClientIp(f.dstIp);
+      const lanIp = srcIsLan ? f.srcIp : dstIsLan ? f.dstIp : null;
 
-      if (lanIp) {
-        const existingKnown = this.knownHostsCache.get(lanIp);
+      const ensureHostRecord = (ip: string, mac?: string) => {
+        const existingKnown = this.knownHostsCache.get(ip);
         if (existingKnown) {
           existingKnown.lastSeen = now;
         } else {
-          this.knownHostsCache.set(lanIp, {
-            ip: lanIp,
-            mac: normalizeMac(f.srcMac),
+          this.knownHostsCache.set(ip, {
+            ip,
+            mac: normalizeMac(mac),
             lastSeen: now,
           });
         }
-        let host = hostMap.get(lanIp);
+        let host = hostMap.get(ip);
         if (!host) {
           host = {
-            ip: lanIp,
-            mac: normalizeMac(f.srcMac),
-            hostname: lanIp,
+            ip,
+            mac: normalizeMac(mac),
+            hostname: ip,
             vendor: 'LAN Device',
             nameSource: 'ip',
             isRandomizedMac: false,
@@ -1381,8 +1620,13 @@ export class TrafficMonitorEngine {
             serviceCounts: new Map(),
             observedFlows: [],
           };
-          hostMap.set(lanIp, host);
+          hostMap.set(ip, host);
         }
+        return host;
+      };
+
+      if (lanIp) {
+        const host = ensureHostRecord(lanIp, lanIp === f.srcIp ? f.srcMac : undefined);
         host.activeFlows += 1;
         host.rxBytes += f.rxBytes;
         host.txBytes += f.txBytes;
@@ -1403,6 +1647,19 @@ export class TrafficMonitorEngine {
           app: f.app,
           dport: f.dport,
         });
+      }
+
+      // For inter-VLAN / LAN-to-LAN flows (e.g. 10.0.0.x -> 10.0.1.x Docker container), also track the destination LAN/VLAN host
+      if (srcIsLan && dstIsLan && f.dstIp !== f.srcIp) {
+        const dstArpEntry = arpByIp.get(f.dstIp);
+        const dstHost = ensureHostRecord(f.dstIp, dstArpEntry?.mac);
+        dstHost.activeFlows += 1;
+        dstHost.rxBytes += f.txBytes;
+        dstHost.txBytes += f.rxBytes;
+        dstHost.totalBytes += f.totalBytes;
+        dstHost.rxBps += f.txBps;
+        dstHost.txBps += f.rxBps;
+        dstHost.appCounts.set(f.app, (dstHost.appCounts.get(f.app) || 0) + f.totalBytes);
       }
 
       if (hasTangibleTraffic(f.rxBps, f.txBps)) {
@@ -1536,6 +1793,8 @@ export class TrafficMonitorEngine {
         };
       })
       .sort((a, b) => b.rxBps + b.txBps - (a.rxBps + a.txBps) || b.totalBytes - a.totalBytes);
+
+    const { hosts: vlanTaggedHosts, detectedSubnets } = this.applyVlanTagsAndBuildSubnets(hosts);
 
     // Back-populate resolved hostnames into all flows (including retained ended flows)
     // and build live tangible client-destination links cleanly separated by Internet vs LAN scope
@@ -1755,7 +2014,7 @@ export class TrafficMonitorEngine {
       now,
       rxBps,
       txBps,
-      hosts,
+      vlanTaggedHosts,
       tangibleFlows.length,
       snapshot.system?.load1m ?? this.probeStatus.load1m,
       snapshot.system?.memUsedPct ?? this.probeStatus.memUsedPct
@@ -1770,7 +2029,7 @@ export class TrafficMonitorEngine {
         totalRxBytes: snapshot.iface.rxBytes,
         totalTxBytes: snapshot.iface.txBytes,
         activeFlows: tangibleFlows.length,
-        activeHosts: hosts.filter((h) => hasTangibleTraffic(h.rxBps, h.txBps)).length,
+        activeHosts: vlanTaggedHosts.filter((h) => hasTangibleTraffic(h.rxBps, h.txBps)).length,
         peakRxBps: Math.round(this.peakRxBps),
         peakTxBps: Math.round(this.peakTxBps),
       },
@@ -1778,10 +2037,11 @@ export class TrafficMonitorEngine {
       history: [...this.history],
       rollupHistory: [...this.rollupHistory],
       flows: enrichedFlows,
-      hosts,
+      hosts: vlanTaggedHosts,
       protocols,
       remotes,
       clientLinks,
+      detectedSubnets,
       topology: this.buildTopologyTelemetry(),
       rules: this.rules.map((r) => ({ ...r })),
       alerts: this.alerts.map((a) => ({ ...a })),
