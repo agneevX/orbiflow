@@ -2094,11 +2094,6 @@ export function generateDockerCompose(_cfg?: ProbeConfigOptions): string {
       - PUID=1000
       - PGID=1000
       - TZ=UTC
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
 `;
 }
 

@@ -46,8 +46,5 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
 EXPOSE 3000
 VOLUME ["/config"]
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
-
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "server.mjs"]
