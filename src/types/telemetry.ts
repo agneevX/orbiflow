@@ -64,6 +64,10 @@ export interface ArpEntry {
   device: string;
   hostname?: string;
   vendor?: string;
+  serviceName?: string;
+  serviceProtocol?: string;
+  advertisedServices?: string[];
+  model?: string;
 }
 
 export interface SystemMetrics {
@@ -274,7 +278,7 @@ export interface TrafficPoint {
   routerLoadPct?: number;
 }
 
-export type DeviceNameSource = 'alias' | 'lan-dns' | 'dhcp' | 'fingerprint' | 'ip';
+export type DeviceNameSource = 'alias' | 'lan-dns' | 'service' | 'dhcp' | 'fingerprint' | 'ip';
 
 export interface DeviceAlias {
   key: string;
@@ -290,6 +294,9 @@ export interface HostSummary {
   nameSource: DeviceNameSource;
   isRandomizedMac: boolean;
   ptrHostname?: string;
+  serviceName?: string;
+  serviceProtocol?: string;
+  advertisedServices?: string[];
   deviceHint?: string;
   aliasKey?: string;
   aliasMatchBy?: 'mac' | 'ip';

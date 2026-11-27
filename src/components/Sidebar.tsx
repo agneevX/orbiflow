@@ -42,6 +42,7 @@ interface SidebarProps {
   themeMode: ThemeMode;
   effectiveIsDark: boolean;
   activeThemeId: ThemeId;
+  darkThemeId: ThemeId;
   onChangeThemeMode: (mode: ThemeMode) => void;
   onChangeActiveTheme: (themeId: ThemeId) => void;
   onSelectAutoThemePair: (pair: AutoThemePair) => void;
@@ -81,6 +82,7 @@ export function Sidebar({
   themeMode,
   effectiveIsDark,
   activeThemeId,
+  darkThemeId,
   onChangeThemeMode,
   onChangeActiveTheme,
   onSelectAutoThemePair,
@@ -117,7 +119,7 @@ export function Sidebar({
         : 'text-amber-500';
 
   const availableThemes = effectiveIsDark ? DARK_THEMES : LIGHT_THEMES;
-  const activeAutoPair = findAutoThemePair(activeThemeId);
+  const activeAutoPair = findAutoThemePair(darkThemeId);
 
   const renderNavContent = (isCollapsed: boolean) => (
     <div className="flex h-full flex-col app-sidebar border-r">
@@ -261,53 +263,55 @@ export function Sidebar({
               </div>
             </div>
 
-            {/* Part 2: Theme Palette (Auto pairs both dark & light families; Dark/Light picks directly) */}
-            <div className="space-y-1.5">
-              <label
-                htmlFor="theme-palette-select"
-                className="flex items-center justify-between gap-1.5 h-4 text-xs font-medium app-text-muted"
-              >
-                <span className="flex items-center gap-1.5">
-                  <Palette className="h-3.5 w-3.5" aria-hidden="true" />
-                  Theme
-                </span>
-                <span className="text-[11px] font-normal opacity-80">
-                  {themeMode === 'auto' ? 'Auto Pair' : effectiveIsDark ? 'Dark' : 'Light'}
-                </span>
-              </label>
-              {themeMode === 'auto' ? (
-                <select
-                  id="theme-palette-select"
-                  data-testid="theme-palette-select"
-                  value={activeAutoPair.id}
-                  onChange={(e) => {
-                    const pair = AUTO_THEME_PAIRS.find((p) => p.id === e.target.value);
-                    if (pair) onSelectAutoThemePair(pair);
-                  }}
-                  className="w-full h-9 app-input border rounded-xl px-2.5 text-xs focus:outline-none focus:border-sky-500"
+            {/* Part 2: Theme Palette (Auto pairs dark theme with Daylight Slate; Dark picks directly; Light uses Daylight Slate) */}
+            {themeMode !== 'light' && (
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="theme-palette-select"
+                  className="flex items-center justify-between gap-1.5 h-4 text-xs font-medium app-text-muted"
                 >
-                  {AUTO_THEME_PAIRS.map((pair) => (
-                    <option key={pair.id} value={pair.id}>
-                      {pair.label}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <select
-                  id="theme-palette-select"
-                  data-testid="theme-palette-select"
-                  value={activeThemeId}
-                  onChange={(e) => onChangeActiveTheme(e.target.value as ThemeId)}
-                  className="w-full h-9 app-input border rounded-xl px-2.5 text-xs focus:outline-none focus:border-sky-500"
-                >
-                  {availableThemes.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
+                  <span className="flex items-center gap-1.5">
+                    <Palette className="h-3.5 w-3.5" aria-hidden="true" />
+                    Theme
+                  </span>
+                  <span className="text-[11px] font-normal opacity-80">
+                    {themeMode === 'auto' ? 'Auto Pair' : 'Dark'}
+                  </span>
+                </label>
+                {themeMode === 'auto' ? (
+                  <select
+                    id="theme-palette-select"
+                    data-testid="theme-palette-select"
+                    value={activeAutoPair.id}
+                    onChange={(e) => {
+                      const pair = AUTO_THEME_PAIRS.find((p) => p.id === e.target.value);
+                      if (pair) onSelectAutoThemePair(pair);
+                    }}
+                    className="w-full h-9 app-input border rounded-xl px-2.5 text-xs focus:outline-none focus:border-sky-500"
+                  >
+                    {AUTO_THEME_PAIRS.map((pair) => (
+                      <option key={pair.id} value={pair.id}>
+                        {pair.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <select
+                    id="theme-palette-select"
+                    data-testid="theme-palette-select"
+                    value={activeThemeId}
+                    onChange={(e) => onChangeActiveTheme(e.target.value as ThemeId)}
+                    className="w-full h-9 app-input border rounded-xl px-2.5 text-xs focus:outline-none focus:border-sky-500"
+                  >
+                    {availableThemes.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
           </div>
         )}
       </nav>

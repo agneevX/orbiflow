@@ -231,14 +231,16 @@ function PortNegotiationTable({
               p.linkUp
             );
             return (
-              <tr key={p.id} className="app-input">
-                <td className="px-2.5 py-2 font-sans min-w-0">
-                  <div className="font-medium truncate max-w-[125px]" title={p.label}>
+              <tr key={p.id} className="app-input h-[44px]">
+                <td className="px-2.5 py-1.5 align-middle font-sans min-w-0">
+                  <div className="font-medium leading-4 truncate max-w-[125px]" title={p.label}>
                     {p.label}
                   </div>
-                  <div className="text-[10px] app-text-muted uppercase">{p.role}</div>
+                  <div className="text-[10px] leading-3.5 app-text-muted uppercase truncate">
+                    {p.role}
+                  </div>
                 </td>
-                <td className="px-2 py-2 whitespace-nowrap">
+                <td className="px-2 py-1.5 align-middle whitespace-nowrap">
                   <span
                     className={
                       !p.linkUp
@@ -258,7 +260,7 @@ function PortNegotiationTable({
                     </span>
                   )}
                 </td>
-                <td className="px-2.5 py-2 text-right whitespace-nowrap">
+                <td className="px-2.5 py-1.5 align-middle text-right whitespace-nowrap leading-4">
                   <div style={{ color: theme.rxColor }}>↓ {formatBandwidth(p.rxBps, unit)}</div>
                   <div style={{ color: theme.txColor }}>↑ {formatBandwidth(p.txBps, unit)}</div>
                 </td>
@@ -1140,13 +1142,13 @@ export function TrafficMapView({
                                   : { kind: 'client', ip: host.ip }
                               )
                             }
-                            className={`w-full text-left px-3.5 py-2.5 transition-colors relative ${
+                            className={`w-full h-[52px] text-left px-3.5 py-0 flex items-center transition-colors relative overflow-hidden ${
                               isClientSelected
                                 ? 'bg-sky-500/12'
                                 : 'app-row-hover'
                             } ${entry.stale ? 'opacity-65' : ''}`}
                           >
-                            <div className="flex items-center justify-between gap-2.5">
+                            <div className="flex items-center justify-between gap-2.5 w-full min-w-0">
                               {/* Left: Device Icon + Name + IP + VLAN + Link */}
                               <div className="flex items-center gap-2.5 min-w-0 flex-1">
                                 <div
@@ -1159,7 +1161,7 @@ export function TrafficMapView({
                                   <ClientDeviceIcon icon={icon} className="h-4 w-4" />
                                 </div>
                                 <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-1.5 min-w-0">
+                                  <div className="flex items-center gap-1.5 min-w-0 leading-4">
                                     <span
                                       className={`text-xs truncate ${
                                         entry.active ? 'font-semibold' : 'font-medium app-text-secondary'
@@ -1174,26 +1176,26 @@ export function TrafficMapView({
                                       </span>
                                     )}
                                   </div>
-                                  <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] app-text-muted">
-                                    <span className="font-mono tabular-nums">{host.ip}</span>
+                                  <div className="mt-0.5 flex flex-nowrap items-center gap-x-1.5 text-[11px] leading-4 app-text-muted overflow-hidden whitespace-nowrap">
+                                    <span className="font-mono tabular-nums shrink-0">{host.ip}</span>
                                     {host.vlanName && (
                                       <span
                                         title={host.vlanCidr}
-                                        className="px-1.5 py-0 rounded bg-violet-500/15 text-violet-400 text-[10px] font-medium leading-4"
+                                        className="px-1.5 py-0 rounded bg-violet-500/15 text-violet-400 text-[10px] font-medium leading-4 shrink-0"
                                       >
                                         {host.vlanName}
                                       </span>
                                     )}
-                                    <span aria-hidden="true">·</span>
+                                    <span aria-hidden="true" className="shrink-0">·</span>
                                     {entry.connectionType === 'wifi' ? (
-                                      <span className="inline-flex items-center gap-1">
+                                      <span className="inline-flex items-center gap-1 min-w-0 truncate">
                                         <Wifi className="h-3 w-3 text-sky-500 shrink-0" aria-hidden="true" />
-                                        <span>{entry.wifiBand || 'Wi-Fi'}</span>
+                                        <span className="truncate">{entry.wifiBand || 'Wi-Fi'}</span>
                                       </span>
                                     ) : (
-                                      <span className="inline-flex items-center gap-1">
+                                      <span className="inline-flex items-center gap-1 min-w-0 truncate">
                                         <Cable className="h-3 w-3 text-emerald-500 shrink-0" aria-hidden="true" />
-                                        <span>Ethernet</span>
+                                        <span className="truncate">Ethernet</span>
                                       </span>
                                     )}
                                   </div>
@@ -1201,7 +1203,7 @@ export function TrafficMapView({
                               </div>
 
                               {/* Right: Live Rx / Tx */}
-                              <div className="text-right font-mono text-[11px] tabular-nums shrink-0">
+                              <div className="text-right font-mono text-[11px] leading-4 tabular-nums shrink-0">
                                 <div
                                   style={entry.active ? { color: theme.rxColor } : undefined}
                                   className={entry.active ? 'font-medium' : 'app-text-muted'}
@@ -1217,9 +1219,12 @@ export function TrafficMapView({
                               </div>
                             </div>
 
-                            {/* Subtle live throughput micro-bar */}
+                            {/* Subtle live throughput micro-bar overlaid at bottom edge so row height never shifts */}
                             {barPct > 0 && (
-                              <div className="mt-1.5 h-0.5 w-full rounded-full bg-slate-500/15 overflow-hidden">
+                              <div
+                                aria-hidden="true"
+                                className="pointer-events-none absolute inset-x-3.5 bottom-0 h-[2px] rounded-full bg-slate-500/15 overflow-hidden"
+                              >
                                 <div
                                   className="h-full rounded-full bg-sky-500/70 transition-all duration-500"
                                   style={{ width: `${barPct}%` }}
@@ -1549,6 +1554,18 @@ export function TrafficMapView({
                       {inspectorData.client.host.vendor}
                     </span>
                   </div>
+                  {inspectorData.client.host.advertisedServices &&
+                    inspectorData.client.host.advertisedServices.length > 0 && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span>Advertised Services</span>
+                        <span
+                          className="app-text-secondary truncate max-w-[185px]"
+                          title={inspectorData.client.host.advertisedServices.join(', ')}
+                        >
+                          {inspectorData.client.host.advertisedServices.join(', ')}
+                        </span>
+                      </div>
+                    )}
                   <div className="flex items-center justify-between gap-2">
                     <span>Active Connections</span>
                     <span className="font-mono app-text-secondary tabular-nums">

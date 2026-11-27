@@ -211,6 +211,10 @@ export function FlowsView({
   ).some((k) => localPrefs[k] !== DEFAULT_CONNECTIONS_TABLE_PREFS[k]);
 
   const totalScopeCount = showIdle ? flows.length : activeCount + endedCount;
+  const hasSubLineMode =
+    (localPrefs.showLocalDevice && localPrefs.showLocalIp) ||
+    (localPrefs.showDestination && localPrefs.showDestinationRdns);
+  const rowHeightClass = hasSubLineMode ? 'h-[46px]' : 'h-[38px]';
 
   return (
     <div className="space-y-4">
@@ -516,12 +520,12 @@ export function FlowsView({
                       key={flow.id}
                       data-ended={flow.ended ? 'true' : 'false'}
                       onClick={() => onSelectFlow(flow)}
-                      className={`app-row-hover cursor-pointer transition-colors ${
+                      className={`app-row-hover cursor-pointer transition-colors ${rowHeightClass} ${
                         flow.ended ? 'opacity-65' : ''
                       }`}
                     >
                       {localPrefs.showAppProtocol && (
-                        <td className="py-2.5 px-3 whitespace-nowrap">
+                        <td className="py-1.5 px-3 align-middle whitespace-nowrap leading-4">
                           <span className="font-medium">
                             {formatAppForProtocolFilter(
                               flow.app,
@@ -548,8 +552,8 @@ export function FlowsView({
                       )}
 
                       {localPrefs.showLocalDevice && (
-                        <td className="py-2.5 px-3 whitespace-nowrap">
-                          <div className="tabular-nums">
+                        <td className="py-1.5 px-3 align-middle whitespace-nowrap">
+                          <div className="tabular-nums leading-4">
                             <span className="font-medium">{flow.srcHost}</span>
                             {localPrefs.showLocalPort && (
                               <span className="font-mono text-[11px] app-text-muted">
@@ -558,7 +562,7 @@ export function FlowsView({
                             )}
                           </div>
                           {localPrefs.showLocalIp && flow.srcHost !== flow.srcIp && (
-                            <div className="text-[11px] font-mono app-text-muted tabular-nums">
+                            <div className="text-[11px] leading-4 font-mono app-text-muted tabular-nums">
                               {flow.srcIp}
                             </div>
                           )}
@@ -566,13 +570,13 @@ export function FlowsView({
                       )}
 
                       {localPrefs.showDestination && (
-                        <td className="py-2.5 px-3 max-w-[300px]">
-                          <div className="font-medium truncate" title={flow.dstService}>
+                        <td className="py-1.5 px-3 align-middle max-w-[300px]">
+                          <div className="font-medium leading-4 truncate" title={flow.dstService}>
                             {flow.dstService}
                           </div>
                           {localPrefs.showDestinationRdns && hasResolvedHost && (
                             <div
-                              className="text-[11px] app-text-muted truncate"
+                              className="text-[11px] leading-4 app-text-muted truncate"
                               title={flow.dstHost}
                             >
                               {flow.dstHost}
@@ -582,20 +586,20 @@ export function FlowsView({
                       )}
 
                       {localPrefs.showDestinationIpPort && (
-                        <td className="py-2.5 px-3 font-mono text-[11px] app-text-secondary whitespace-nowrap tabular-nums">
+                        <td className="py-1.5 px-3 align-middle font-mono text-[11px] leading-4 app-text-secondary whitespace-nowrap tabular-nums">
                           {flow.dstIp}:{flow.dport}
                         </td>
                       )}
 
                       {localPrefs.showCategory && (
-                        <td className="py-2.5 px-3 app-text-secondary whitespace-nowrap">
+                        <td className="py-1.5 px-3 align-middle leading-4 app-text-secondary whitespace-nowrap">
                           {flow.proto === 'ICMP' ? '—' : flow.dstCategory}
                         </td>
                       )}
 
                       {localPrefs.showDownload && (
                         <td
-                          className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums"
+                          className="py-1.5 px-3 align-middle leading-4 text-right font-medium whitespace-nowrap tabular-nums"
                           style={{ color: theme.rxColor }}
                         >
                           {formatBandwidth(flow.rxBps, unit)}
@@ -604,7 +608,7 @@ export function FlowsView({
 
                       {localPrefs.showUpload && (
                         <td
-                          className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums"
+                          className="py-1.5 px-3 align-middle leading-4 text-right font-medium whitespace-nowrap tabular-nums"
                           style={{ color: theme.txColor }}
                         >
                           {formatBandwidth(flow.txBps, unit)}
@@ -612,13 +616,13 @@ export function FlowsView({
                       )}
 
                       {localPrefs.showTotal && (
-                        <td className="py-2.5 px-3 text-right font-medium whitespace-nowrap tabular-nums">
+                        <td className="py-1.5 px-3 align-middle leading-4 text-right font-medium whitespace-nowrap tabular-nums">
                           {formatBytes(flow.totalBytes)}
                         </td>
                       )}
 
                       {localPrefs.showDuration && (
-                        <td className="py-2.5 px-3 text-right app-text-muted whitespace-nowrap tabular-nums">
+                        <td className="py-1.5 px-3 align-middle leading-4 text-right app-text-muted whitespace-nowrap tabular-nums">
                           <span>{formatDuration((flow.lastSeen - flow.firstSeen) / 1000)}</span>
                           {flow.ended && (
                             <span className="ml-1.5 text-[10px] uppercase tracking-wide opacity-80">

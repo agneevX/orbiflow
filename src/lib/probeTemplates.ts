@@ -38,6 +38,8 @@ Options:
 import base64
 import json
 import os
+import re
+import select
 import signal
 import socket
 import struct
@@ -1070,7 +1072,401 @@ def read_satelliteinfo_wifi(satinfo_bin):
     return res
 
 
-def read_arp_table(leases, active_dhcp_clients=None, wan_iface=None, wan_details=None):
+_MDNS_PROBES = [
+    ("_googlecast._tcp.local", "Google Cast", 95),
+    ("_airplay._tcp.local", "AirPlay", 92),
+    ("_raop._tcp.local", "AirPlay Audio", 86),
+    ("_companion-link._tcp.local", "Apple Companion", 90),
+    ("_adb-tls-connect._tcp.local", "ADB", 88),
+    ("_adb-tls-pairing._tcp.local", "ADB", 84),
+    ("_adb._tcp.local", "ADB", 88),
+    ("_spotify-connect._tcp.local", "Spotify Connect", 88),
+    ("_sonos._tcp.local", "Sonos", 90),
+    ("_hap._tcp.local", "HomeKit", 86),
+    ("_ipp._tcp.local", "IPP Printer", 86),
+    ("_smb._tcp.local", "SMB", 80),
+    ("_ssh._tcp.local", "SSH", 76),
+    ("_workstation._tcp.local", "Workstation", 75),
+    ("_esphomelib._tcp.local", "ESPHome", 82),
+]
+_MDNS_PROBE_MAP = {p[0]: (p[1], p[2]) for p in _MDNS_PROBES}
+
+
+def _dns_encode_name(name):
+    out = bytearray()
+    for part in name.strip(".").split("."):
+        b = part.encode("utf-8", errors="ignore")[:63]
+        if b:
+            out.append(len(b))
+            out.extend(b)
+    out.append(0)
+    return bytes(out)
+
+
+def _dns_decode_name(buf, offset):
+    labels = []
+    jumped = False
+    next_off = offset
+    seen = set()
+    blen = len(buf)
+    while offset < blen:
+        if offset in seen:
+            return None, next_off
+        seen.add(offset)
+        ln = buf[offset]
+        if ln == 0:
+            if not jumped:
+                next_off = offset + 1
+            break
+        if (ln & 0xC0) == 0xC0:
+            if offset + 1 >= blen:
+                return None, next_off
+            ptr = ((ln & 0x3F) << 8) | buf[offset + 1]
+            if not jumped:
+                next_off = offset + 2
+                jumped = True
+            offset = ptr
+            continue
+        if (ln & 0xC0) != 0:
+            return None, next_off
+        offset += 1
+        if offset + ln > blen:
+            return None, next_off
+        labels.append(buf[offset:offset + ln].decode("utf-8", errors="ignore"))
+        offset += ln
+        if not jumped:
+            next_off = offset
+    return ".".join(labels), next_off
+
+
+def _clean_service_name(raw):
+    if not raw:
+        return None
+    s = raw.replace("\\\\032", " ").strip()
+    if s.lower().endswith(".local."):
+        s = s[:-7]
+    elif s.lower().endswith(".local"):
+        s = s[:-6]
+    s = re.sub(r"\\s+", " ", s).strip()
+    m_raop = re.match(r"^[0-9a-fA-F]{12}@(.+)$", s)
+    if m_raop:
+        s = m_raop.group(1).strip()
+    s = re.sub(r"\\s*\\[([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\\]$", "", s).strip()
+    if not s or len(s) < 2 or len(s) > 64:
+        return None
+    if re.match(r"^adb-[0-9a-zA-Z]+-[0-9a-zA-Z]+$", s):
+        return None
+    if re.match(r"^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$", s):
+        return None
+    if re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+$", s):
+        return None
+    if s.lower() in ("localhost", "unknown", "default", "device"):
+        return None
+    return s
+
+
+def _record_service_hit(results, ip, name, protocol, score, service_label=None, model=None):
+    if not is_private_lan_ip(ip) or ip.startswith("127.") or ip.startswith("169.254."):
+        return
+    clean = _clean_service_name(name)
+    if not clean and not service_label and not model:
+        return
+    cur = results.get(ip)
+    if not cur:
+        cur = {"name": "", "protocol": "", "score": 0, "services": [], "model": ""}
+        results[ip] = cur
+    if service_label and service_label not in cur["services"] and len(cur["services"]) < 8:
+        cur["services"].append(service_label)
+    if model and not cur["model"]:
+        cur["model"] = model[:64]
+    if clean and (not cur["name"] or score >= cur["score"]):
+        cur["name"] = clean
+        cur["protocol"] = protocol
+        cur["score"] = score
+
+
+def _parse_mdns_packet(buf, sender_ip, results):
+    if len(buf) < 12:
+        return
+    qd, an, ns, ar = struct.unpack("!HHHH", buf[4:12])
+    off = 12
+    for _ in range(qd):
+        _, off = _dns_decode_name(buf, off)
+        off += 4
+        if off > len(buf):
+            return
+    host_to_ip = {}
+    srv_map = {}
+    txt_map = {}
+    instances = set()
+    for _ in range(min(200, an + ns + ar)):
+        if off >= len(buf):
+            break
+        rname, off = _dns_decode_name(buf, off)
+        if not rname or off + 10 > len(buf):
+            break
+        rtype, _rclass, _ttl, rdlen = struct.unpack("!HHIH", buf[off:off + 10])
+        off += 10
+        rstart = off
+        off += rdlen
+        if off > len(buf):
+            break
+        if rtype == 1 and rdlen == 4:
+            ip = socket.inet_ntoa(buf[rstart:rstart + 4])
+            host_to_ip[rname.rstrip(".").lower()] = ip
+            _record_service_hit(results, ip, rname, "mDNS", 65)
+        elif rtype == 12:
+            target, _ = _dns_decode_name(buf, rstart)
+            if target:
+                instances.add(target)
+        elif rtype == 33 and rdlen >= 6:
+            target, _ = _dns_decode_name(buf, rstart + 6)
+            if target:
+                instances.add(rname)
+                srv_map[rname.lower()] = target.rstrip(".")
+        elif rtype == 16:
+            instances.add(rname)
+            tdict = {}
+            po = rstart
+            while po < rstart + rdlen:
+                tln = buf[po]
+                po += 1
+                if tln == 0 or po + tln > rstart + rdlen:
+                    break
+                item = buf[po:po + tln].decode("utf-8", errors="ignore")
+                po += tln
+                if "=" in item:
+                    k, v = item.split("=", 1)
+                    k = k.strip().lower()
+                    if k and v.strip() and k not in tdict:
+                        tdict[k] = v.strip()
+            txt_map[rname.lower()] = tdict
+
+    for full_inst in instances:
+        low = full_inst.rstrip(".").lower()
+        matched_svc = None
+        for suffix, meta in _MDNS_PROBE_MAP.items():
+            if low.endswith("." + suffix):
+                inst_label = full_inst[: len(full_inst.rstrip(".")) - len(suffix) - 1]
+                matched_svc = (inst_label, suffix, meta[0], meta[1])
+                break
+        if not matched_svc:
+            continue
+        inst_label, suffix, svc_label, prio = matched_svc
+        key = full_inst.lower()
+        srv_target = srv_map.get(key)
+        txt = txt_map.get(key, {})
+        ip = host_to_ip.get(srv_target.lower()) if srv_target else None
+        if not ip and sender_ip and is_private_lan_ip(sender_ip):
+            ip = sender_ip
+        if not ip:
+            continue
+        if suffix == "_googlecast._tcp.local":
+            fname = txt.get("fn") or inst_label
+            model = txt.get("md") or ""
+            _record_service_hit(results, ip, fname, svc_label, 98 if txt.get("fn") else prio, svc_label, model)
+        elif suffix.startswith("_adb"):
+            fname = txt.get("name") or txt.get("model") or inst_label or srv_target
+            model = txt.get("model") or txt.get("device") or "Android Device (ADB)"
+            _record_service_hit(results, ip, fname, svc_label, 90, svc_label, model)
+        else:
+            fname = txt.get("fn") or txt.get("name") or inst_label or srv_target
+            model = txt.get("md") or txt.get("model") or txt.get("ty") or ""
+            _record_service_hit(results, ip, fname, svc_label, prio, svc_label, model)
+
+
+def _fetch_private_upnp_xml(sender_ip, location):
+    m = re.match(r"^http://(\\d+\\.\\d+\\.\\d+\\.\\d+)(?::(\\d+))?(/.*)$", location.strip(), re.I)
+    if not m:
+        return None
+    host, port_s, path_s = m.group(1), m.group(2), m.group(3)
+    if host != sender_ip or not is_private_lan_ip(host):
+        return None
+    port = int(port_s) if port_s else 80
+    if port < 1 or port > 65535:
+        return None
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect((host, port))
+        req = f"GET {path_s} HTTP/1.1\\r\\nHost: {host}:{port}\\r\\nConnection: close\\r\\n\\r\\n"
+        s.sendall(req.encode("ascii", errors="ignore"))
+        chunks = []
+        total = 0
+        while total < 32768:
+            part = s.recv(4096)
+            if not part:
+                break
+            chunks.append(part)
+            total += len(part)
+        raw = b"".join(chunks).decode("utf-8", errors="ignore")
+        if "\\r\\n\\r\\n" in raw:
+            raw = raw.split("\\r\\n\\r\\n", 1)[1]
+        return raw
+    except Exception:
+        return None
+    finally:
+        if s:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+def _parse_nbstat_name(buf):
+    if len(buf) < 57:
+        return None
+    _, off = _dns_decode_name(buf, 12)
+    if off + 11 > len(buf):
+        return None
+    rtype, _rclass, _ttl, _rdlen = struct.unpack("!HHIH", buf[off:off + 10])
+    off += 10
+    if rtype != 0x0021 or off >= len(buf):
+        return None
+    num = buf[off]
+    off += 1
+    ws_name = None
+    srv_name = None
+    for _ in range(num):
+        if off + 18 > len(buf):
+            break
+        raw = buf[off:off + 15].decode("ascii", errors="ignore").replace("\\x00", "").strip()
+        suffix = buf[off + 15]
+        flags = struct.unpack("!H", buf[off + 16:off + 18])[0]
+        off += 18
+        if (flags & 0x8000) != 0 or not raw or raw.startswith("__") or raw.upper() == "MSBROWSE":
+            continue
+        if suffix == 0x00 and not ws_name:
+            ws_name = raw
+        elif suffix == 0x20 and not srv_name:
+            srv_name = raw
+    return _clean_service_name(ws_name or srv_name)
+
+
+def discover_lan_services(arp_entries):
+    """Lightweight bounded (~0.6s) mDNS/DNS-SD + SSDP/UPnP + NetBIOS sweep on the router LAN."""
+    results = {}
+    sockets = []
+    mdns_sock = None
+    ssdp_sock = None
+    nbns_sock = None
+    try:
+        mdns_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        mdns_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        mdns_sock.setblocking(False)
+        mdns_sock.bind(("", 0))
+        sockets.append(mdns_sock)
+        for qname, _lbl, _prio in _MDNS_PROBES:
+            pkt = struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0) + _dns_encode_name(qname) + struct.pack("!HH", 12, 0x8001)
+            try:
+                mdns_sock.sendto(pkt, ("224.0.0.251", 5353))
+            except OSError:
+                pass
+    except OSError:
+        if mdns_sock:
+            mdns_sock.close()
+            mdns_sock = None
+
+    try:
+        ssdp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ssdp_sock.setblocking(False)
+        ssdp_sock.bind(("", 0))
+        sockets.append(ssdp_sock)
+        for st in ("upnp:rootdevice", "urn:dial-multiscreen-org:service:dial:1"):
+            msg = (
+                "M-SEARCH * HTTP/1.1\\r\\n"
+                "HOST: 239.255.255.250:1900\\r\\n"
+                "MAN: \\"ssdp:discover\\"\\r\\n"
+                "MX: 1\\r\\n"
+                f"ST: {st}\\r\\n\\r\\n"
+            ).encode("ascii")
+            try:
+                ssdp_sock.sendto(msg, ("239.255.255.250", 1900))
+            except OSError:
+                pass
+    except OSError:
+        if ssdp_sock:
+            ssdp_sock.close()
+            ssdp_sock = None
+
+    try:
+        nbns_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        nbns_sock.setblocking(False)
+        nbns_sock.bind(("", 0))
+        sockets.append(nbns_sock)
+        nb_pkt = struct.pack("!HHHHHH", 0x4F42, 0, 1, 0, 0, 0) + b"\\x20CK" + (b"A" * 30) + b"\\x00" + struct.pack("!HH", 0x0021, 0x0001)
+        probed = 0
+        for entry in arp_entries or []:
+            ip = entry.get("ip", "")
+            if ip and not entry.get("hostname") and is_private_lan_ip(ip) and probed < 24:
+                probed += 1
+                try:
+                    nbns_sock.sendto(nb_pkt, (ip, 137))
+                except OSError:
+                    pass
+    except OSError:
+        if nbns_sock:
+            nbns_sock.close()
+            nbns_sock = None
+
+    ssdp_locations = {}
+    deadline = time.monotonic() + 0.55
+    while sockets and time.monotonic() < deadline:
+        rem = max(0.02, deadline - time.monotonic())
+        try:
+            readable, _, _ = select.select(sockets, [], [], rem)
+        except Exception:
+            break
+        if not readable:
+            break
+        for sock in readable:
+            try:
+                data, addr = sock.recvfrom(4096)
+            except OSError:
+                continue
+            sender_ip = addr[0]
+            if sock is mdns_sock:
+                _parse_mdns_packet(data, sender_ip, results)
+            elif sock is nbns_sock:
+                nb_name = _parse_nbstat_name(data)
+                if nb_name:
+                    _record_service_hit(results, sender_ip, nb_name, "NetBIOS", 74, "NetBIOS")
+            elif sock is ssdp_sock and sender_ip not in ssdp_locations and len(ssdp_locations) < 12:
+                txt = data.decode("utf-8", errors="ignore")
+                loc = None
+                st_val = ""
+                for line in txt.splitlines():
+                    low = line.lower()
+                    if low.startswith("location:"):
+                        loc = line.split(":", 1)[1].strip()
+                    elif low.startswith("st:"):
+                        st_val = line.split(":", 1)[1].strip()
+                if loc:
+                    ssdp_locations[sender_ip] = (loc, st_val)
+
+    for sock in sockets:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    for sender_ip, (loc, st_val) in list(ssdp_locations.items())[:8]:
+        xml = _fetch_private_upnp_xml(sender_ip, loc)
+        if not xml:
+            continue
+        m_fn = re.search(r"<friendlyName[^>]*>([^<]{1,128})</friendlyName>", xml, re.I)
+        m_md = re.search(r"<modelName[^>]*>([^<]{1,128})</modelName>", xml, re.I)
+        fn = m_fn.group(1).strip() if m_fn else ""
+        md = m_md.group(1).strip() if m_md else ""
+        is_dial = "dial" in st_val.lower() or "cast" in (fn + " " + md).lower()
+        lbl = "DIAL / Cast" if is_dial else "UPnP"
+        _record_service_hit(results, sender_ip, fn, lbl, 93 if is_dial else 82, lbl, md)
+
+    return results
+
+
+def read_arp_table(leases, active_dhcp_clients=None, wan_iface=None, wan_details=None, service_map=None):
     entries_by_ip = {}
     excluded_ips = set()
     if wan_details:
@@ -1105,6 +1501,18 @@ def read_arp_table(leases, active_dhcp_clients=None, wan_iface=None, wan_details
                     "device": info.get("device", "br0"),
                     "hostname": leases.get(ip, info.get("hostname", "")),
                 }
+    if service_map:
+        for ip, entry in entries_by_ip.items():
+            svc = service_map.get(ip)
+            if svc:
+                if svc.get("name"):
+                    entry["serviceName"] = svc["name"]
+                if svc.get("protocol"):
+                    entry["serviceProtocol"] = svc["protocol"]
+                if svc.get("services"):
+                    entry["advertisedServices"] = svc["services"]
+                if svc.get("model"):
+                    entry["model"] = svc["model"]
     return list(entries_by_ip.values())
 
 
@@ -1750,6 +2158,8 @@ def main():
     cpu_ports = set()
     wan_switch_ports = set()
     sw_lan_ports = []
+    service_map = {}
+    last_service_scan = 0.0
     last_neigh_refresh = 0.0
     last_ports_refresh = 0.0
     last_sys_refresh = 0.0
@@ -1791,7 +2201,21 @@ def main():
 
                 if last_neigh_refresh == 0.0 or mono_now - last_neigh_refresh >= cfg["neigh_interval"]:
                     leases, active_dhcp = lease_cache.read(time.time())
-                    arp = read_arp_table(leases, active_dhcp, cfg["iface"], wan_details)
+                    arp = read_arp_table(leases, active_dhcp, cfg["iface"], wan_details, service_map)
+                    if last_service_scan == 0.0 or mono_now - last_service_scan >= 45.0:
+                        fresh_services = discover_lan_services(arp)
+                        for sip, sinfo in fresh_services.items():
+                            prev_s = service_map.get(sip)
+                            if prev_s:
+                                merged_svcs = list(dict.fromkeys(prev_s.get("services", []) + sinfo.get("services", [])))[:8]
+                                if sinfo.get("name") and (not prev_s.get("name") or sinfo.get("score", 0) >= prev_s.get("score", 0)):
+                                    service_map[sip] = {**sinfo, "services": merged_svcs}
+                                else:
+                                    service_map[sip] = {**prev_s, "services": merged_svcs, "model": prev_s.get("model") or sinfo.get("model", "")}
+                            else:
+                                service_map[sip] = sinfo
+                        arp = read_arp_table(leases, active_dhcp, cfg["iface"], wan_details, service_map)
+                        last_service_scan = time.monotonic()
                     sat_macs = {s["mac"].lower() for s in satellite_info if s.get("mac")}
                     wifi_clients = read_router_wifi_clients(wifi_ifaces, wifi_tool, wifi_meta, sat_macs)
                     wired_clients = read_router_wired_clients(
@@ -1800,7 +2224,7 @@ def main():
                     router_clients = merge_router_clients(wifi_clients, wired_clients)
                     last_neigh_refresh = time.monotonic()
                     logger.debug(
-                        f"Refreshed {len(arp)} ARP/DHCP devices, {len(wifi_clients)} Wi-Fi, {len(wired_clients)} wired"
+                        f"Refreshed {len(arp)} ARP/DHCP devices, {len(service_map)} service names, {len(wifi_clients)} Wi-Fi, {len(wired_clients)} wired"
                     )
 
                 # Capture wall-clock timestamp immediately when byte counters are sampled

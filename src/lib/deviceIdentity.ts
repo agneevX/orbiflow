@@ -233,11 +233,34 @@ export function fingerprintDeviceHint(flows: FlowFingerprintInput[]): string | n
   return candidates[0] && candidates[0].score >= 3 ? candidates[0].label : null;
 }
 
+export function isGenericDhcpHostname(hostname: string | undefined | null): boolean {
+  if (!hostname) return true;
+  const low = hostname.trim().toLowerCase();
+  if (!low || low.length <= 1) return true;
+  return (
+    /^android[-_][0-9a-f]{4,}$/i.test(low) ||
+    /^dhcppc\d+$/i.test(low) ||
+    /^(host|client|device|user|pc|phone|mobile|unknown)[-_]?\d*$/i.test(low) ||
+    /^esp[-_]?[0-9a-f]{4,}$/i.test(low) ||
+    /^espressif[-_]?[0-9a-f]*$/i.test(low) ||
+    /^tuya[-_]?[0-9a-f]*$/i.test(low) ||
+    /^amazon[-_][0-9a-f]{6,}$/i.test(low) ||
+    /^chromecast$/i.test(low) ||
+    /^google[-_]?home$/i.test(low) ||
+    /^localhost(\.localdomain)?$/i.test(low) ||
+    /^wlan\d+$/i.test(low)
+  );
+}
+
 export interface ResolveHostIdentityInput {
   ip: string;
   mac?: string;
   dhcpHostname?: string;
   ptrHostname?: string | null;
+  serviceName?: string | null;
+  serviceProtocol?: string | null;
+  serviceModel?: string | null;
+  advertisedServices?: string[];
   providedVendor?: string;
   deviceHint?: string | null;
   aliases: Record<string, DeviceAlias>;
@@ -251,6 +274,9 @@ export interface ResolvedHostIdentity {
   nameSource: DeviceNameSource;
   isRandomizedMac: boolean;
   ptrHostname?: string;
+  serviceName?: string;
+  serviceProtocol?: string;
+  advertisedServices?: string[];
   deviceHint?: string;
   aliasKey?: string;
   aliasMatchBy?: 'mac' | 'ip';
@@ -277,10 +303,31 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
       ? stripLocalDomain(input.dhcpHostname, input.stripDomain)
       : undefined;
 
+  const cleanServiceName =
+    input.serviceName && isMeaningfulHostname(input.serviceName, input.ip)
+      ? input.serviceName.trim().replace(/\.local\.?$/i, '')
+      : undefined;
+  const cleanServiceProtocol = input.serviceProtocol?.trim() || undefined;
+  const cleanServiceModel = input.serviceModel?.trim() || undefined;
+  const advertisedServices =
+    Array.isArray(input.advertisedServices) && input.advertisedServices.length > 0
+      ? Array.from(new Set(input.advertisedServices.map((s) => s.trim()).filter(Boolean))).slice(0, 8)
+      : undefined;
+
   const vendor =
-    allowInferred && isRandomized && deviceHint
-      ? `${deviceHint} · Private MAC`
-      : baseVendor;
+    cleanServiceModel && (baseVendor === 'LAN Device' || isRandomized)
+      ? isRandomized
+        ? `${cleanServiceModel} · Private MAC`
+        : cleanServiceModel
+      : allowInferred && isRandomized && deviceHint
+        ? `${deviceHint} · Private MAC`
+        : baseVendor;
+
+  const sharedServiceMeta = {
+    ...(cleanServiceName ? { serviceName: cleanServiceName } : {}),
+    ...(cleanServiceProtocol ? { serviceProtocol: cleanServiceProtocol } : {}),
+    ...(advertisedServices ? { advertisedServices } : {}),
+  };
 
   if (matchedAlias && matchedAlias.name.trim()) {
     return {
@@ -289,6 +336,7 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
       nameSource: 'alias',
       isRandomizedMac: isRandomized,
       ptrHostname: cleanPtr,
+      ...sharedServiceMeta,
       deviceHint,
       aliasKey: matchedAlias.key,
       aliasMatchBy: matchedAlias.matchBy,
@@ -302,6 +350,33 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
       nameSource: 'lan-dns',
       isRandomizedMac: isRandomized,
       ptrHostname: cleanPtr,
+      ...sharedServiceMeta,
+      deviceHint,
+    };
+  }
+
+  // Prefer advertised service names (Google Cast, ADB, AirPlay, UPnP, mDNS, NetBIOS)
+  // over missing or generic auto-generated DHCP hostnames like "android-8f3c2a1b".
+  const dhcpIsGeneric = isGenericDhcpHostname(cleanDhcp);
+
+  if (cleanDhcp && !dhcpIsGeneric) {
+    return {
+      hostname: cleanDhcp,
+      vendor,
+      nameSource: 'dhcp',
+      isRandomizedMac: isRandomized,
+      ...sharedServiceMeta,
+      deviceHint,
+    };
+  }
+
+  if (cleanServiceName) {
+    return {
+      hostname: cleanServiceName,
+      vendor,
+      nameSource: 'service',
+      isRandomizedMac: isRandomized,
+      ...sharedServiceMeta,
       deviceHint,
     };
   }
@@ -312,6 +387,7 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
       vendor,
       nameSource: 'dhcp',
       isRandomizedMac: isRandomized,
+      ...sharedServiceMeta,
       deviceHint,
     };
   }
@@ -323,6 +399,7 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
       vendor,
       nameSource: 'fingerprint',
       isRandomizedMac: isRandomized,
+      ...sharedServiceMeta,
       deviceHint,
     };
   }
@@ -332,6 +409,7 @@ export function resolveHostIdentity(input: ResolveHostIdentityInput): ResolvedHo
     vendor,
     nameSource: 'ip',
     isRandomizedMac: isRandomized,
+    ...sharedServiceMeta,
     deviceHint,
   };
 }

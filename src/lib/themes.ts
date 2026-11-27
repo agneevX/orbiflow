@@ -6,11 +6,7 @@ export type ThemeId =
   | 'dracula-pro'
   | 'nord'
   | 'tokyo-night'
-  | 'daylight'
-  | 'catppuccin-latte'
-  | 'dracula-light'
-  | 'nord-light'
-  | 'tokyo-night-day';
+  | 'daylight';
 
 export interface ThemePalette {
   id: ThemeId;
@@ -133,70 +129,6 @@ export const THEMES: Record<ThemeId, ThemePalette> = {
     nodeBorder: '#CBD5E1',
     ribbonColors: ['#0284C7', '#059669', '#4F46E5', '#D97706', '#E11D48', '#0D9488'],
   },
-  'catppuccin-latte': {
-    id: 'catppuccin-latte',
-    label: 'Catppuccin Latte',
-    isDark: false,
-    rxColor: '#1E66F5',
-    txColor: '#40A02B',
-    rxFillTop: 'rgba(30, 102, 245, 0.18)',
-    rxFillBottom: 'rgba(30, 102, 245, 0.01)',
-    txFillTop: 'rgba(64, 160, 43, 0.14)',
-    txFillBottom: 'rgba(64, 160, 43, 0.01)',
-    gridColor: 'rgba(108, 111, 133, 0.16)',
-    axisTextColor: '#6C6F85',
-    nodeFill: '#FFFFFF',
-    nodeBorder: '#CCD0DA',
-    ribbonColors: ['#1E66F5', '#40A02B', '#8839EF', '#FE640B', '#D20F39', '#179299'],
-  },
-  'dracula-light': {
-    id: 'dracula-light',
-    label: 'Alucard Light',
-    isDark: false,
-    rxColor: '#036A96',
-    txColor: '#14710A',
-    rxFillTop: 'rgba(3, 106, 150, 0.18)',
-    rxFillBottom: 'rgba(3, 106, 150, 0.01)',
-    txFillTop: 'rgba(20, 113, 10, 0.14)',
-    txFillBottom: 'rgba(20, 113, 10, 0.01)',
-    gridColor: 'rgba(108, 102, 75, 0.16)',
-    axisTextColor: '#6C664B',
-    nodeFill: '#FFFBEB',
-    nodeBorder: '#D8D2C0',
-    ribbonColors: ['#036A96', '#14710A', '#644AC9', '#A3144D', '#A34D14', '#846E15'],
-  },
-  'nord-light': {
-    id: 'nord-light',
-    label: 'Nord Snow',
-    isDark: false,
-    rxColor: '#2E6F95',
-    txColor: '#4F7A42',
-    rxFillTop: 'rgba(46, 111, 149, 0.18)',
-    rxFillBottom: 'rgba(46, 111, 149, 0.01)',
-    txFillTop: 'rgba(79, 122, 66, 0.14)',
-    txFillBottom: 'rgba(79, 122, 66, 0.01)',
-    gridColor: 'rgba(76, 86, 106, 0.15)',
-    axisTextColor: '#4C566A',
-    nodeFill: '#FFFFFF',
-    nodeBorder: '#D8DEE9',
-    ribbonColors: ['#2E6F95', '#4F7A42', '#5E81AC', '#B4693E', '#8C5B83', '#3E8285'],
-  },
-  'tokyo-night-day': {
-    id: 'tokyo-night-day',
-    label: 'Tokyo Night Day',
-    isDark: false,
-    rxColor: '#2E7DE9',
-    txColor: '#485E30',
-    rxFillTop: 'rgba(46, 125, 233, 0.18)',
-    rxFillBottom: 'rgba(46, 125, 233, 0.01)',
-    txFillTop: 'rgba(72, 94, 48, 0.14)',
-    txFillBottom: 'rgba(72, 94, 48, 0.01)',
-    gridColor: 'rgba(97, 114, 176, 0.16)',
-    axisTextColor: '#6172B0',
-    nodeFill: '#F4F5F9',
-    nodeBorder: '#C4C8DA',
-    ribbonColors: ['#2E7DE9', '#485E30', '#7847BD', '#8C6C3E', '#C64343', '#007197'],
-  },
 };
 
 export const DARK_THEMES = Object.values(THEMES).filter((t) => t.isDark);
@@ -205,41 +137,39 @@ export const LIGHT_THEMES = Object.values(THEMES).filter((t) => !t.isDark);
 export const AUTO_THEME_PAIRS: AutoThemePair[] = [
   {
     id: 'obsidian-daylight',
-    label: 'Obsidian / Daylight',
+    label: 'Obsidian / Daylight Slate',
     darkThemeId: 'obsidian',
     lightThemeId: 'daylight',
   },
   {
     id: 'catppuccin',
-    label: 'Catppuccin (Mocha / Latte)',
+    label: 'Catppuccin Mocha / Daylight Slate',
     darkThemeId: 'catppuccin-mocha',
-    lightThemeId: 'catppuccin-latte',
+    lightThemeId: 'daylight',
   },
   {
     id: 'dracula',
-    label: 'Dracula (Pro / Alucard)',
+    label: 'Dracula Pro / Daylight Slate',
     darkThemeId: 'dracula-pro',
-    lightThemeId: 'dracula-light',
+    lightThemeId: 'daylight',
   },
   {
     id: 'nord',
-    label: 'Nord (Night / Snow)',
+    label: 'Nord / Daylight Slate',
     darkThemeId: 'nord',
-    lightThemeId: 'nord-light',
+    lightThemeId: 'daylight',
   },
   {
     id: 'tokyo-night',
-    label: 'Tokyo Night (Night / Day)',
+    label: 'Tokyo Night / Daylight Slate',
     darkThemeId: 'tokyo-night',
-    lightThemeId: 'tokyo-night-day',
+    lightThemeId: 'daylight',
   },
 ];
 
-export function findAutoThemePair(themeId: ThemeId): AutoThemePair {
+export function findAutoThemePair(darkThemeId: ThemeId): AutoThemePair {
   return (
-    AUTO_THEME_PAIRS.find(
-      (pair) => pair.darkThemeId === themeId || pair.lightThemeId === themeId
-    ) || AUTO_THEME_PAIRS[0]
+    AUTO_THEME_PAIRS.find((pair) => pair.darkThemeId === darkThemeId) || AUTO_THEME_PAIRS[0]
   );
 }
 
@@ -256,10 +186,7 @@ export function normalizeDarkTheme(raw: string | null | undefined): ThemeId {
   return 'obsidian';
 }
 
-export function normalizeLightTheme(raw: string | null | undefined): ThemeId {
-  if (raw && raw in THEMES && !THEMES[raw as ThemeId].isDark) {
-    return raw as ThemeId;
-  }
+export function normalizeLightTheme(_raw?: string | null): ThemeId {
   return 'daylight';
 }
 

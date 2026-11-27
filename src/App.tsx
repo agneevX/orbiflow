@@ -691,6 +691,7 @@ export default function App() {
         themeMode={themeMode}
         effectiveIsDark={effectiveIsDark}
         activeThemeId={effectiveThemeId}
+        darkThemeId={darkThemeId}
         onChangeThemeMode={setThemeMode}
         onChangeActiveTheme={handleChangeActiveTheme}
         onSelectAutoThemePair={handleSelectAutoThemePair}

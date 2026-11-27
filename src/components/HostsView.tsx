@@ -56,17 +56,21 @@ const SOURCE_META: Record<DeviceNameSource, { label: string; tip: string }> = {
     label: 'LAN DNS',
     tip: 'Resolved via reverse PTR lookup against your local DNS server / router dnsmasq.',
   },
+  service: {
+    label: 'Service',
+    tip: 'Discovered from local advertised services (mDNS/DNS-SD such as Google Cast, ADB, AirPlay, HomeKit, Sonos, IPP, SMB/SSH, SSDP/UPnP, or NetBIOS).',
+  },
   dhcp: {
     label: 'DHCP',
     tip: 'Hostname reported by the router DHCP lease file or static hosts table.',
   },
   fingerprint: {
     label: 'Inferred',
-    tip: 'No DHCP or DNS name was found (common with Private Wi-Fi MACs). Device type was inferred from its live traffic destinations. You can disable inferred names in Settings or click the rename icon.',
+    tip: 'No DHCP, DNS, or advertised service name was found (common with Private Wi-Fi MACs). Device type was inferred from its live traffic destinations. You can disable inferred names in Settings or click the rename icon.',
   },
   ip: {
     label: 'IP Only',
-    tip: 'No hostname resolved from LAN DNS or DHCP. Click the rename icon to assign a permanent custom name.',
+    tip: 'No hostname resolved from LAN DNS, advertised services, or DHCP. Click the rename icon to assign a permanent custom name.',
   },
 };
 
@@ -204,7 +208,12 @@ export function HostsView({
       }
 
       if (typeFilter === 'NAMED') {
-        if (h.nameSource !== 'alias' && h.nameSource !== 'lan-dns' && h.nameSource !== 'dhcp') {
+        if (
+          h.nameSource !== 'alias' &&
+          h.nameSource !== 'lan-dns' &&
+          h.nameSource !== 'service' &&
+          h.nameSource !== 'dhcp'
+        ) {
           return false;
         }
       } else if (typeFilter === 'INFERRED') {
@@ -217,12 +226,13 @@ export function HostsView({
 
       if (!q) return true;
       const services = (h.topServices || []).join(' ');
+      const advServices = (h.advertisedServices || []).join(' ');
       const connHint =
         h.connectionType === 'wifi'
           ? `wifi wi-fi ${h.wifiBand || ''} ${h.apName || 'main ap'}`
           : `ethernet wired ${h.apName || 'main ap'}`;
       const vlanHint = `${h.vlanName || ''} ${h.vlanCidr || ''}`;
-      const haystack = `${h.hostname} ${h.ip} ${h.mac} ${h.vendor} ${services} ${connHint} ${vlanHint} ${h.ptrHostname || ''}`.toLowerCase();
+      const haystack = `${h.hostname} ${h.ip} ${h.mac} ${h.vendor} ${services} ${advServices} ${h.serviceProtocol || ''} ${connHint} ${vlanHint} ${h.ptrHostname || ''}`.toLowerCase();
       return haystack.includes(q);
     });
 
@@ -330,7 +340,7 @@ export function HostsView({
             className="app-input border rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-sky-500"
           >
             <option value="ALL">All Devices</option>
-            <option value="NAMED">Named (Custom / DNS / DHCP)</option>
+            <option value="NAMED">Named (Custom / DNS / Service / DHCP)</option>
             <option value="INFERRED">Inferred Names</option>
             <option value="IP_ONLY">IP Only</option>
             <option value="PRIVATE_MAC">Private MAC</option>
@@ -610,9 +620,9 @@ export function HostsView({
                     <tr
                       key={host.ip}
                       data-testid={`host-row-${host.ip}`}
-                      className={`app-row-hover transition-colors ${isEditing ? '' : 'h-[62px]'}`}
+                      className={`app-row-hover transition-colors ${isEditing ? '' : 'h-[52px]'}`}
                     >
-                      <td className="py-2.5 px-3 align-middle max-w-[260px]">
+                      <td className="py-1.5 px-3 align-middle max-w-[260px]">
                         {isEditing ? (
                           <div className="space-y-1.5" data-testid="device-rename-form">
                             <div className="flex items-center gap-1.5">
@@ -693,7 +703,7 @@ export function HostsView({
                           </div>
                         ) : (
                           <div className="min-w-0">
-                            <div className="flex items-center gap-1 min-w-0">
+                            <div className="flex items-center gap-1 min-w-0 leading-4">
                               <span className="font-medium truncate" title={host.hostname}>
                                 {host.hostname}
                               </span>
@@ -703,13 +713,13 @@ export function HostsView({
                                 onClick={() => startEdit(host)}
                                 aria-label={`Rename ${host.hostname}`}
                                 title="Assign custom device name (saved in /config/config.json)"
-                                className="p-1 rounded-lg app-text-muted hover:text-sky-500 transition-colors shrink-0"
+                                className="p-0.5 rounded-lg app-text-muted hover:text-sky-500 transition-colors shrink-0"
                               >
                                 <Pencil className="h-3 w-3" aria-hidden="true" />
                               </button>
                             </div>
                             {localPrefs.showVendorSource && (
-                              <div className="text-[11px] app-text-muted flex items-center gap-1.5 min-w-0 leading-4">
+                              <div className="text-[11px] app-text-muted flex items-center gap-1.5 min-w-0 leading-4 whitespace-nowrap">
                                 <span className="truncate" title={host.vendor}>
                                   {host.vendor}
                                 </span>
@@ -718,11 +728,17 @@ export function HostsView({
                                 </span>
                                 <span className="shrink-0">
                                   <TechTerm
-                                    label={sourceMeta.label}
+                                    label={
+                                      host.nameSource === 'service' && host.serviceProtocol
+                                        ? host.serviceProtocol
+                                        : sourceMeta.label
+                                    }
                                     tip={
                                       host.ptrHostname
                                         ? `${sourceMeta.tip} Full PTR: ${host.ptrHostname}`
-                                        : sourceMeta.tip
+                                        : host.advertisedServices && host.advertisedServices.length > 0
+                                          ? `${sourceMeta.tip} Advertised: ${host.advertisedServices.join(', ')}`
+                                          : sourceMeta.tip
                                     }
                                   />
                                 </span>
@@ -733,11 +749,11 @@ export function HostsView({
                       </td>
 
                       {localPrefs.showIp && (
-                        <td className="py-2.5 px-3 align-middle whitespace-nowrap tabular-nums">
-                          <div>{host.ip}</div>
+                        <td className="py-1.5 px-3 align-middle whitespace-nowrap tabular-nums">
+                          <div className="leading-4">{host.ip}</div>
                           {host.vlanName && (
                             <div
-                              className="mt-0.5 inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400"
+                              className="mt-0.5 inline-flex items-center text-[10px] font-medium px-1.5 py-0 leading-4 rounded bg-violet-500/15 text-violet-400"
                               title={host.vlanCidr}
                             >
                               {host.vlanName}
@@ -747,8 +763,8 @@ export function HostsView({
                       )}
 
                       {localPrefs.showMac && (
-                        <td className="py-2.5 px-3 align-middle font-mono text-[11px] app-text-muted whitespace-nowrap">
-                          <div title={host.mac}>{host.mac}</div>
+                        <td className="py-1.5 px-3 align-middle font-mono text-[11px] app-text-muted whitespace-nowrap">
+                          <div className="leading-4" title={host.mac}>{host.mac}</div>
                           {host.isRandomizedMac && (
                             <div className="text-[11px] font-sans text-amber-500 leading-4">
                               <TechTerm
@@ -763,11 +779,11 @@ export function HostsView({
                       {localPrefs.showConnection && (
                         <td
                           data-testid={`host-connection-${host.ip}`}
-                          className="py-2.5 px-3 align-middle whitespace-nowrap"
+                          className="py-1.5 px-3 align-middle whitespace-nowrap"
                         >
                           {host.connectionType === 'wifi' ? (
-                            <div className="space-y-0.5">
-                              <div className="inline-flex items-center gap-1.5 font-mono text-[11px] font-medium tabular-nums">
+                            <div>
+                              <div className="inline-flex items-center gap-1.5 font-mono text-[11px] leading-4 font-medium tabular-nums">
                                 <Wifi className="h-3.5 w-3.5 text-sky-500 shrink-0" aria-hidden="true" />
                                 <span>
                                   {formatWifiRatesLabel(host.wifiRxMbps, host.wifiTxMbps)}
@@ -780,8 +796,8 @@ export function HostsView({
                               </div>
                             </div>
                           ) : (
-                            <div className="space-y-0.5">
-                              <div className="inline-flex items-center gap-1.5 text-xs app-text-secondary">
+                            <div>
+                              <div className="inline-flex items-center gap-1.5 text-xs leading-4 app-text-secondary">
                                 <Cable
                                   className="h-3.5 w-3.5 text-emerald-500 shrink-0"
                                   aria-hidden="true"
@@ -798,24 +814,24 @@ export function HostsView({
 
                       {localPrefs.showTopServices && (
                         <td
-                          className="py-2.5 px-3 align-middle app-text-secondary max-w-[240px]"
+                          className="py-1.5 px-3 align-middle app-text-secondary max-w-[240px]"
                           title={serviceText}
                         >
-                          <div className="text-xs leading-snug line-clamp-2 break-words">
+                          <div className="text-xs leading-4 truncate">
                             {serviceText}
                           </div>
                         </td>
                       )}
 
                       {localPrefs.showConnections && (
-                        <td className="py-2.5 px-2 align-middle text-right font-medium tabular-nums whitespace-nowrap">
+                        <td className="py-1.5 px-2 align-middle text-right font-medium tabular-nums whitespace-nowrap">
                           {host.activeFlows}
                         </td>
                       )}
 
                       {localPrefs.showDownload && (
                         <td
-                          className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums"
+                          className="py-1.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums"
                           style={{ color: theme.rxColor }}
                         >
                           {formatBandwidth(host.rxBps, unit)}
@@ -824,7 +840,7 @@ export function HostsView({
 
                       {localPrefs.showUpload && (
                         <td
-                          className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums"
+                          className="py-1.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums"
                           style={{ color: theme.txColor }}
                         >
                           {formatBandwidth(host.txBps, unit)}
@@ -832,12 +848,12 @@ export function HostsView({
                       )}
 
                       {localPrefs.showTotal && (
-                        <td className="py-2.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums">
+                        <td className="py-1.5 px-2 align-middle text-right font-medium whitespace-nowrap tabular-nums">
                           {formatBytes(host.totalBytes)}
                         </td>
                       )}
 
-                      <td className="py-2.5 px-3 align-middle text-right whitespace-nowrap">
+                      <td className="py-1.5 px-3 align-middle text-right whitespace-nowrap">
                         <button
                           type="button"
                           onClick={() => onInspectHostFlows(host)}

@@ -320,18 +320,18 @@ export function OverviewView({
                       key={host.ip}
                       type="button"
                       onClick={() => onSelectHost(host)}
-                      className="w-full py-2.5 px-2.5 -mx-2.5 rounded-xl app-row-hover transition-colors flex items-center justify-between gap-4 text-left"
+                      className="w-full h-[52px] py-0 px-2.5 -mx-2.5 rounded-xl app-row-hover transition-colors flex items-center justify-between gap-4 text-left overflow-hidden"
                     >
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 leading-4">
                           <span className="text-sm font-medium truncate">{host.hostname}</span>
-                          <span className="text-xs app-text-muted tabular-nums">{host.ip}</span>
+                          <span className="text-xs app-text-muted tabular-nums shrink-0">{host.ip}</span>
                         </div>
-                        <div className="text-xs app-text-muted mt-0.5 truncate">
+                        <div className="text-xs leading-4 app-text-muted mt-0.5 truncate">
                           {host.vendor} · {host.activeFlows} connections
                         </div>
                       </div>
-                      <div className="text-right text-xs font-medium tabular-nums shrink-0">
+                      <div className="text-right text-xs leading-4 font-medium tabular-nums shrink-0">
                         <div>{formatBandwidth(host.rxBps, unit)} ↓</div>
                         <div className="app-text-muted">{formatBandwidth(host.txBps, unit)} ↑</div>
                       </div>
@@ -362,15 +362,15 @@ export function OverviewView({
                       key={srv.service}
                       type="button"
                       onClick={() => onSelectFilter(srv.service)}
-                      className="w-full py-2.5 px-2.5 -mx-2.5 rounded-xl app-row-hover transition-colors flex items-center justify-between gap-4 text-left"
+                      className="w-full h-[52px] py-0 px-2.5 -mx-2.5 rounded-xl app-row-hover transition-colors flex items-center justify-between gap-4 text-left overflow-hidden"
                     >
                       <div className="min-w-0">
-                        <div className="text-sm font-medium truncate">{srv.service}</div>
-                        <div className="text-xs app-text-muted mt-0.5 truncate">
+                        <div className="text-sm leading-4 font-medium truncate">{srv.service}</div>
+                        <div className="text-xs leading-4 app-text-muted mt-0.5 truncate">
                           {srv.category} · {srv.flows} active connections · {formatBytes(srv.bytes)}
                         </div>
                       </div>
-                      <div className="text-xs font-medium tabular-nums shrink-0">
+                      <div className="text-xs leading-4 font-medium tabular-nums shrink-0">
                         {formatBandwidth(srv.bps, unit)}
                       </div>
                     </button>

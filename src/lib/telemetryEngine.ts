@@ -76,10 +76,23 @@ interface KnownHostRecord {
   mac: string;
   dhcpHostname?: string;
   providedVendor?: string;
+  serviceName?: string;
+  serviceProtocol?: string;
+  serviceModel?: string;
+  advertisedServices?: string[];
   lastSeen: number;
 }
 
 export type RdnsLookupFn = (ip: string) => string | null;
+
+export interface ServiceIdentityLookupResult {
+  name?: string;
+  protocol?: string;
+  model?: string;
+  services?: string[];
+}
+
+export type ServiceLookupFn = (ip: string) => ServiceIdentityLookupResult | null;
 
 export const DEFAULT_ALERT_RULES: AlertRule[] = [
   {
@@ -1097,12 +1110,17 @@ export class TrafficMonitorEngine {
     const hostNameByIp = new Map<string, string>();
     const renamedHosts = this.latestSnapshot.hosts.map((h) => {
       const effectivePtr = allowLanPtr ? h.ptrHostname : undefined;
+      const known = this.knownHostsCache.get(h.ip);
       const identity = resolveHostIdentity({
         ip: h.ip,
         mac: h.mac,
-        dhcpHostname: h.nameSource === 'dhcp' ? h.hostname : undefined,
+        dhcpHostname: known?.dhcpHostname ?? (h.nameSource === 'dhcp' ? h.hostname : undefined),
         ptrHostname: effectivePtr,
-        providedVendor: h.vendor.includes('Private MAC') ? undefined : h.vendor,
+        serviceName: h.serviceName ?? known?.serviceName,
+        serviceProtocol: h.serviceProtocol ?? known?.serviceProtocol,
+        serviceModel: known?.serviceModel,
+        advertisedServices: h.advertisedServices ?? known?.advertisedServices,
+        providedVendor: known?.providedVendor ?? (h.vendor.includes('Private MAC') ? undefined : h.vendor),
         deviceHint: h.deviceHint,
         aliases: this.deviceAliases,
         stripDomain: this.serverConfig.stripLanDomain,
@@ -1116,6 +1134,9 @@ export class TrafficMonitorEngine {
         nameSource: identity.nameSource,
         isRandomizedMac: identity.isRandomizedMac,
         ptrHostname: identity.ptrHostname,
+        serviceName: identity.serviceName,
+        serviceProtocol: identity.serviceProtocol,
+        advertisedServices: identity.advertisedServices,
         aliasKey: identity.aliasKey,
         aliasMatchBy: identity.aliasMatchBy,
       };
@@ -1150,23 +1171,47 @@ export class TrafficMonitorEngine {
   }
 
   /**
-   * Re-applies freshly resolved private reverse-DNS (PTR) hostnames to the latest snapshot
-   * immediately when asynchronous lookups complete, without waiting for the next probe tick.
+   * Re-applies freshly resolved private reverse-DNS (PTR) and advertised LAN service names
+   * (mDNS/Google Cast/ADB/AirPlay/UPnP/NetBIOS) immediately when asynchronous discovery completes.
    */
-  public refreshLanHostnames(lanRdnsLookup: RdnsLookupFn): boolean {
+  public refreshLanHostnames(
+    lanRdnsLookup: RdnsLookupFn,
+    serviceLookup?: ServiceLookupFn
+  ): boolean {
     const allowLanPtr = this.serverConfig.lanDnsEnabled !== false;
     let changed = false;
     const hostNameByIp = new Map<string, string>();
 
     const nextHosts = this.latestSnapshot.hosts.map((h) => {
+      const known = this.knownHostsCache.get(h.ip);
       const freshPtr = allowLanPtr ? lanRdnsLookup(h.ip) : null;
       const effectivePtr = allowLanPtr ? (freshPtr || h.ptrHostname) : undefined;
+      const freshSvc = serviceLookup ? serviceLookup(h.ip) : null;
+      const mergedServices = Array.from(
+        new Set([
+          ...(known?.advertisedServices || []),
+          ...(h.advertisedServices || []),
+          ...(freshSvc?.services || []),
+        ])
+      );
+      const effectiveServiceName = freshSvc?.name || known?.serviceName || h.serviceName;
+      const effectiveServiceProtocol =
+        (freshSvc?.name ? freshSvc.protocol : undefined) ||
+        known?.serviceProtocol ||
+        h.serviceProtocol ||
+        freshSvc?.protocol;
+      const effectiveServiceModel = freshSvc?.model || known?.serviceModel;
+
       const identity = resolveHostIdentity({
         ip: h.ip,
         mac: h.mac,
-        dhcpHostname: h.nameSource === 'dhcp' ? h.hostname : undefined,
+        dhcpHostname: known?.dhcpHostname ?? (h.nameSource === 'dhcp' ? h.hostname : undefined),
         ptrHostname: effectivePtr,
-        providedVendor: h.vendor.includes('Private MAC') ? undefined : h.vendor,
+        serviceName: effectiveServiceName,
+        serviceProtocol: effectiveServiceProtocol,
+        serviceModel: effectiveServiceModel,
+        advertisedServices: mergedServices.length > 0 ? mergedServices : undefined,
+        providedVendor: known?.providedVendor ?? (h.vendor.includes('Private MAC') ? undefined : h.vendor),
         deviceHint: h.deviceHint,
         aliases: this.deviceAliases,
         stripDomain: this.serverConfig.stripLanDomain,
@@ -1177,7 +1222,10 @@ export class TrafficMonitorEngine {
       if (
         identity.hostname !== h.hostname ||
         identity.ptrHostname !== h.ptrHostname ||
-        identity.nameSource !== h.nameSource
+        identity.nameSource !== h.nameSource ||
+        identity.serviceName !== h.serviceName ||
+        identity.vendor !== h.vendor ||
+        (identity.advertisedServices?.length || 0) !== (h.advertisedServices?.length || 0)
       ) {
         changed = true;
       }
@@ -1189,6 +1237,9 @@ export class TrafficMonitorEngine {
         nameSource: identity.nameSource,
         isRandomizedMac: identity.isRandomizedMac,
         ptrHostname: identity.ptrHostname,
+        serviceName: identity.serviceName,
+        serviceProtocol: identity.serviceProtocol,
+        advertisedServices: identity.advertisedServices,
         aliasKey: identity.aliasKey,
         aliasMatchBy: identity.aliasMatchBy,
       };
@@ -1292,7 +1343,8 @@ export class TrafficMonitorEngine {
   public ingest(
     snapshot: ProbeSnapshot,
     rdnsLookup?: RdnsLookupFn,
-    lanRdnsLookup?: RdnsLookupFn
+    lanRdnsLookup?: RdnsLookupFn,
+    serviceLookup?: ServiceLookupFn
   ): {
     dashboard: DashboardSnapshot;
     newAlerts: AlertEvent[];
@@ -1687,6 +1739,10 @@ export class TrafficMonitorEngine {
         serviceCounts: Map<string, number>;
         dhcpHostname?: string;
         providedVendor?: string;
+        probeServiceName?: string;
+        probeServiceProtocol?: string;
+        probeServiceModel?: string;
+        probeAdvertisedServices?: string[];
         observedFlows: Array<{ dstService: string; dstHost?: string; app: string; dport: number }>;
       }
     >();
@@ -1754,11 +1810,21 @@ export class TrafficMonitorEngine {
         ? entry.hostname
         : prevKnown?.dhcpHostname;
       const providedVendor = entry.vendor || prevKnown?.providedVendor;
+      const mergedServices = Array.from(
+        new Set([
+          ...(prevKnown?.advertisedServices || []),
+          ...(Array.isArray(entry.advertisedServices) ? entry.advertisedServices : []),
+        ])
+      ).slice(0, 8);
       this.knownHostsCache.set(entry.ip, {
         ip: entry.ip,
         mac: normMac && normMac !== '00:00:00:00:00:00' ? normMac : prevKnown?.mac || normMac,
         dhcpHostname: dhcpHost,
         providedVendor,
+        serviceName: entry.serviceName || prevKnown?.serviceName,
+        serviceProtocol: entry.serviceProtocol || prevKnown?.serviceProtocol,
+        serviceModel: entry.model || prevKnown?.serviceModel,
+        advertisedServices: mergedServices.length > 0 ? mergedServices : undefined,
         lastSeen: now,
       });
     }
@@ -1799,6 +1865,10 @@ export class TrafficMonitorEngine {
         isRandomizedMac: false,
         dhcpHostname: known.dhcpHostname,
         providedVendor: known.providedVendor,
+        probeServiceName: known.serviceName,
+        probeServiceProtocol: known.serviceProtocol,
+        probeServiceModel: known.serviceModel,
+        probeAdvertisedServices: known.advertisedServices,
         activeFlows: 0,
         rxBytes: 0,
         txBytes: 0,
@@ -1950,89 +2020,122 @@ export class TrafficMonitorEngine {
     let randomizedMacCount = 0;
 
     const hosts: HostSummary[] = Array.from(hostMap.values())
-      .map(({ appCounts, serviceCounts, dhcpHostname, providedVendor, observedFlows, ...rest }) => {
-        const ptrHostname = lanRdnsLookup ? lanRdnsLookup(rest.ip) : null;
-        const deviceHint = fingerprintDeviceHint(observedFlows);
-        const identity = resolveHostIdentity({
-          ip: rest.ip,
-          mac: rest.mac,
+      .map(
+        ({
+          appCounts,
+          serviceCounts,
           dhcpHostname,
-          ptrHostname,
           providedVendor,
-          deviceHint,
-          aliases: this.deviceAliases,
-          stripDomain: this.serverConfig.stripLanDomain,
-          inferDeviceNames: this.serverConfig.inferDeviceNames,
-        });
+          probeServiceName,
+          probeServiceProtocol,
+          probeServiceModel,
+          probeAdvertisedServices,
+          observedFlows,
+          ...rest
+        }) => {
+          const ptrHostname = lanRdnsLookup ? lanRdnsLookup(rest.ip) : null;
+          const serverSvc = serviceLookup ? serviceLookup(rest.ip) : null;
+          const mergedServices = Array.from(
+            new Set([
+              ...(probeAdvertisedServices || []),
+              ...(serverSvc?.services || []),
+            ])
+          ).slice(0, 8);
+          const effectiveServiceName = serverSvc?.name || probeServiceName;
+          const effectiveServiceProtocol =
+            (serverSvc?.name ? serverSvc.protocol : undefined) ||
+            probeServiceProtocol ||
+            serverSvc?.protocol;
+          const effectiveServiceModel = serverSvc?.model || probeServiceModel;
+          const deviceHint = fingerprintDeviceHint(observedFlows);
+          const identity = resolveHostIdentity({
+            ip: rest.ip,
+            mac: rest.mac,
+            dhcpHostname,
+            ptrHostname,
+            serviceName: effectiveServiceName,
+            serviceProtocol: effectiveServiceProtocol,
+            serviceModel: effectiveServiceModel,
+            advertisedServices: mergedServices.length > 0 ? mergedServices : undefined,
+            providedVendor,
+            deviceHint,
+            aliases: this.deviceAliases,
+            stripDomain: this.serverConfig.stripLanDomain,
+            inferDeviceNames: this.serverConfig.inferDeviceNames,
+          });
 
-        if (identity.isRandomizedMac) {
-          randomizedMacCount += 1;
+          if (identity.isRandomizedMac) {
+            randomizedMacCount += 1;
+          }
+          resolvedNameByIp.set(rest.ip, identity.hostname);
+
+          const sortedApps = Array.from(appCounts.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([app]) => app);
+
+          const freshServices = Array.from(serviceCounts.entries())
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            .slice(0, 4)
+            .map(([svc]) => svc);
+
+          const cachedSvc = this.hostTopServicesCache.get(rest.ip);
+          let stableTopServices: string[];
+          if (
+            !cachedSvc ||
+            (cachedSvc.services.length === 0 && freshServices.length > 0) ||
+            now - cachedSvc.updatedAt >= this.topServicesRefreshMs
+          ) {
+            stableTopServices = freshServices;
+            this.hostTopServicesCache.set(rest.ip, { services: freshServices, updatedAt: now });
+          } else {
+            stableTopServices = cachedSvc.services;
+          }
+
+          const normMac = normalizeMac(rest.mac);
+          const clientLinkMeta =
+            (normMac && normMac !== '00:00:00:00:00:00' ? clientLinkByMac.get(normMac) : undefined) ||
+            clientLinkByIp.get(rest.ip);
+          const clientLink = clientLinkMeta?.link;
+          const isWifi = clientLink?.connectionType === 'wifi';
+          const fallbackWifiSpeed =
+            isWifi && clientLink.linkSpeedMbps > 0 ? clientLink.linkSpeedMbps : undefined;
+          const wifiRxMbps = isWifi
+            ? (clientLink.wifiRxMbps && clientLink.wifiRxMbps > 0 ? clientLink.wifiRxMbps : fallbackWifiSpeed)
+            : undefined;
+          const wifiTxMbps = isWifi
+            ? (clientLink.wifiTxMbps && clientLink.wifiTxMbps > 0 ? clientLink.wifiTxMbps : fallbackWifiSpeed)
+            : undefined;
+          const wifiBand = isWifi
+            ? clientLink.wifiBand || extractWifiBand(clientLink.portOrRadio)
+            : undefined;
+          const apName = clientLinkMeta?.apName || 'Main AP';
+
+          return {
+            ...rest,
+            hostname: identity.hostname,
+            vendor: identity.vendor,
+            nameSource: identity.nameSource,
+            isRandomizedMac: identity.isRandomizedMac,
+            ptrHostname: identity.ptrHostname,
+            serviceName: identity.serviceName,
+            serviceProtocol: identity.serviceProtocol,
+            advertisedServices: identity.advertisedServices,
+            deviceHint: identity.deviceHint,
+            aliasKey: identity.aliasKey,
+            aliasMatchBy: identity.aliasMatchBy,
+            topApps: sortedApps,
+            topServices: stableTopServices,
+            connectionType: (isWifi ? 'wifi' : 'ethernet') as 'wifi' | 'ethernet',
+            linkRadioOrPort: isWifi ? wifiBand : clientLink?.portOrRadio || 'Ethernet',
+            wifiBand,
+            apName,
+            wifiRxMbps,
+            wifiTxMbps,
+            wifiSignalDbm: isWifi ? clientLink.signalDbm : undefined,
+          };
         }
-        resolvedNameByIp.set(rest.ip, identity.hostname);
-
-        const sortedApps = Array.from(appCounts.entries())
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 3)
-          .map(([app]) => app);
-
-        const freshServices = Array.from(serviceCounts.entries())
-          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-          .slice(0, 4)
-          .map(([svc]) => svc);
-
-        const cachedSvc = this.hostTopServicesCache.get(rest.ip);
-        let stableTopServices: string[];
-        if (
-          !cachedSvc ||
-          (cachedSvc.services.length === 0 && freshServices.length > 0) ||
-          now - cachedSvc.updatedAt >= this.topServicesRefreshMs
-        ) {
-          stableTopServices = freshServices;
-          this.hostTopServicesCache.set(rest.ip, { services: freshServices, updatedAt: now });
-        } else {
-          stableTopServices = cachedSvc.services;
-        }
-
-        const normMac = normalizeMac(rest.mac);
-        const clientLinkMeta =
-          (normMac && normMac !== '00:00:00:00:00:00' ? clientLinkByMac.get(normMac) : undefined) ||
-          clientLinkByIp.get(rest.ip);
-        const clientLink = clientLinkMeta?.link;
-        const isWifi = clientLink?.connectionType === 'wifi';
-        const fallbackWifiSpeed =
-          isWifi && clientLink.linkSpeedMbps > 0 ? clientLink.linkSpeedMbps : undefined;
-        const wifiRxMbps = isWifi
-          ? (clientLink.wifiRxMbps && clientLink.wifiRxMbps > 0 ? clientLink.wifiRxMbps : fallbackWifiSpeed)
-          : undefined;
-        const wifiTxMbps = isWifi
-          ? (clientLink.wifiTxMbps && clientLink.wifiTxMbps > 0 ? clientLink.wifiTxMbps : fallbackWifiSpeed)
-          : undefined;
-        const wifiBand = isWifi
-          ? clientLink.wifiBand || extractWifiBand(clientLink.portOrRadio)
-          : undefined;
-        const apName = clientLinkMeta?.apName || 'Main AP';
-
-        return {
-          ...rest,
-          hostname: identity.hostname,
-          vendor: identity.vendor,
-          nameSource: identity.nameSource,
-          isRandomizedMac: identity.isRandomizedMac,
-          ptrHostname: identity.ptrHostname,
-          deviceHint: identity.deviceHint,
-          aliasKey: identity.aliasKey,
-          aliasMatchBy: identity.aliasMatchBy,
-          topApps: sortedApps,
-          topServices: stableTopServices,
-          connectionType: (isWifi ? 'wifi' : 'ethernet') as 'wifi' | 'ethernet',
-          linkRadioOrPort: isWifi ? wifiBand : clientLink?.portOrRadio || 'Ethernet',
-          wifiBand,
-          apName,
-          wifiRxMbps,
-          wifiTxMbps,
-          wifiSignalDbm: isWifi ? clientLink.signalDbm : undefined,
-        };
-      })
+      )
       .sort((a, b) => b.rxBps + b.txBps - (a.rxBps + a.txBps) || b.totalBytes - a.totalBytes);
 
     const { hosts: vlanTaggedHosts, detectedSubnets } = this.applyVlanTagsAndBuildSubnets(hosts);

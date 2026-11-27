@@ -8,6 +8,7 @@ import { TrafficMonitorEngine, exportFlowsToCsv } from './src/lib/telemetryEngin
 import { OrbiProbeSimulator } from './server/simulator';
 import { RdnsCache } from './server/rdnsCache';
 import { LanResolver } from './server/lanResolver';
+import { LanServiceDiscovery } from './server/serviceDiscovery';
 import { NotificationDispatcher } from './server/notifications';
 import { SatelliteSshPoller, validateSatelliteInput } from './server/satellitePoller';
 import { deployAndRestartRouterAgent } from './server/routerDeployer';
@@ -81,6 +82,7 @@ async function startServer() {
     ttlSec: DEFAULT_LAN_DNS_TTL_SEC,
     stripDomain: DEFAULT_STRIP_LAN_DOMAIN,
   });
+  const serviceDiscovery = new LanServiceDiscovery();
   const notifier = new NotificationDispatcher();
 
   const engine = new TrafficMonitorEngine();
@@ -313,7 +315,10 @@ async function startServer() {
     if (lanDnsRefreshTimer) return;
     lanDnsRefreshTimer = setTimeout(() => {
       lanDnsRefreshTimer = null;
-      const updated = engine.refreshLanHostnames((ip) => lanResolver.lookup(ip));
+      const updated = engine.refreshLanHostnames(
+        (ip) => lanResolver.lookup(ip),
+        (ip) => serviceDiscovery.lookup(ip)
+      );
       syncStatsAndPersist();
       if (updated) {
         broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
@@ -324,6 +329,10 @@ async function startServer() {
   lanResolver.setOnResolved(() => {
     scheduleLanHostnameBroadcast();
   });
+  serviceDiscovery.setOnDiscovered(() => {
+    scheduleLanHostnameBroadcast();
+  });
+  serviceDiscovery.start();
 
   const deriveLanFallbackDnsServers = (
     wanDns?: string[],
@@ -411,8 +420,18 @@ async function startServer() {
     const { dashboard, newAlerts } = engine.ingest(
       snapshot,
       (ip) => rdnsCache.lookup(ip),
-      (ip) => lanResolver.lookup(ip)
+      (ip) => lanResolver.lookup(ip),
+      (ip) => serviceDiscovery.lookup(ip)
     );
+    // Trigger lightweight unicast NetBIOS/mDNS probes for live LAN hosts without a resolved name
+    if (snapshot.source === 'live') {
+      const probeTargets = dashboard.hosts
+        .filter((h) => h.nameSource === 'ip' || h.nameSource === 'fingerprint')
+        .map((h) => h.ip);
+      if (probeTargets.length > 0) {
+        serviceDiscovery.probeIps(probeTargets);
+      }
+    }
     // Refresh fallbacks after ingest in case detectedSubnets just identified the primary LAN
     lanResolver.setFallbackServers(
       deriveLanFallbackDnsServers(snapshot.wan?.dns, snapshot.subnets)
@@ -936,6 +955,30 @@ async function startServer() {
     const { createServer: createViteServer } = await import('vite');
     const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
+      plugins: hmrDisabled
+        ? [
+            {
+              name: 'orbiflow-disable-hmr-client-ws',
+              enforce: 'post',
+              transform(code, id) {
+                if (!id.replace(/\\/g, '/').includes('vite/dist/client/client.mjs')) {
+                  return undefined;
+                }
+                const target = 'const createWebSocketModuleRunnerTransport = (options) => {';
+                if (!code.includes(target)) {
+                  return undefined;
+                }
+                return {
+                  code: code.replace(
+                    target,
+                    'const createWebSocketModuleRunnerTransport = () => ({ connect() {}, disconnect() {}, send() {} }); const __disabledCreateWebSocketModuleRunnerTransport = (options) => {'
+                  ),
+                  map: null,
+                };
+              },
+            },
+          ]
+        : [],
       server: {
         middlewareMode: true,
         allowedHosts: true,
@@ -967,6 +1010,7 @@ async function startServer() {
   process.on('SIGTERM', () => {
     if (simTimer) clearInterval(simTimer);
     satellitePoller.stopAll();
+    serviceDiscovery.stop();
     persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
     server.close();

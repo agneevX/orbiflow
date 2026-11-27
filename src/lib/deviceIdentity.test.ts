@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   fingerprintDeviceHint,
+  isGenericDhcpHostname,
   isRandomizedMac,
   lookupMacVendor,
   resolveHostIdentity,
@@ -38,6 +39,15 @@ test('stripLocalDomain strips domain suffixes cleanly when enabled', () => {
   assert.equal(stripLocalDomain('livingroom-atv.lan.', false), 'livingroom-atv.lan');
 });
 
+test('isGenericDhcpHostname detects auto-generated or unhelpful DHCP hostnames', () => {
+  assert.equal(isGenericDhcpHostname('android-8f3c91a2'), true);
+  assert.equal(isGenericDhcpHostname('dhcppc4'), true);
+  assert.equal(isGenericDhcpHostname('esp_91a2c3'), true);
+  assert.equal(isGenericDhcpHostname('chromecast'), true);
+  assert.equal(isGenericDhcpHostname('macbook-pro'), false);
+  assert.equal(isGenericDhcpHostname('nas-synology'), false);
+});
+
 test('fingerprintDeviceHint identifies Apple, IoT, and Gaming devices from flow patterns', () => {
   assert.equal(
     fingerprintDeviceHint([
@@ -56,11 +66,11 @@ test('fingerprintDeviceHint identifies Apple, IoT, and Gaming devices from flow 
   );
 });
 
-test('resolveHostIdentity prioritizes alias > LAN DNS PTR > DHCP > fingerprint > IP', () => {
+test('resolveHostIdentity prioritizes alias > LAN DNS PTR > non-generic DHCP > service > generic DHCP > fingerprint > IP', () => {
   const ip = '192.168.1.91';
   const mac = 'da:a1:19:4c:82:10';
 
-  // 1. No alias, no PTR, no DHCP, has behavioral hint
+  // 1. No alias, no PTR, no DHCP, no service, has behavioral hint
   const fp = resolveHostIdentity({
     ip,
     mac,
@@ -73,11 +83,46 @@ test('resolveHostIdentity prioritizes alias > LAN DNS PTR > DHCP > fingerprint >
   assert.equal(fp.hostname, 'Apple Device (.91)');
   assert.equal(fp.vendor, 'Apple Device · Private MAC');
 
-  // 2. LAN DNS PTR overrides DHCP & fingerprint
+  // 2. Advertised service overrides generic DHCP hostname & enriches Private MAC vendor
+  const adbOverGeneric = resolveHostIdentity({
+    ip,
+    mac,
+    dhcpHostname: 'android-8f3c91a2',
+    serviceName: 'Pixel 9 Pro',
+    serviceProtocol: 'ADB',
+    serviceModel: 'Pixel 9 Pro',
+    advertisedServices: ['ADB', 'Google Cast'],
+    aliases: {},
+    stripDomain: true,
+  });
+  assert.equal(adbOverGeneric.nameSource, 'service');
+  assert.equal(adbOverGeneric.hostname, 'Pixel 9 Pro');
+  assert.equal(adbOverGeneric.serviceProtocol, 'ADB');
+  assert.deepEqual(adbOverGeneric.advertisedServices, ['ADB', 'Google Cast']);
+  assert.equal(adbOverGeneric.vendor, 'Pixel 9 Pro · Private MAC');
+
+  // 3. Meaningful non-generic DHCP name takes precedence over advertised service
+  const dhcpOverService = resolveHostIdentity({
+    ip: '192.168.1.40',
+    mac: 'f0:18:98:4b:91:c0',
+    dhcpHostname: 'livingroom-atv',
+    serviceName: 'Living Room Apple TV',
+    serviceProtocol: 'AirPlay',
+    advertisedServices: ['AirPlay', 'HomeKit'],
+    aliases: {},
+    stripDomain: true,
+  });
+  assert.equal(dhcpOverService.nameSource, 'dhcp');
+  assert.equal(dhcpOverService.hostname, 'livingroom-atv');
+  assert.deepEqual(dhcpOverService.advertisedServices, ['AirPlay', 'HomeKit']);
+
+  // 4. LAN DNS PTR overrides DHCP, service & fingerprint
   const ptr = resolveHostIdentity({
     ip,
     mac,
     dhcpHostname: 'old-dhcp-name',
+    serviceName: 'Bedroom Chromecast',
+    serviceProtocol: 'Google Cast',
     ptrHostname: 'iphone-bedroom.lan.',
     deviceHint: 'Apple Device',
     aliases: {},
@@ -87,11 +132,13 @@ test('resolveHostIdentity prioritizes alias > LAN DNS PTR > DHCP > fingerprint >
   assert.equal(ptr.hostname, 'iphone-bedroom');
   assert.equal(ptr.ptrHostname, 'iphone-bedroom.lan');
 
-  // 3. User custom alias overrides LAN DNS PTR
+  // 5. User custom alias overrides LAN DNS PTR and service
   const aliased = resolveHostIdentity({
     ip,
     mac,
     ptrHostname: 'iphone-bedroom.lan',
+    serviceName: 'Bedroom Chromecast',
+    serviceProtocol: 'Google Cast',
     aliases: {
       [`mac:${mac}`]: { key: `mac:${mac}`, matchBy: 'mac', name: "Alex's iPhone" },
     },
@@ -100,7 +147,7 @@ test('resolveHostIdentity prioritizes alias > LAN DNS PTR > DHCP > fingerprint >
   assert.equal(aliased.nameSource, 'alias');
   assert.equal(aliased.hostname, "Alex's iPhone");
 
-  // 4. Disabling inferDeviceNames falls back to raw IP & generic Private MAC vendor
+  // 6. Disabling inferDeviceNames falls back to raw IP & generic Private MAC vendor
   const noInfer = resolveHostIdentity({
     ip,
     mac,
