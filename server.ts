@@ -30,6 +30,12 @@ import {
 } from './server/storage';
 import { sanitizeVlanConfigs } from './src/lib/vlanUtils';
 import { isPrivateIp } from './src/lib/formatters';
+import {
+  buildDeltaPayload,
+  buildInitPayload,
+  parseClientSubscription,
+  type WsClientState,
+} from './src/lib/wsProtocol';
 import type {
   AlertEvent,
   AlertRule,
@@ -251,20 +257,60 @@ async function startServer() {
 
   const server = http.createServer(app);
   const ingestWss = new WebSocketServer({ noServer: true });
-  const dashboardWss = new WebSocketServer({ noServer: true });
+  const dashboardWss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: {
+      zlibDeflateOptions: { level: 3, memLevel: 7 },
+      threshold: 512,
+    },
+  });
 
-  const broadcastDashboard = (event: { type: string; data: unknown }) => {
+  const dashboardClients = new WeakMap<WebSocket, WsClientState>();
+  const WS_BACKPRESSURE_LIMIT_BYTES = 256 * 1024;
+
+  const broadcastDashboardEvent = (event: { type: string; data: unknown }) => {
+    if (dashboardWss.clients.size === 0) return;
     const msg = JSON.stringify(event);
     for (const client of dashboardWss.clients) {
-      if (client.readyState === WebSocket.OPEN) {
+      if (client.readyState === WebSocket.OPEN && client.bufferedAmount <= WS_BACKPRESSURE_LIMIT_BYTES) {
         client.send(msg);
       }
     }
   };
 
+  const sendDeltaToClient = (
+    client: WebSocket,
+    snap: ReturnType<TrafficMonitorEngine['getSnapshot']>,
+    revs: ReturnType<TrafficMonitorEngine['getRevisions']>,
+    forceProbeKpis: boolean
+  ) => {
+    if (client.readyState !== WebSocket.OPEN) return;
+    const state = dashboardClients.get(client);
+    if (!state) return;
+
+    // Backpressure protection: drop frames for congested/sleeping tabs and resync cleanly once drained
+    if (client.bufferedAmount > WS_BACKPRESSURE_LIMIT_BYTES) {
+      state.needsHistoryResync = true;
+      return;
+    }
+
+    const delta = buildDeltaPayload(snap, revs, state, { forceProbeKpis });
+    if (!delta) return;
+    client.send(JSON.stringify({ type: 'traffic:delta', data: delta }));
+  };
+
+  const broadcastDashboardDelta = (forceProbeKpis = false) => {
+    if (dashboardWss.clients.size === 0) return;
+    const snap = engine.getSnapshot();
+    const revs = engine.getRevisions();
+    for (const client of dashboardWss.clients) {
+      sendDeltaToClient(client, snap, revs, forceProbeKpis);
+    }
+  };
+
   const satellitePoller = new SatelliteSshPoller((satellites) => {
     engine.setSshSatellites(satellites);
-    broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+    broadcastDashboardDelta(false);
   });
 
   if (initialSatellites.length > 0) {
@@ -321,7 +367,7 @@ async function startServer() {
       );
       syncStatsAndPersist();
       if (updated) {
-        broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+        broadcastDashboardDelta(false);
       }
     }, 350);
   };
@@ -389,7 +435,7 @@ async function startServer() {
 
   const dispatchAlertsAsync = (alerts: AlertEvent[]) => {
     for (const alert of alerts) {
-      broadcastDashboard({ type: 'alert:fired', data: alert });
+      broadcastDashboardEvent({ type: 'alert:fired', data: alert });
       void notifier.dispatchAlert(alert).catch(() => {});
     }
   };
@@ -446,8 +492,7 @@ async function startServer() {
     syncStatsAndPersist();
     storage.saveState(engine.getExportableState());
 
-    const latest = engine.getSnapshot();
-    broadcastDashboard({ type: 'traffic:tick', data: latest });
+    broadcastDashboardDelta(true);
     dispatchAlertsAsync(newAlerts);
   };
 
@@ -523,14 +568,40 @@ async function startServer() {
 
     ws.on('close', () => {
       const offlineAlerts = engine.markProbeDisconnected(connectedProbeId);
-      broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+      broadcastDashboardDelta(true);
       dispatchAlertsAsync(offlineAlerts);
     });
   });
 
-  dashboardWss.on('connection', (ws) => {
+  dashboardWss.on('connection', (ws, request) => {
+    const reqUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+    const initialSub = parseClientSubscription({
+      tab: reqUrl.searchParams.get('tab'),
+      subTab: reqUrl.searchParams.get('subTab'),
+      visible: reqUrl.searchParams.get('visible'),
+    });
     syncStatsAndPersist();
-    ws.send(JSON.stringify({ type: 'traffic:init', data: engine.getSnapshot() }));
+    const { payload, state } = buildInitPayload(
+      engine.getSnapshot(),
+      engine.getRevisions(),
+      initialSub
+    );
+    dashboardClients.set(ws, state);
+    ws.send(JSON.stringify({ type: 'traffic:init', data: payload }));
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg && msg.type === 'client:subscribe') {
+          const cur = dashboardClients.get(ws);
+          if (!cur) return;
+          cur.sub = parseClientSubscription(msg);
+          sendDeltaToClient(ws, engine.getSnapshot(), engine.getRevisions(), false);
+        }
+      } catch {
+        // Ignore malformed client control frames
+      }
+    });
   });
 
   // Dev-only simulator cadence (3s live updates)
@@ -597,7 +668,7 @@ async function startServer() {
     if (enabled && !engine.hasActiveLiveProbe()) {
       handleIngestSnapshot(simulator.nextSnapshot(Date.now(), 2));
     } else {
-      broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+      broadcastDashboardDelta(true);
     }
     res.json({ enabled: engine.isSimulatorEnabled(), snapshot: engine.getSnapshot() });
   });
@@ -727,7 +798,7 @@ async function startServer() {
     persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
     const snap = engine.getSnapshot();
-    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    broadcastDashboardDelta(false);
     res.json({
       serverConfig: snap.serverConfig,
       serverStats: snap.serverStats,
@@ -790,7 +861,7 @@ async function startServer() {
     engine.setSatelliteConfigs(satellitePoller.getConfigs().map(toPublicSatelliteConfig));
     persistUserConfig();
     const snap = engine.getSnapshot();
-    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    broadcastDashboardDelta(false);
     res.json({ ok: true, snapshot: snap });
   });
 
@@ -804,7 +875,7 @@ async function startServer() {
     engine.setSatelliteConfigs(satellitePoller.getConfigs().map(toPublicSatelliteConfig));
     persistUserConfig();
     const snap = engine.getSnapshot();
-    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    broadcastDashboardDelta(false);
     res.json({ ok: true, snapshot: snap });
   });
 
@@ -866,7 +937,7 @@ async function startServer() {
     engine.updateNotifications(updated);
     persistUserConfig();
     const snap = engine.getSnapshot();
-    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    broadcastDashboardDelta(false);
     res.json({ ok: true, notifications: updated });
   });
 
@@ -904,7 +975,7 @@ async function startServer() {
     const aliases = engine.setDeviceAlias({ key, matchBy, name });
     persistUserConfig();
     const snap = engine.getSnapshot();
-    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    broadcastDashboardDelta(false);
     res.json({ ok: true, deviceAliases: aliases, snapshot: snap });
   });
 
@@ -913,7 +984,7 @@ async function startServer() {
     const aliases = engine.deleteDeviceAlias(key);
     persistUserConfig();
     const snap = engine.getSnapshot();
-    broadcastDashboard({ type: 'traffic:tick', data: snap });
+    broadcastDashboardDelta(false);
     res.json({ ok: true, deviceAliases: aliases, snapshot: snap });
   });
 
@@ -926,21 +997,21 @@ async function startServer() {
     const updated = engine.updateRules(rules);
     persistUserConfig();
     storage.saveState(engine.getExportableState(), true);
-    broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+    broadcastDashboardDelta(false);
     res.json({ rules: updated });
   });
 
   app.post('/api/alerts/:id/ack', (req, res) => {
     engine.acknowledgeAlert(req.params.id);
     storage.saveState(engine.getExportableState(), true);
-    broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+    broadcastDashboardDelta(false);
     res.json({ ok: true });
   });
 
   app.post('/api/alerts/clear', (_req, res) => {
     engine.clearAlerts();
     storage.saveState(engine.getExportableState(), true);
-    broadcastDashboard({ type: 'traffic:tick', data: engine.getSnapshot() });
+    broadcastDashboardDelta(false);
     res.json({ ok: true });
   });
 

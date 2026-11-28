@@ -5,6 +5,7 @@ import { formatBandwidth, formatBytes, isPrivateIp } from '../lib/formatters';
 
 interface ClientFlowDiagramProps {
   links: ClientDestinationLink[];
+  sampleTimestamp?: number;
   unit: BandwidthUnit;
   theme: ThemePalette;
   onSelectFilter: (query: string) => void;
@@ -34,7 +35,9 @@ const MAX_FLOW_DEVICES = 3;
 const MAX_FLOW_DESTINATIONS = 5;
 const FLOW_EMA_ALPHA = 0.45;
 const FLOW_HOLD_MS = 12_000;
+const FLOW_RESET_GAP_MS = 30_000;
 const FLOW_DECAY_FACTOR = 0.58;
+const MAX_SMOOTHED_ENTRIES = 64;
 const RANK_HYSTERESIS_RATIO = 1.2;
 
 function isInternetLink(link: ClientDestinationLink): boolean {
@@ -99,6 +102,7 @@ function sortWithHysteresis<T extends { bps: number; bytes: number }>(
 
 export function ClientFlowDiagram({
   links,
+  sampleTimestamp,
   unit,
   theme,
   onSelectFilter,
@@ -111,54 +115,105 @@ export function ClientFlowDiagram({
   const smoothedCacheRef = useRef<Map<string, SmoothedLinkEntry>>(new Map());
   const prevClientOrderRef = useRef<string[]>([]);
   const prevServiceOrderRef = useRef<string[]>([]);
+  const lastSampleTsRef = useRef<number>(0);
+  const lastLinksRef = useRef<ClientDestinationLink[] | null>(null);
 
   const layout = useMemo(() => {
-    const now = Date.now();
     const rawInternetLinks = links.filter(isInternetLink);
     const cache = smoothedCacheRef.current;
-    const seenKeys = new Set<string>();
 
-    for (const l of rawInternetLinks) {
-      const key = `${l.clientIp}=>${l.service}`;
-      seenKeys.add(key);
-      const existing = cache.get(key);
-      if (existing) {
-        existing.smoothedRxBps = Math.round(
-          existing.smoothedRxBps * (1 - FLOW_EMA_ALPHA) + l.rxBps * FLOW_EMA_ALPHA
-        );
-        existing.smoothedTxBps = Math.round(
-          existing.smoothedTxBps * (1 - FLOW_EMA_ALPHA) + l.txBps * FLOW_EMA_ALPHA
-        );
-        existing.smoothedTotalBps = Math.round(
-          existing.smoothedTotalBps * (1 - FLOW_EMA_ALPHA) + l.totalBps * FLOW_EMA_ALPHA
-        );
-        existing.link = l;
-        existing.lastSeenAt = now;
-      } else {
-        cache.set(key, {
-          link: l,
-          smoothedRxBps: l.rxBps,
-          smoothedTxBps: l.txBps,
-          smoothedTotalBps: l.totalBps,
-          lastSeenAt: now,
-        });
+    // Only advance EMA smoothing & decay when a genuinely new telemetry sample arrives
+    // (never re-decay on theme toggles, DNS renames, or duplicate renders with the same sample)
+    const effectiveTs =
+      typeof sampleTimestamp === 'number' && Number.isFinite(sampleTimestamp) && sampleTimestamp > 0
+        ? sampleTimestamp
+        : links !== lastLinksRef.current
+          ? Date.now()
+          : lastSampleTsRef.current || Date.now();
+    const isFreshSample =
+      lastLinksRef.current === null ||
+      (effectiveTs > lastSampleTsRef.current && links !== lastLinksRef.current);
+
+    if (isFreshSample) {
+      // If browser was backgrounded/disconnected for >30s, discard stale pre-sleep rates cleanly
+      if (lastSampleTsRef.current > 0 && effectiveTs - lastSampleTsRef.current > FLOW_RESET_GAP_MS) {
+        cache.clear();
+        prevClientOrderRef.current = [];
+        prevServiceOrderRef.current = [];
       }
+
+      const seenKeys = new Set<string>();
+      for (const l of rawInternetLinks) {
+        if (l.totalBps < 512) continue;
+        const key = `${l.clientIp}=>${l.service}`;
+        seenKeys.add(key);
+        const existing = cache.get(key);
+        if (existing) {
+          existing.smoothedRxBps = Math.round(
+            existing.smoothedRxBps * (1 - FLOW_EMA_ALPHA) + l.rxBps * FLOW_EMA_ALPHA
+          );
+          existing.smoothedTxBps = Math.round(
+            existing.smoothedTxBps * (1 - FLOW_EMA_ALPHA) + l.txBps * FLOW_EMA_ALPHA
+          );
+          existing.smoothedTotalBps = Math.round(
+            existing.smoothedTotalBps * (1 - FLOW_EMA_ALPHA) + l.totalBps * FLOW_EMA_ALPHA
+          );
+          existing.link = l;
+          existing.lastSeenAt = effectiveTs;
+        } else {
+          cache.set(key, {
+            link: l,
+            smoothedRxBps: l.rxBps,
+            smoothedTxBps: l.txBps,
+            smoothedTotalBps: l.totalBps,
+            lastSeenAt: effectiveTs,
+          });
+        }
+      }
+
+      // Gently decay recently active flows for up to FLOW_HOLD_MS so bursty chunks don't flicker
+      for (const [key, entry] of cache.entries()) {
+        if (seenKeys.has(key)) continue;
+        if (effectiveTs - entry.lastSeenAt > FLOW_HOLD_MS || entry.smoothedTotalBps < 512) {
+          cache.delete(key);
+        } else {
+          entry.smoothedRxBps = Math.round(entry.smoothedRxBps * FLOW_DECAY_FACTOR);
+          entry.smoothedTxBps = Math.round(entry.smoothedTxBps * FLOW_DECAY_FACTOR);
+          entry.smoothedTotalBps = Math.round(entry.smoothedTotalBps * FLOW_DECAY_FACTOR);
+          if (entry.smoothedTotalBps < 512) {
+            cache.delete(key);
+          }
+        }
+      }
+
+      // Hard-cap cache size so tabs left open for days never accumulate stale entries
+      if (cache.size > MAX_SMOOTHED_ENTRIES) {
+        const sorted = Array.from(cache.entries()).sort(
+          (a, b) => b[1].smoothedTotalBps - a[1].smoothedTotalBps
+        );
+        cache.clear();
+        for (const [k, v] of sorted.slice(0, MAX_SMOOTHED_ENTRIES)) {
+          cache.set(k, v);
+        }
+      }
+
+      lastSampleTsRef.current = effectiveTs;
+      lastLinksRef.current = links;
+    } else if (links !== lastLinksRef.current) {
+      // Non-telemetry update (e.g. device rename / alias): refresh labels without re-running EMA/decay
+      const latestByKey = new Map(rawInternetLinks.map((l) => [`${l.clientIp}=>${l.service}`, l]));
+      for (const [key, entry] of cache.entries()) {
+        const updated = latestByKey.get(key);
+        if (updated) {
+          entry.link = { ...entry.link, clientName: updated.clientName };
+        }
+      }
+      lastLinksRef.current = links;
     }
 
-    // Gently decay recently active flows for up to FLOW_HOLD_MS so bursty chunks don't flicker
-    for (const [key, entry] of cache.entries()) {
-      if (seenKeys.has(key)) continue;
-      if (now - entry.lastSeenAt > FLOW_HOLD_MS || entry.smoothedTotalBps < 512) {
-        cache.delete(key);
-      } else {
-        entry.smoothedRxBps = Math.round(entry.smoothedRxBps * FLOW_DECAY_FACTOR);
-        entry.smoothedTxBps = Math.round(entry.smoothedTxBps * FLOW_DECAY_FACTOR);
-        entry.smoothedTotalBps = Math.round(entry.smoothedTotalBps * FLOW_DECAY_FACTOR);
-      }
-    }
-
+    // Strictly filter by live smoothed bandwidth (never keep 0 B/s connections via cumulative totalBytes!)
     const scopedLinks: ClientDestinationLink[] = Array.from(cache.values())
-      .filter((e) => e.smoothedTotalBps >= 512 || e.link.totalBytes > 0)
+      .filter((e) => e.smoothedTotalBps >= 512)
       .map((e) => ({
         ...e.link,
         rxBps: e.smoothedRxBps,
@@ -292,7 +347,7 @@ export function ClientFlowDiagram({
 
     const clientNodes = distributeNodes(
       topClients,
-      (v) => v.bps || v.bytes,
+      (v) => Math.max(1, v.bps),
       (ip, v) => ({ label: v.name, sub: ip, bps: v.bps, bytes: v.bytes }),
       1,
       true
@@ -300,7 +355,7 @@ export function ClientFlowDiagram({
 
     const serviceNodes = distributeNodes(
       topServices,
-      (v) => v.bps || v.bytes,
+      (v) => Math.max(1, v.bps),
       (srv, v) => ({ label: srv, sub: formatBytes(v.bytes), bps: v.bps, bytes: v.bytes }),
       svgWidth - 181,
       false
@@ -325,10 +380,8 @@ export function ClientFlowDiagram({
       .filter((l) => clientSet.has(l.clientIp) && serviceSet.has(l.service))
       .sort((a, b) => a.clientIp.localeCompare(b.clientIp) || a.service.localeCompare(b.service));
 
-    const maxLinkWeight = Math.max(
-      1,
-      ...filteredLinks.map((l) => l.totalBps || l.totalBytes)
-    );
+    // Weight ribbons strictly by live bandwidth (bps) so long-lived multi-GB flows never distort scale
+    const maxLinkWeight = Math.max(1, ...filteredLinks.map((l) => l.totalBps));
 
     const clientOffsets = new Map<string, number>();
     const serviceOffsets = new Map<string, number>();
@@ -336,7 +389,7 @@ export function ClientFlowDiagram({
     const ribbons = filteredLinks.map((l) => {
       const src = clientNodeMap.get(l.clientIp)!;
       const dst = serviceNodeMap.get(l.service)!;
-      const weight = l.totalBps || l.totalBytes;
+      const weight = Math.max(1, l.totalBps);
       const thickness = Math.max(2.5, Math.min(14, (weight / maxLinkWeight) * 13));
 
       const cOff = clientOffsets.get(src.id) ?? 0;
@@ -368,7 +421,7 @@ export function ClientFlowDiagram({
     });
 
     return { svgWidth, svgHeight, clientNodes, serviceNodes, ribbons };
-  }, [links, theme]);
+  }, [links, sampleTimestamp, theme]);
 
   const activeLink = useMemo(() => {
     if (!hoveredLinkKey) return null;

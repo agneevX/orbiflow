@@ -284,6 +284,7 @@ export function OverviewView({
 
           <ClientFlowDiagram
             links={snapshot.clientLinks}
+            sampleTimestamp={snapshot.probe.lastHeartbeat}
             unit={unit}
             theme={theme}
             onSelectFilter={onSelectFilter}

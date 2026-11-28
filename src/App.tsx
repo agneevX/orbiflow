@@ -39,6 +39,7 @@ import {
   parseRouteFromLocation,
   type DevicesSubTab,
 } from './lib/routing';
+import { applyDashboardDelta } from './lib/wsProtocol';
 import type {
   AlertRule,
   BandwidthUnit,
@@ -109,6 +110,9 @@ export default function App() {
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('5m');
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const activeTabRef = useRef<NavTab>(initialRoute.tab);
+  const devicesSubTabRef = useRef<DevicesSubTab>(initialRoute.devicesSubTab);
   const latestSnapshotRef = useRef<DashboardSnapshot | null>(null);
   const pendingTablePrefsRef = useRef<{ prefs: TablePreferences; until: number } | null>(null);
 
@@ -243,9 +247,27 @@ export default function App() {
   }, [paused]);
 
   useEffect(() => {
+    activeTabRef.current = activeTab;
+    devicesSubTabRef.current = devicesSubTab;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'client:subscribe',
+          tab: activeTab,
+          subTab: devicesSubTab,
+          visible: typeof document === 'undefined' ? true : !document.hidden,
+        })
+      );
+    }
+  }, [activeTab, devicesSubTab]);
+
+  useEffect(() => {
     let active = true;
     let ws: WebSocket | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let fallbackFetchTimer: ReturnType<typeof setTimeout> | null = null;
+    let receivedInit = false;
 
     const mergePendingPrefs = (incoming: DashboardSnapshot): DashboardSnapshot => {
       const pending = pendingTablePrefsRef.current;
@@ -269,35 +291,75 @@ export default function App() {
       };
     };
 
-    fetch('/api/state')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: DashboardSnapshot | null) => {
-        if (active && data) {
-          const merged = mergePendingPrefs(data);
-          latestSnapshotRef.current = merged;
-          setSnapshot(merged);
-        }
-      })
-      .catch(() => {});
+    const sendSubscribe = (socket: WebSocket | null) => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(
+        JSON.stringify({
+          type: 'client:subscribe',
+          tab: activeTabRef.current,
+          subTab: devicesSubTabRef.current,
+          visible: typeof document === 'undefined' ? true : !document.hidden,
+        })
+      );
+    };
+
+    // Only fall back to HTTP /api/state if WebSocket init hasn't arrived within 2s
+    fallbackFetchTimer = setTimeout(() => {
+      if (!active || receivedInit) return;
+      fetch('/api/state')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: DashboardSnapshot | null) => {
+          if (active && !receivedInit && data) {
+            receivedInit = true;
+            const merged = mergePendingPrefs(data);
+            latestSnapshotRef.current = merged;
+            setSnapshot(merged);
+          }
+        })
+        .catch(() => {});
+    }, 2000);
+
+    const onVisibilityChange = () => {
+      sendSubscribe(wsRef.current);
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange);
+    }
 
     const connect = () => {
       if (!active) return;
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${window.location.host}/ws/dashboard`;
+      const visibleParam = typeof document === 'undefined' || !document.hidden ? '1' : '0';
+      const qs = new URLSearchParams({
+        tab: activeTabRef.current,
+        subTab: devicesSubTabRef.current,
+        visible: visibleParam,
+      });
+      const url = `${proto}//${window.location.host}/ws/dashboard?${qs.toString()}`;
       ws = new WebSocket(url);
+      wsRef.current = ws;
 
       ws.onmessage = (evt) => {
         if (!active) return;
         try {
           const msg = JSON.parse(evt.data);
           if (msg.type === 'traffic:init') {
+            receivedInit = true;
             const merged = mergePendingPrefs(msg.data);
             latestSnapshotRef.current = merged;
             if (!pausedRef.current) {
               setSnapshot(merged);
             }
+          } else if (msg.type === 'traffic:delta') {
+            const base = latestSnapshotRef.current;
+            if (!base) return;
+            const next = mergePendingPrefs(applyDashboardDelta(base, msg.data));
+            latestSnapshotRef.current = next;
+            if (!pausedRef.current) {
+              setSnapshot(next);
+            }
           } else if (msg.type === 'traffic:tick') {
-            // Always retain the latest background-collected snapshot even when UI display is paused
+            // Backwards-compatible full-snapshot tick fallback
             const merged = mergePendingPrefs(msg.data);
             latestSnapshotRef.current = merged;
             if (!pausedRef.current) {
@@ -310,6 +372,7 @@ export default function App() {
       };
 
       ws.onclose = () => {
+        if (wsRef.current === ws) wsRef.current = null;
         if (!active) return;
         retryTimer = setTimeout(connect, 2000);
       };
@@ -324,6 +387,11 @@ export default function App() {
     return () => {
       active = false;
       if (retryTimer) clearTimeout(retryTimer);
+      if (fallbackFetchTimer) clearTimeout(fallbackFetchTimer);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
+      wsRef.current = null;
       ws?.close();
     };
   }, []);
@@ -621,7 +689,13 @@ export default function App() {
 
   useEffect(() => {
     if (paused) return;
-    const id = setInterval(() => setNowTick(Date.now()), 3000);
+    // Only advance local clock when live samples have been silent >30s so active WS ticks never double-render App
+    const id = setInterval(() => {
+      const now = Date.now();
+      if (now - lastSampleClockRef.current.receivedAt > 30_000) {
+        setNowTick(now);
+      }
+    }, 10_000);
     return () => clearInterval(id);
   }, [paused]);
 

@@ -59,6 +59,7 @@ import {
   parseIpv4Cidr,
   sanitizeVlanConfigs,
 } from './vlanUtils';
+import { createInitialRevisions, type SnapshotRevisions } from './wsProtocol';
 
 interface FlowTrackRecord {
   firstSeen: number;
@@ -313,8 +314,10 @@ export class TrafficMonitorEngine {
   private bucketSamples: TrafficPoint[] = [];
 
   private flowRecords = new Map<string, FlowTrackRecord>();
-  private readonly endedFlowRetentionMs = 10 * 60_000; // Keep ended flows visible for 10m
-  private readonly maxRetainedEndedFlows = 500;
+  private readonly endedFlowRetentionMs = 5 * 60_000; // Keep ended flows visible for 5m
+  private readonly maxActiveSnapshotFlows = 300; // Keep top 300 active flows for browser efficiency
+  private readonly maxRetainedEndedFlows = 100;
+  private readonly maxTrackedFlowRecords = 4000; // Hard bound on internal conntrack map over long uptime
   private knownHostsCache = new Map<string, KnownHostRecord>();
   private readonly hostPresenceTtlMs = 15 * 60_000; // Keep connected hosts stable across brief ARP aging
   private lastIface: InterfaceCounters | null = null;
@@ -405,9 +408,16 @@ export class TrafficMonitorEngine {
   };
 
   private latestSnapshot: DashboardSnapshot;
+  private revisions: SnapshotRevisions = createInitialRevisions();
+  private lastDetectedSubnetsSig = '';
+  private lastTopologySig = '';
 
   constructor() {
     this.latestSnapshot = this.buildEmptySnapshot();
+  }
+
+  public getRevisions(): SnapshotRevisions {
+    return { ...this.revisions };
   }
 
   private buildEmptySnapshot(): DashboardSnapshot {
@@ -610,6 +620,7 @@ export class TrafficMonitorEngine {
       ...this.latestSnapshot,
       topology: this.buildTopologyTelemetry(),
     };
+    this.revisions.topology += 1;
   }
 
   public setSshSatellites(satellites: SatelliteTelemetry[]): void {
@@ -622,6 +633,7 @@ export class TrafficMonitorEngine {
       ...this.latestSnapshot,
       topology: this.buildTopologyTelemetry(),
     };
+    this.revisions.topology += 1;
   }
 
   public hydrateFromStorage(
@@ -702,6 +714,11 @@ export class TrafficMonitorEngine {
       alerts: this.alerts.map((a) => ({ ...a })),
       serverConfig: { ...this.serverConfig },
     };
+    this.revisions.history += 1;
+    this.revisions.rollup += 1;
+    this.revisions.rules += 1;
+    this.revisions.alerts += 1;
+    this.revisions.serverConfig += 1;
   }
 
   public getExportableState() {
@@ -751,6 +768,10 @@ export class TrafficMonitorEngine {
       },
       serverStats: { ...this.serverStats },
     };
+    this.revisions.serverConfig += 1;
+    if (stats) {
+      this.revisions.serverStats += 1;
+    }
     if (
       prevInfer !== this.serverConfig.inferDeviceNames ||
       prevStrip !== this.serverConfig.stripLanDomain ||
@@ -762,11 +783,20 @@ export class TrafficMonitorEngine {
   }
 
   public setServerStats(stats: Partial<ServerStats>): void {
+    let changed = false;
+    for (const [k, v] of Object.entries(stats)) {
+      if ((this.serverStats as unknown as Record<string, unknown>)[k] !== v) {
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) return;
     this.serverStats = { ...this.serverStats, ...stats };
     this.latestSnapshot = {
       ...this.latestSnapshot,
       serverStats: { ...this.serverStats },
     };
+    this.revisions.serverStats += 1;
   }
 
   public setSimulatorAvailable(available: boolean): void {
@@ -838,6 +868,9 @@ export class TrafficMonitorEngine {
         probe: { ...this.probeStatus },
         alerts: this.alerts.map((a) => ({ ...a })),
       };
+      if (fired.length > 0) {
+        this.revisions.alerts += 1;
+      }
     }
     return fired;
   }
@@ -854,6 +887,7 @@ export class TrafficMonitorEngine {
         telegram: { ...this.notifications.telegram },
       },
     };
+    this.revisions.notifications += 1;
     return this.latestSnapshot.notifications;
   }
 
@@ -891,6 +925,7 @@ export class TrafficMonitorEngine {
       ...this.latestSnapshot,
       rules: this.rules.map((r) => ({ ...r })),
     };
+    this.revisions.rules += 1;
     return this.rules;
   }
 
@@ -900,6 +935,7 @@ export class TrafficMonitorEngine {
       ...this.latestSnapshot,
       alerts: this.alerts.map((a) => ({ ...a })),
     };
+    this.revisions.alerts += 1;
   }
 
   public clearAlerts(): void {
@@ -908,6 +944,7 @@ export class TrafficMonitorEngine {
       ...this.latestSnapshot,
       alerts: [],
     };
+    this.revisions.alerts += 1;
   }
 
   public getDeviceAliases(): Record<string, DeviceAlias> {
@@ -1168,6 +1205,11 @@ export class TrafficMonitorEngine {
       clientLinks: updatedLinks,
       deviceAliases: { ...this.deviceAliases },
     };
+    this.revisions.hosts += 1;
+    this.revisions.detectedSubnets += 1;
+    this.revisions.flows += 1;
+    this.revisions.clientLinks += 1;
+    this.revisions.deviceAliases += 1;
   }
 
   /**
@@ -1269,15 +1311,18 @@ export class TrafficMonitorEngine {
       flows: updatedFlows,
       clientLinks: updatedLinks,
     };
+    this.revisions.hosts += 1;
+    this.revisions.flows += 1;
+    this.revisions.clientLinks += 1;
 
     return true;
   }
 
-  private recordHistoryPoint(point: TrafficPoint): void {
+  private recordHistoryPoint(point: TrafficPoint): { historyUpdated: boolean; rollupUpdated: boolean } {
     // Keep high-res history strictly monotonic (ignore out-of-order / duplicate timestamps)
     const lastHist = this.history.length > 0 ? this.history[this.history.length - 1] : null;
     if (lastHist && point.timestamp < lastHist.timestamp) {
-      return;
+      return { historyUpdated: false, rollupUpdated: false };
     }
     if (lastHist && point.timestamp === lastHist.timestamp) {
       this.history[this.history.length - 1] = point;
@@ -1294,6 +1339,7 @@ export class TrafficMonitorEngine {
       this.history.shift();
     }
 
+    let rollupUpdated = false;
     const minuteFloor = Math.floor(point.timestamp / 60_000) * 60_000;
     if (this.currentBucketStart === 0) {
       this.currentBucketStart = minuteFloor;
@@ -1320,8 +1366,10 @@ export class TrafficMonitorEngine {
           this.rollupHistory.length > 0 ? this.rollupHistory[this.rollupHistory.length - 1] : null;
         if (!lastRollup || rollupPoint.timestamp > lastRollup.timestamp) {
           this.rollupHistory.push(rollupPoint);
+          rollupUpdated = true;
         } else if (rollupPoint.timestamp === lastRollup.timestamp) {
           this.rollupHistory[this.rollupHistory.length - 1] = rollupPoint;
+          rollupUpdated = true;
         }
       }
       this.currentBucketStart = minuteFloor;
@@ -1337,7 +1385,10 @@ export class TrafficMonitorEngine {
       (this.rollupHistory.length > 0 && this.rollupHistory[0].timestamp < rollupCutoff)
     ) {
       this.rollupHistory.shift();
+      rollupUpdated = true;
     }
+
+    return { historyUpdated: true, rollupUpdated };
   }
 
   public ingest(
@@ -1706,13 +1757,40 @@ export class TrafficMonitorEngine {
       }
     }
 
+    // Hard-cap internal flowRecords so long-running containers never accumulate unbounded map entries
+    if (this.flowRecords.size > this.maxTrackedFlowRecords) {
+      const overflow = this.flowRecords.size - this.maxTrackedFlowRecords;
+      let removed = 0;
+      for (const [k, rec] of this.flowRecords.entries()) {
+        if (rec.endedAt) {
+          this.flowRecords.delete(k);
+          removed += 1;
+          if (removed >= overflow) break;
+        }
+      }
+      if (removed < overflow) {
+        for (const k of this.flowRecords.keys()) {
+          if (!seenActiveIds.has(k)) {
+            this.flowRecords.delete(k);
+            removed += 1;
+            if (removed >= overflow) break;
+          }
+        }
+      }
+    }
+
     activeEnrichedFlows.sort((a, b) => {
       if (b.totalBps !== a.totalBps) return b.totalBps - a.totalBps;
       return b.totalBytes - a.totalBytes;
     });
     retainedEndedFlows.sort((a, b) => (b.endedAt || b.lastSeen) - (a.endedAt || a.lastSeen));
 
-    const enrichedFlows: EnrichedFlow[] = [...activeEnrichedFlows, ...retainedEndedFlows];
+    // Expose top active flows + bounded ended flows to keep WS & browser rendering lean
+    const snapshotActiveFlows =
+      activeEnrichedFlows.length > this.maxActiveSnapshotFlows
+        ? activeEnrichedFlows.slice(0, this.maxActiveSnapshotFlows)
+        : activeEnrichedFlows;
+    const enrichedFlows: EnrichedFlow[] = [...snapshotActiveFlows, ...retainedEndedFlows];
     const tangibleFlows = activeEnrichedFlows.filter((f) => hasTangibleTraffic(f.rxBps, f.txBps));
 
     const routerLoadPct = computePerceivedRouterLoadPct({
@@ -1729,7 +1807,7 @@ export class TrafficMonitorEngine {
       activeFlows: tangibleFlows.length,
       routerLoadPct,
     };
-    this.recordHistoryPoint(point);
+    const { historyUpdated, rollupUpdated } = this.recordHistoryPoint(point);
 
     // Aggregate LAN hosts with LAN DNS PTR, randomized MAC detection, behavioral hints, and aliases
     const hostMap = new Map<
@@ -2361,13 +2439,33 @@ export class TrafficMonitorEngine {
       .sort((a, b) => b.bps - a.bps || b.bytes - a.bytes)
       .slice(0, 12);
 
-    // Keep top Internet links and top LAN links balanced so high WAN flow counts never crowd out LAN links
+    // Keep top Internet links and top LAN links strictly ranked by live throughput (bps)
     const allLinksSorted = Array.from(clientLinkMap.values()).sort(
       (a, b) => b.totalBps - a.totalBps || b.totalBytes - a.totalBytes
     );
-    const internetLinks = allLinksSorted.filter((l) => l.scope === 'internet').slice(0, 18);
-    const lanLinks = allLinksSorted.filter((l) => l.scope === 'lan').slice(0, 10);
+    const internetLinks = allLinksSorted.filter((l) => l.scope === 'internet').slice(0, 15);
+    const lanLinks = allLinksSorted.filter((l) => l.scope === 'lan').slice(0, 8);
     const clientLinks: ClientDestinationLink[] = [...internetLinks, ...lanLinks];
+
+    // Keep long-lived internal maps bounded across days of container uptime
+    if (this.knownDeviceKeys.size > 1000) {
+      const keep = new Set(
+        vlanTaggedHosts.map((h) => (h.mac && h.mac !== '00:00:00:00:00:00' ? h.mac : h.ip))
+      );
+      this.knownDeviceKeys = keep;
+    }
+    if (this.prevRouterPortBytes.size > 64) {
+      const stale = now - 10 * 60_000;
+      for (const [k, v] of this.prevRouterPortBytes.entries()) {
+        if (v.ts < stale) this.prevRouterPortBytes.delete(k);
+      }
+    }
+    if (this.prevLanIfaceBytes.size > 64) {
+      const stale = now - 10 * 60_000;
+      for (const [k, v] of this.prevLanIfaceBytes.entries()) {
+        if (v.ts < stale) this.prevLanIfaceBytes.delete(k);
+      }
+    }
 
     const newAlerts = this.evaluateRules(
       now,
@@ -2378,6 +2476,8 @@ export class TrafficMonitorEngine {
       snapshot.system?.load1m ?? this.probeStatus.load1m,
       snapshot.system?.memUsedPct ?? this.probeStatus.memUsedPct
     );
+
+    const nextTopology = this.buildTopologyTelemetry();
 
     this.latestSnapshot = {
       probe: { ...this.probeStatus },
@@ -2401,7 +2501,7 @@ export class TrafficMonitorEngine {
       remotes,
       clientLinks,
       detectedSubnets,
-      topology: this.buildTopologyTelemetry(),
+      topology: nextTopology,
       rules: this.rules.map((r) => ({ ...r })),
       alerts: this.alerts.map((a) => ({ ...a })),
       notifications: {
@@ -2412,6 +2512,25 @@ export class TrafficMonitorEngine {
       serverConfig: { ...this.serverConfig },
       serverStats: { ...this.serverStats },
     };
+
+    if (historyUpdated) this.revisions.history += 1;
+    if (rollupUpdated) this.revisions.rollup += 1;
+    this.revisions.hosts += 1;
+    this.revisions.flows += 1;
+    this.revisions.clientLinks += 1;
+    if (newAlerts.length > 0) this.revisions.alerts += 1;
+
+    const subnetsSig = JSON.stringify(detectedSubnets);
+    if (subnetsSig !== this.lastDetectedSubnetsSig) {
+      this.lastDetectedSubnetsSig = subnetsSig;
+      this.revisions.detectedSubnets += 1;
+    }
+
+    const topoSig = JSON.stringify(nextTopology);
+    if (topoSig !== this.lastTopologySig) {
+      this.lastTopologySig = topoSig;
+      this.revisions.topology += 1;
+    }
 
     return {
       dashboard: this.latestSnapshot,
