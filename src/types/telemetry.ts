@@ -266,6 +266,7 @@ export interface EnrichedFlow {
   assured: boolean;
   firstSeen: number;
   lastSeen: number;
+  lastActiveAt?: number;
   ended?: boolean;
   endedAt?: number;
 }

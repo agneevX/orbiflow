@@ -64,6 +64,8 @@ import { createInitialRevisions, type SnapshotRevisions } from './wsProtocol';
 interface FlowTrackRecord {
   firstSeen: number;
   lastSeen: number;
+  lastActiveAt: number;
+  hadTangibleTraffic: boolean;
   endedAt?: number;
   prevTxBytes: number;
   prevRxBytes: number;
@@ -1603,10 +1605,14 @@ export class TrafficMonitorEngine {
           ? Math.round(computeCounterDelta(raw.rxBytes, usablePrev.prevRxBytes, flowDtSec) / flowDtSec)
           : 0;
 
-      // Drop brand-new closing/unestablished sessions, but if a previously tracked live flow
-      // transitions to TIME_WAIT / FIN_WAIT / CLOSE_WAIT / CLOSE, mark it ended so it stays readable
+      // Drop brand-new closing/unestablished sessions, and only retain previously active flows
+      // that actually carried tangible traffic so idle background sockets never pop in on close
       if (!isActiveConnectionState(state, proto, assured)) {
         if (prev && !prev.endedAt) {
+          if (!prev.hadTangibleTraffic) {
+            this.flowRecords.delete(id);
+            continue;
+          }
           const finalTx = Math.max(prev.flow.txBytes, raw.txBytes);
           const finalRx = Math.max(prev.flow.rxBytes, raw.rxBytes);
           prev.endedAt = now;
@@ -1680,6 +1686,9 @@ export class TrafficMonitorEngine {
           }
         : describeRemoteIp(raw.dst, dstCachedRdns, proto, raw.dport);
 
+      const hadTangibleTraffic = isTangible || Boolean(usablePrev?.hadTangibleTraffic);
+      const lastActiveAt = isTangible ? now : (usablePrev?.lastActiveAt ?? 0);
+
       const flow: EnrichedFlow = {
         id,
         proto,
@@ -1704,12 +1713,15 @@ export class TrafficMonitorEngine {
         assured,
         firstSeen: prev ? prev.firstSeen : now,
         lastSeen: now,
+        ...(lastActiveAt > 0 ? { lastActiveAt } : {}),
         ended: false,
       };
 
       this.flowRecords.set(id, {
         firstSeen: flow.firstSeen,
         lastSeen: now,
+        lastActiveAt,
+        hadTangibleTraffic,
         endedAt: undefined,
         prevTxBytes: raw.txBytes,
         prevRxBytes: raw.rxBytes,
@@ -1721,10 +1733,15 @@ export class TrafficMonitorEngine {
       activeEnrichedFlows.push(flow);
     }
 
-    // Mark previously active flows that disappeared as ended and retain them for 10m
+    // Mark previously active tangible flows that disappeared as ended; drop idle sockets cleanly
     const retainedEndedFlows: EnrichedFlow[] = [];
     for (const [key, rec] of this.flowRecords.entries()) {
       if (seenActiveIds.has(key)) continue;
+
+      if (!rec.hadTangibleTraffic) {
+        this.flowRecords.delete(key);
+        continue;
+      }
 
       if (!rec.endedAt) {
         rec.endedAt = now;

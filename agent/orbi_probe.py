@@ -32,6 +32,10 @@ import socket
 import struct
 import subprocess
 import sys
+try:
+    import threading
+except ImportError:
+    threading = None
 import time
 
 WS_URL = os.environ.get("ORBIFLOW_WS_URL", "ws://192.168.1.10:3000/ws/ingest")
@@ -1723,18 +1727,87 @@ def main():
     lease_cache = LeaseCache(cfg["dhcp_leases"])
 
     ws = MiniWebSocket(cfg["ws_url"], cfg["token"])
-    arp = []
-    router_clients = []
-    wan_details = None
-    satellite_info = []
-    router_subnets = []
-    cpu_ports = set()
-    wan_switch_ports = set()
-    sw_lan_ports = []
-    last_neigh_refresh = 0.0
-    last_ports_refresh = 0.0
+    shared_state = {
+        "arp": [],
+        "router_clients": [],
+        "wan_details": None,
+        "satellite_info": [],
+        "router_subnets": [],
+        "ports_payload": None,
+        "ports_seq": 0,
+    }
+    state_lock = threading.Lock() if threading is not None else None
+    last_sent_ports_seq = 0
     last_sys_refresh = 0.0
-    last_wifi_iface_scan = time.monotonic()
+
+    def slow_refresh_worker():
+        nonlocal wifi_ifaces, wifi_meta
+        cpu_ports = set()
+        wan_switch_ports = set()
+        sw_lan_ports = []
+        wan_details_local = None
+        satellite_info_local = []
+        last_neigh_refresh = 0.0
+        last_ports_refresh = 0.0
+        last_wifi_iface_scan = time.monotonic()
+
+        while running:
+            try:
+                mono_now = time.monotonic()
+                if mono_now - last_wifi_iface_scan >= 60.0:
+                    wifi_ifaces = discover_wifi_ifaces()
+                    wifi_meta = read_wifi_iface_meta(wifi_ifaces, iwconfig_bin, iw_bin)
+                    last_wifi_iface_scan = mono_now
+
+                if last_ports_refresh == 0.0 or mono_now - last_ports_refresh >= cfg["ports_interval"]:
+                    wan_details_local = read_wan_details(cfg["iface"], ip_bin, ifconfig_bin, nvram_bin)
+                    satellite_info_local = read_satelliteinfo_wifi(satinfo_bin)
+                    router_subnets_local = read_router_subnets(cfg["iface"], ip_bin)
+                    ports_local, cpu_ports, wan_switch_ports, sw_lan_ports = read_router_ports(
+                        cfg["iface"], swconfig_bin
+                    )
+                    if state_lock is not None:
+                        with state_lock:
+                            shared_state["wan_details"] = wan_details_local
+                            shared_state["satellite_info"] = satellite_info_local
+                            shared_state["router_subnets"] = router_subnets_local
+                            shared_state["ports_payload"] = ports_local
+                            shared_state["ports_seq"] += 1
+                    else:
+                        shared_state["wan_details"] = wan_details_local
+                        shared_state["satellite_info"] = satellite_info_local
+                        shared_state["router_subnets"] = router_subnets_local
+                        shared_state["ports_payload"] = ports_local
+                        shared_state["ports_seq"] += 1
+                    last_ports_refresh = time.monotonic()
+
+                if last_neigh_refresh == 0.0 or mono_now - last_neigh_refresh >= cfg["neigh_interval"]:
+                    leases, active_dhcp = lease_cache.read(time.time())
+                    arp_local = read_arp_table(leases, active_dhcp, cfg["iface"], wan_details_local)
+                    sat_macs = {s["mac"].lower() for s in satellite_info_local if s.get("mac")}
+                    wifi_clients = read_router_wifi_clients(wifi_ifaces, wifi_tool, wifi_meta, sat_macs)
+                    wired_clients = read_router_wired_clients(
+                        swconfig_bin, brctl_bin, cpu_ports, wan_switch_ports, sw_lan_ports, wifi_ifaces, sat_macs
+                    )
+                    router_clients_local = merge_router_clients(wifi_clients, wired_clients)
+                    if state_lock is not None:
+                        with state_lock:
+                            shared_state["arp"] = arp_local
+                            shared_state["router_clients"] = router_clients_local
+                    else:
+                        shared_state["arp"] = arp_local
+                        shared_state["router_clients"] = router_clients_local
+                    last_neigh_refresh = time.monotonic()
+                    logger.debug(
+                        f"Refreshed {len(arp_local)} ARP/DHCP devices, {len(wifi_clients)} Wi-Fi, {len(wired_clients)} wired"
+                    )
+            except Exception as exc:
+                logger.debug(f"Background neighbor/port refresh error: {exc}")
+            time.sleep(1.0)
+
+    if threading is not None:
+        bg_thread = threading.Thread(target=slow_refresh_worker, daemon=True)
+        bg_thread.start()
 
     logger.info(
         f"Starting probe={cfg['probe_id']} iface={cfg['iface']} "
@@ -1742,9 +1815,9 @@ def main():
         f"sys_interval={cfg['sys_interval']}s target={cfg['ws_url']}"
     )
 
+    next_tick_at = time.monotonic()
     try:
         while running:
-            tick_start = time.monotonic()
             try:
                 if ws.sock is None:
                     ws.connect()
@@ -1754,38 +1827,28 @@ def main():
                         "iface": cfg["iface"],
                     })
                     logger.info(f"Connected to {cfg['ws_url']}")
+                    next_tick_at = time.monotonic()
 
                 mono_now = time.monotonic()
-                if mono_now - last_wifi_iface_scan >= 60.0:
-                    wifi_ifaces = discover_wifi_ifaces()
-                    wifi_meta = read_wifi_iface_meta(wifi_ifaces, iwconfig_bin, iw_bin)
-                    last_wifi_iface_scan = mono_now
+                if state_lock is not None:
+                    with state_lock:
+                        arp_snap = shared_state["arp"]
+                        clients_snap = shared_state["router_clients"]
+                        ports_seq = shared_state["ports_seq"]
+                        ports_snap = shared_state["ports_payload"] if ports_seq != last_sent_ports_seq else None
+                        subnets_snap = shared_state["router_subnets"]
+                        wan_snap = shared_state["wan_details"]
+                        sat_snap = shared_state["satellite_info"]
+                else:
+                    arp_snap = shared_state["arp"]
+                    clients_snap = shared_state["router_clients"]
+                    ports_seq = shared_state["ports_seq"]
+                    ports_snap = shared_state["ports_payload"] if ports_seq != last_sent_ports_seq else None
+                    subnets_snap = shared_state["router_subnets"]
+                    wan_snap = shared_state["wan_details"]
+                    sat_snap = shared_state["satellite_info"]
 
-                ports_payload = None
-                if last_ports_refresh == 0.0 or mono_now - last_ports_refresh >= cfg["ports_interval"]:
-                    wan_details = read_wan_details(cfg["iface"], ip_bin, ifconfig_bin, nvram_bin)
-                    satellite_info = read_satelliteinfo_wifi(satinfo_bin)
-                    router_subnets = read_router_subnets(cfg["iface"], ip_bin)
-                    ports_payload, cpu_ports, wan_switch_ports, sw_lan_ports = read_router_ports(
-                        cfg["iface"], swconfig_bin
-                    )
-
-                if last_neigh_refresh == 0.0 or mono_now - last_neigh_refresh >= cfg["neigh_interval"]:
-                    leases, active_dhcp = lease_cache.read(time.time())
-                    arp = read_arp_table(leases, active_dhcp, cfg["iface"], wan_details)
-                    sat_macs = {s["mac"].lower() for s in satellite_info if s.get("mac")}
-                    wifi_clients = read_router_wifi_clients(wifi_ifaces, wifi_tool, wifi_meta, sat_macs)
-                    wired_clients = read_router_wired_clients(
-                        swconfig_bin, brctl_bin, cpu_ports, wan_switch_ports, sw_lan_ports, wifi_ifaces, sat_macs
-                    )
-                    router_clients = merge_router_clients(wifi_clients, wired_clients)
-                    last_neigh_refresh = time.monotonic()
-                    logger.debug(
-                        f"Refreshed {len(arp)} ARP/DHCP devices, {len(wifi_clients)} Wi-Fi, {len(wired_clients)} wired"
-                    )
-
-                # Capture wall-clock timestamp immediately when byte counters are sampled
-                # (after slow ports/neighbor subprocess calls) so rate dt stays exact.
+                # Sample byte counters & conntrack directly on the fixed-rate cadence
                 dev_map = read_proc_net_dev()
                 sample_ts_ms = int(time.time() * 1000)
                 conntrack_lines = read_conntrack_lines(ct_path)
@@ -1795,39 +1858,44 @@ def main():
                     "source": "live",
                     "iface": read_iface_counters(cfg["iface"], dev_map),
                     "lanIfaces": read_lan_iface_counters(cfg["iface"], dev_map),
-                    "routerClients": router_clients,
-                    "arp": arp,
+                    "routerClients": clients_snap,
+                    "arp": arp_snap,
                     "flows": [],
                     "rawConntrackLines": conntrack_lines,
                 }
 
-                if ports_payload is not None:
-                    data["ports"] = ports_payload
-                    if router_subnets:
-                        data["subnets"] = router_subnets
-                    if wan_details:
-                        data["wan"] = wan_details
-                    if satellite_info:
-                        data["satelliteInfo"] = satellite_info
-                    last_ports_refresh = time.monotonic()
+                if ports_snap is not None:
+                    data["ports"] = ports_snap
+                    if subnets_snap:
+                        data["subnets"] = subnets_snap
+                    if wan_snap:
+                        data["wan"] = wan_snap
+                    if sat_snap:
+                        data["satelliteInfo"] = sat_snap
+                    last_sent_ports_seq = ports_seq
 
                 if last_sys_refresh == 0.0 or mono_now - last_sys_refresh >= cfg["sys_interval"]:
                     data["system"] = read_system_metrics(len(conntrack_lines), static_info)
-                    last_sys_refresh = time.monotonic()
+                    last_sys_refresh = mono_now
                     logger.debug(
                         f"System metrics: load={data['system']['load1m']} mem={data['system']['memUsedPct']}%"
                     )
 
                 ws.send_json({"type": "probe:snapshot", "data": data})
                 logger.debug(f"Sent snapshot: flows={len(conntrack_lines)}")
-                elapsed = time.monotonic() - tick_start
-                # Enforce minimum 0.5s gap even after slow subprocess ticks so counters never back-to-back burst
-                sleep_for = max(0.5, cfg["interval"] - elapsed)
+
+                # Fixed-rate monotonic schedule keeps tick cadence rock-steady at cfg['interval']s
+                next_tick_at += cfg["interval"]
+                now_mono = time.monotonic()
+                if next_tick_at < now_mono:
+                    next_tick_at = now_mono + cfg["interval"]
+                sleep_for = max(0.25, next_tick_at - now_mono)
                 time.sleep(sleep_for)
             except Exception as exc:
                 logger.error(f"Reconnecting after error: {exc}")
                 ws.close()
                 time.sleep(3)
+                next_tick_at = time.monotonic()
     finally:
         ws.close()
         if cfg["pid_file"]:

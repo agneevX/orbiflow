@@ -118,21 +118,36 @@ export function FlowsView({
     setPage(1);
   }, [search, protoFilter, categoryFilter, showIdle]);
 
+  const latestFlowTs = useMemo(() => {
+    let maxTs = 0;
+    for (const f of flows) {
+      if (!f.ended && f.lastSeen > maxTs) maxTs = f.lastSeen;
+    }
+    return maxTs;
+  }, [flows]);
+
+  const isRecentlyActive = (f: EnrichedFlow) =>
+    hasTangibleTraffic(f.rxBps, f.txBps) ||
+    (typeof f.lastActiveAt === 'number' &&
+      f.lastActiveAt > 0 &&
+      latestFlowTs > 0 &&
+      latestFlowTs - f.lastActiveAt <= 6_000);
+
   const activeCount = useMemo(
-    () => flows.filter((f) => !f.ended && hasTangibleTraffic(f.rxBps, f.txBps)).length,
-    [flows]
+    () => flows.filter((f) => !f.ended && isRecentlyActive(f)).length,
+    [flows, latestFlowTs]
   );
   const endedCount = useMemo(() => flows.filter((f) => Boolean(f.ended)).length, [flows]);
   const idleCount = useMemo(
-    () => flows.filter((f) => !f.ended && !hasTangibleTraffic(f.rxBps, f.txBps)).length,
-    [flows]
+    () => flows.filter((f) => !f.ended && !isRecentlyActive(f)).length,
+    [flows, latestFlowTs]
   );
 
   const filteredFlows = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = flows.filter((f) => {
-      // Keep active flows AND recently ended flows visible so rows don't vanish before reading
-      if (!showIdle && !f.ended && !hasTangibleTraffic(f.rxBps, f.txBps)) return false;
+      // Keep active flows (with brief 6s pause grace) AND recently ended tangible flows visible
+      if (!showIdle && !f.ended && !isRecentlyActive(f)) return false;
       if (protoFilter !== 'ALL' && f.proto !== protoFilter) return false;
       if (protoFilter !== 'ICMP' && categoryFilter !== 'ALL' && f.dstCategory !== categoryFilter) {
         return false;
@@ -148,14 +163,17 @@ export function FlowsView({
     list.sort((a, b) => {
       const diff = a[sortBy] - b[sortBy];
       if (diff !== 0) return sortAsc ? diff : -diff;
-      // Tie-breaker: live flows before ended flows, then most recently seen/ended first
+      // Deterministic tie-breakers: live before ended, higher total volume, newest timestamp, then stable flow ID
       const aEnded = a.ended ? 1 : 0;
       const bEnded = b.ended ? 1 : 0;
       if (aEnded !== bEnded) return aEnded - bEnded;
-      return (b.endedAt || b.lastSeen) - (a.endedAt || a.lastSeen);
+      if (b.totalBytes !== a.totalBytes) return b.totalBytes - a.totalBytes;
+      const timeDiff = (b.endedAt || b.lastSeen) - (a.endedAt || a.lastSeen);
+      if (timeDiff !== 0) return timeDiff;
+      return a.id.localeCompare(b.id);
     });
     return list;
-  }, [flows, search, protoFilter, categoryFilter, showIdle, sortBy, sortAsc]);
+  }, [flows, latestFlowTs, search, protoFilter, categoryFilter, showIdle, sortBy, sortAsc]);
 
   const totalPages = Math.max(1, Math.ceil(filteredFlows.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);

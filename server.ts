@@ -366,7 +366,11 @@ async function startServer() {
         (ip) => serviceDiscovery.lookup(ip)
       );
       syncStatsAndPersist();
-      if (updated) {
+      // While a live probe or simulator is actively ticking every 3s, let the updated hostnames
+      // ride on the very next synchronized telemetry tick so Flows & Connections stay in strict
+      // lockstep with the graph cadence instead of flashing mid-tick.
+      const activelyTicking = engine.hasActiveLiveProbe() || engine.isSimulatorEnabled();
+      if (updated && !activelyTicking) {
         broadcastDashboardDelta(false);
       }
     }, 350);

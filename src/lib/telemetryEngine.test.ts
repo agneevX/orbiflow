@@ -1444,6 +1444,88 @@ test('TrafficMonitorEngine caps traffic history retention strictly to 6 hours on
   );
 });
 
+test('TrafficMonitorEngine drops idle 0-B/s sockets on close instead of popping them in as ended flows', () => {
+  const engine = new TrafficMonitorEngine();
+  const t0 = 1_750_000_000_000;
+
+  engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 1_000, txBytes: 500 },
+    arp: [{ ip: '192.168.1.40', mac: 'aa:bb:cc:00:00:40', device: 'br0', hostname: 'laptop' }],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.40',
+        dst: '142.250.190.46',
+        sport: 50001,
+        dport: 443,
+        txBytes: 10_000,
+        rxBytes: 100_000,
+      },
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.40',
+        dst: '1.1.1.1',
+        sport: 50002,
+        dport: 443,
+        txBytes: 500,
+        rxBytes: 500,
+      },
+    ],
+  });
+
+  const tick2 = engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0 + 3_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 301_000, txBytes: 20_500 },
+    arp: [{ ip: '192.168.1.40', mac: 'aa:bb:cc:00:00:40', device: 'br0', hostname: 'laptop' }],
+    flows: [
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.40',
+        dst: '142.250.190.46',
+        sport: 50001,
+        dport: 443,
+        txBytes: 30_000,
+        rxBytes: 400_000,
+      },
+      {
+        proto: 'tcp',
+        state: 'ESTABLISHED',
+        src: '192.168.1.40',
+        dst: '1.1.1.1',
+        sport: 50002,
+        dport: 443,
+        txBytes: 500,
+        rxBytes: 500,
+      },
+    ],
+  });
+  const activeFlow = tick2.dashboard.flows.find((f) => f.dstIp === '142.250.190.46');
+  const idleFlow = tick2.dashboard.flows.find((f) => f.dstIp === '1.1.1.1');
+  assert.equal(activeFlow?.lastActiveAt, t0 + 3_000);
+  assert.equal(idleFlow?.lastActiveAt, undefined);
+
+  const tick3 = engine.ingest({
+    probeId: 'router-wan',
+    timestamp: t0 + 6_000,
+    source: 'live',
+    iface: { iface: 'eth0', rxBytes: 301_000, txBytes: 20_500 },
+    arp: [{ ip: '192.168.1.40', mac: 'aa:bb:cc:00:00:40', device: 'br0', hostname: 'laptop' }],
+    flows: [],
+  });
+
+  assert.equal(tick3.dashboard.flows.length, 1);
+  assert.equal(tick3.dashboard.flows[0].dstIp, '142.250.190.46');
+  assert.equal(tick3.dashboard.flows[0].ended, true);
+});
+
 
 
 
